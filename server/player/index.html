@@ -2173,7 +2173,7 @@
       triggerActive = null;
       const c = document.getElementById('pipContainer');
       if (c) c.innerHTML = '';
-      if (was) triggerLog('info', `cleared "${was.trigger.name}" (${reason})`);
+      if (was) { triggerLog('info', `cleared "${was.trigger.name}" (${reason})`); reportTriggerStatus(); }
     }
 
     /*
@@ -2246,6 +2246,7 @@
         }, stopAfter * 1000);
       }
       triggerLog('info', `fired "${trigger.name}" via ${source} (${trigger.mode}, ${items.length} item(s))`);
+      reportTriggerStatus();
     }
 
     /**
@@ -2495,11 +2496,21 @@
         const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
 
         sock.on('message', (buf, rinfo) => {
-          handleTrigger({
-            text: buf.toString('utf8'),
-            source: 'udp',
-            sourceIp: (rinfo && rinfo.address) || 'unknown',
-          });
+          const text = buf.toString('utf8');
+          // The self-test's own datagram: answered here and NOT passed on, so it never fires a
+          // trigger and never moves the counters it exists to explain.
+          if (text.slice(0, TRIGGER_PROBE.length) === TRIGGER_PROBE) {
+            if (triggerProbeNonce && text.slice(TRIGGER_PROBE.length) === triggerProbeNonce) {
+              triggerProbeNonce = null;
+              triggerStats.multicast = triggerStats.multicast || {};
+              triggerStats.multicast.loopback = 'ok';
+              triggerStats.multicast.loopback_at = Date.now();
+              triggerLog('info', 'self-test OK — this player receives its own multicast group');
+              reportTriggerStatus();
+            }
+            return;
+          }
+          handleTrigger({ text, source: 'udp', sourceIp: (rinfo && rinfo.address) || 'unknown' });
         });
         sock.on('error', (e) => {
           triggerLog('warn', 'UDP trigger socket error: ' + ((e && e.message) || e));
@@ -2519,6 +2530,8 @@
           try { sock.setMulticastTTL(1); } catch (e) { /* older stacks */ }
           triggerStats.listeners.udp = port;
           triggerJoinGroup(sock, group, 'bind');
+          // Immediately, so the answer is on the diagnostics page before anyone asks.
+          setTimeout(() => triggerSelfTest(sock, group, port), 500);
 
           /*
            * Two rejoin mechanisms, because they cover different failures:
@@ -2544,12 +2557,106 @@
     }
 
     /*
+     * ⚠️ THE LOOPBACK SELF-TEST — the one diagnostic that needs nobody else's equipment.
+     *
+     * "No trigger arrived" has two completely different causes and one symptom. Either the
+     * integrator's panel never sent anything, or multicast is not reaching this player — and those
+     * are different site visits, different people and different afternoons. Counters distinguish
+     * them only once SOMETHING has been sent. This answers it with nothing sent at all: the player
+     * addresses its own group and reports whether it heard itself.
+     *
+     * ⚠️ The probe is recognised BEFORE the handler, so it never fires a trigger and never touches
+     * the accept/reject counters. Polluting the numbers an installer is reading, in order to
+     * produce a number for an installer to read, would be self-defeating.
+     */
+    let triggerProbeNonce = null;
+    let triggerProbeTimer = null;
+    const TRIGGER_PROBE = 'ST1-PROBE ';
+
+    function triggerSelfTest(sock, group, port) {
+      if (!sock) return;
+      try {
+        const nonce = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
+        triggerProbeNonce = nonce;
+        triggerStats.multicast = triggerStats.multicast || {};
+        triggerStats.multicast.loopback = 'testing';
+        sock.send(Buffer.from(TRIGGER_PROBE + nonce), port, group, (err) => {
+          if (err) {
+            triggerStats.multicast.loopback = 'send-failed';
+            triggerLog('warn', 'self-test could not send: ' + ((err && err.message) || err));
+          }
+        });
+        try { if (triggerProbeTimer) clearTimeout(triggerProbeTimer); } catch (e) {}
+        triggerProbeTimer = setTimeout(() => {
+          if (triggerProbeNonce === nonce) {
+            triggerStats.multicast.loopback = 'fail';
+            /*
+             * ⚠️ Worth saying loudly, because it is actionable and specific: the socket is bound and
+             * the membership is held, and the group still is not coming back. That is the network
+             * between here and the switch, not the configuration on this box.
+             */
+            triggerLog('warn', `self-test FAILED — ${group} does not reach this player ` +
+                               '(socket bound, membership held; suspect IGMP snooping or the switch)');
+            triggerProbeNonce = null;
+          }
+        }, 2000);
+      } catch (e) {
+        triggerStats.multicast.loopback = 'error';
+      }
+    }
+
+    /*
+     * Everything an installer needs, in one object, reported as CURRENT STATE.
+     *
+     * ⚠️ `last_datagram_at` counts REJECTED traffic too, and that is the whole point of the surface:
+     * a recent timestamp with zero accepts means packets ARE arriving and the token or secret is
+     * wrong; a null timestamp means nothing is arriving and it is the network. Two different
+     * problems that look identical from the dashboard without this distinction.
+     */
+    function triggerStatusPayload() {
+      const a = triggerActive;
+      return {
+        listeners: triggerStats.listeners,
+        multicast: triggerStats.multicast || null,
+        received: triggerStats.received,
+        accepted: triggerStats.accepted,
+        rejected: triggerStats.rejected,
+        last_datagram_at: triggerStats.last_datagram_at,
+        definitions: Array.isArray(triggers) ? triggers.length : 0,
+        held: triggerHeld.length,
+        active: a ? {
+          trigger_id: a.trigger.id, name: a.trigger.name, mode: a.mode,
+          since: a.since, source: a.source, lease_until: a.leaseUntil || null,
+        } : null,
+      };
+    }
+
+    function reportTriggerStatus() {
+      try {
+        if (!socket?.connected || !config.deviceId) return;
+        socket.emit('device:trigger-status', {
+          device_id: config.deviceId, status: triggerStatusPayload(),
+        });
+      } catch (e) { /* diagnostics must never break playback */ }
+    }
+
+    /*
      * ⚠️ BOOT FROM THE CACHE, before the socket connects. A site whose WAN is down comes up with
      * exactly what it had: definitions, pinned media, and a listener. Waiting for a sync would mean
      * triggers only work once the internet does, which is the opposite of the requirement.
      */
     try { startTriggerHttp(); } catch (e) { /* never let a listener break playback */ }
     try { startTriggerUdp(); } catch (e) { /* ditto */ }
+    /*
+     * ⚠️ A SLOW HEARTBEAT AS WELL AS ON-CHANGE, because the most valuable reading is the one where
+     * NOTHING changed: an installer watching `received` stay at zero while they press the button is
+     * reading the answer. Reporting only on state change would leave that screen blank for exactly
+     * the person who needs it, and only fill in once something already worked.
+     */
+    (function () {
+      const t = setInterval(reportTriggerStatus, 60000);
+      if (t && t.unref) t.unref();
+    })();
 
     // ==================== PiP overlay (#109) ====================
     // Single overlay slot, last-show-wins; duration timer (0 = until cleared); pip-clear

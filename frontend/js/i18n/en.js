@@ -2013,4 +2013,18 @@ export default {
   'trigger.saved': 'Trigger saved',
   'trigger.deleted': 'Trigger deleted',
   'trigger.confirm_delete': 'Delete this trigger?',
+
+  // Trigger diagnostics on the device page (docs/triggers-design.md §13).
+  'device.trig.title': 'Triggers',
+  'device.trig.none_seen': 'Nothing has reached this screen yet — either nothing has been sent, or it is not getting here.',
+  'device.trig.arriving_refused': 'Messages ARE reaching this screen but are being refused — check the token and the shared secret, not the network.',
+  'device.trig.working': 'Triggers are arriving and being accepted.',
+  'device.trig.self_ok': 'self-test: hears its own group',
+  'device.trig.self_fail': 'self-test: cannot hear its own group',
+  'device.trig.rejoins': '{n} rejoins',
+  'device.trig.counts': '{received} received · {accepted} accepted · {rejected} refused',
+  'device.trig.last_seen': 'last message {when}',
+  'device.trig.definitions': '{n} trigger(s) on this screen',
+  'device.trig.showing': 'Showing "{name}" (via {source})',
+  'device.trig.join_error': 'Could not join the group: {err}',
 };

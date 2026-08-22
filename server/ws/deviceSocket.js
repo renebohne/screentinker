@@ -1241,6 +1241,27 @@ module.exports = function setupDeviceSocket(io) {
     });
 
     // Heartbeat with telemetry
+    /*
+     * Trigger diagnostics — CURRENT STATE, stored on the device row rather than as a telemetry row.
+     *
+     * ⚠️ The value of this surface is one distinction: last_datagram_at counts REJECTED traffic, so
+     * a recent timestamp with zero accepts means packets ARE arriving and the token or secret is
+     * wrong, while a null timestamp means nothing is arriving and it is the network. Those are two
+     * different site visits, and without keeping rejected traffic in the count they look identical.
+     */
+    socket.on('device:trigger-status', (data) => {
+      const { device_id, status } = data || {};
+      if (!device_id || !status || device_id !== currentDeviceId) return;
+      if (!deviceExists(device_id)) return;
+      try {
+        db.prepare('UPDATE devices SET trigger_status = ?, trigger_status_at = ? WHERE id = ?')
+          .run(JSON.stringify(status).slice(0, 8000), Math.floor(Date.now() / 1000), device_id);
+      } catch (e) {
+        // A diagnostic that can break a device socket is worse than no diagnostic.
+        console.warn(`[trigger] could not store status for ${device_id}: ${e && e.message}`);
+      }
+    });
+
     socket.on('device:heartbeat', (data) => {
       const { device_id, telemetry } = data || {};
       // v4 PRIMARY + FIX 1 — UNIFORM ACK. Emitted from THIS single shared handler for every client

@@ -723,6 +723,8 @@ async function loadDevice(deviceId, activeTab = null) {
           </div>
         </div>
 
+        ${renderTriggerDiagnostics(device)}
+
         <!-- Uptime Timeline (24h) -->
         <div style="margin-top:20px">
           <h4 style="font-size:13px;margin-bottom:8px">${t('device.timeline.title')}</h4>
@@ -1070,6 +1072,67 @@ async function loadDevice(deviceId, activeTab = null) {
   } catch (err) {
     contentEl.innerHTML = `<div class="empty-state"><h3>${t('device.failed_load')}</h3><p>${esc(err.message)}</p></div>`;
   }
+}
+
+/*
+ * Trigger diagnostics.
+ *
+ * ⚠️ THIS PANEL EXISTS TO ANSWER ONE QUESTION: an installer standing in a lobby pressing a button
+ * that does nothing needs to know whether packets are reaching this screen. If they are, it is the
+ * token or the secret and they fix it from a laptop. If they are not, it is the network and they
+ * need whoever owns the switch. Those are different afternoons, and every other number here is
+ * secondary to telling them apart.
+ */
+function renderTriggerDiagnostics(device) {
+  let st = null;
+  try { st = device.trigger_status ? JSON.parse(device.trigger_status) : null; } catch (e) { st = null; }
+  if (!st) return '';
+
+  const chip = (label, tone) => `<span style="font-family:monospace;font-size:11px;background:var(--bg-input);` +
+    `border:1px solid var(--${tone || 'border'});color:var(--${tone === 'border' ? 'text' : (tone || 'text')});` +
+    `border-radius:4px;padding:2px 6px">${esc(label)}</span>`;
+
+  const mc = st.multicast || {};
+  const rej = st.rejected || {};
+  const rejTotal = Object.values(rej).reduce((n, v) => n + (Number(v) || 0), 0);
+
+  /*
+   * The verdict line. Deliberately a sentence rather than a number, because the number is only
+   * meaningful next to the other one: traffic arriving with zero accepts is a credential problem,
+   * nothing arriving at all is a network problem, and an operator should not have to derive that.
+   */
+  let verdict, tone;
+  if (!st.received) { verdict = t('device.trig.none_seen'); tone = 'text-muted'; }
+  else if (!st.accepted) { verdict = t('device.trig.arriving_refused'); tone = 'warning'; }
+  else { verdict = t('device.trig.working'); tone = 'success'; }
+
+  const loop = mc.loopback === 'ok' ? chip(t('device.trig.self_ok'), 'success')
+    : mc.loopback === 'fail' ? chip(t('device.trig.self_fail'), 'danger')
+    : mc.loopback ? chip(String(mc.loopback)) : '';
+
+  return `
+      <div style="margin-top:20px">
+        <h4 style="font-size:13px;margin-bottom:8px">${t('device.trig.title')}</h4>
+        <div style="font-size:12px;color:var(--${tone});margin-bottom:8px">${esc(verdict)}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+          ${st.listeners && st.listeners.http ? chip('HTTP :' + st.listeners.http) : ''}
+          ${st.listeners && st.listeners.udp ? chip('UDP :' + st.listeners.udp) : ''}
+          ${mc.group ? chip(mc.group + (mc.iface ? ' @ ' + mc.iface : '')) : ''}
+          ${loop}
+          ${mc.rejoin_count ? chip(t('device.trig.rejoins', { n: mc.rejoin_count })) : ''}
+        </div>
+        <div style="font-size:11px;color:var(--text-muted)">
+          ${esc(t('device.trig.counts', { received: st.received || 0, accepted: st.accepted || 0, rejected: rejTotal }))}
+          ${st.last_datagram_at ? ' · ' + esc(t('device.trig.last_seen', { when: new Date(st.last_datagram_at).toLocaleString() })) : ''}
+          · ${esc(t('device.trig.definitions', { n: st.definitions || 0 }))}
+        </div>
+        ${rejTotal ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">${
+          Object.entries(rej).filter(([, v]) => v).map(([k, v]) => esc(k + ' ' + v)).join(' · ')}</div>` : ''}
+        ${st.active ? `<div style="font-size:12px;margin-top:8px">${
+          esc(t('device.trig.showing', { name: st.active.name, source: st.active.source }))}</div>` : ''}
+        ${mc.last_join_error ? `<div style="font-size:11px;color:var(--danger);margin-top:4px">${
+          esc(t('device.trig.join_error', { err: mc.last_join_error }))}</div>` : ''}
+      </div>`;
 }
 
 function renderPlaylist(assignments) {

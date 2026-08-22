@@ -1122,6 +1122,11 @@ const migrations = [
   'ALTER TABLE devices ADD COLUMN trigger_udp_port INTEGER',
   'ALTER TABLE devices ADD COLUMN trigger_multicast_group TEXT',
   'ALTER TABLE devices ADD COLUMN trigger_clear_all_token TEXT',
+  /* ⚠️ CURRENT STATE, not history — deliberately a column and not a device_telemetry row. What an
+   * installer needs is "is multicast reaching this player RIGHT NOW", and a time series of that
+   * would grow without bound to answer a question only ever asked about the latest value. */
+  'ALTER TABLE devices ADD COLUMN trigger_status TEXT',
+  'ALTER TABLE devices ADD COLUMN trigger_status_at INTEGER',
 
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_triggers_token ON triggers (workspace_id, match_token)`,
   `CREATE INDEX IF NOT EXISTS idx_triggers_ws     ON triggers (workspace_id)`,

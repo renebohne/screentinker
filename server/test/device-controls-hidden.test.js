@@ -68,6 +68,10 @@ function render(device, telemetry) {
       return av !== '' && !av.startsWith('Web/');
     },
     TERMINAL_PRESETS: [],
+    // Panels rendered by helpers OUTSIDE the sliced template are stubbed to empty: this file is
+    // about which CONTROLS a platform is offered, and a diagnostics panel is not a control. Stubbing
+    // keeps the slice honest — the alternative is widening it until the test is about the whole page.
+    renderTriggerDiagnostics: () => '',
     localStorage: { getItem: () => null, setItem: () => {} },
     Math, Date, JSON, String, Array, Object,
   };

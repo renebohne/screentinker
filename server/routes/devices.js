@@ -5,7 +5,7 @@ const { PLATFORM_ROLES, ELEVATED_ROLES, isPlatformStaff } = require('../middlewa
 // Phase 2.2a: workspace-aware access. accessContext returns { workspaceRole, actingAs }
 // or null based on the caller's reach into a specific workspace.
 const { accessContext } = require('../lib/tenancy');
-const { stripDeviceSecrets, stripDeviceSecretsForList } = require('../lib/device-sanitize');
+const { stripDeviceSecrets, stripDeviceSecretsForList, stripTriggerSecretForTokens } = require('../lib/device-sanitize');
 const { layoutZones, orphanCountsByDevice } = require('../lib/zone-validate');
 const deviceSettings = require('../lib/device-settings'); // #150 delete+re-pair settings preservation
 const playerCapabilities = require('../lib/player-capabilities');
@@ -118,6 +118,9 @@ router.get('/:id', (req, res) => {
   if (!ctx) return res.status(403).json({ error: 'Access denied' });
   if (ctx.workspaceRole) device._workspaceRole = ctx.workspaceRole; // Pass to frontend
   if (ctx.actingAs) device._actingAs = true;
+  // SELECT d.* now carries trigger_secret. A read-scoped token must not be able to turn "list my
+  // screens" into "inject content on any of them" — see lib/device-sanitize.js.
+  stripTriggerSecretForTokens(device, req.viaToken);
 
   const telemetry = db.prepare(
     'SELECT * FROM device_telemetry WHERE device_id = ? ORDER BY reported_at DESC LIMIT 20'
