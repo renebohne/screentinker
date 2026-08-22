@@ -8,6 +8,8 @@
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const TR = require('../lib/trigger-resolve');
 
 const SECRET = 'a'.repeat(32);
@@ -161,4 +163,38 @@ test('⚠️ the module exports BOTH ways, not as an if/else', () => {
     'an else here means the window global is skipped on a node-enabled widget');
   assert.match(tail, /window\.TriggerResolve = API/);
   assert.match(tail, /module\.exports = API/);
+});
+
+/*
+ * ⚠️ THE SHARED CONTRACT. shared/trigger-vectors.json is consumed by this suite AND by the Kotlin
+ * player's TriggerResolveTest. Two implementations of a fire path in two languages WILL drift, and
+ * the drift is silent and security-relevant: one player accepting a payload another refuses is a
+ * hole nobody sees until it is used. The vectors are the artifact; the implementations are what is
+ * being checked. Same pattern as shared/schedule-vectors.json.
+ */
+test('⚠️ every shared vector holds for the JS implementation', () => {
+  const vectors = JSON.parse(fs.readFileSync(
+    path.join(__dirname, '..', '..', 'shared', 'trigger-vectors.json'), 'utf8'));
+
+  let checked = 0;
+  for (const v of vectors.vectors) {
+    const got = TR.evaluate({
+      text: v.text,
+      triggers: v.triggers !== undefined ? v.triggers : vectors.triggers,
+      deviceSecret: v.device_secret !== undefined ? v.device_secret : vectors.device_secret,
+      clearAllToken: v.clear_all_token !== undefined ? v.clear_all_token : vectors.clear_all_token,
+      source: v.source,
+    });
+    const where = `vector: ${v.description}`;
+    assert.equal(got.ok, v.expect.ok, where);
+    if (v.expect.ok) {
+      assert.equal(got.action, v.expect.action, where);
+      assert.equal(got.trigger ? got.trigger.id : null, v.expect.trigger_id, where);
+    } else {
+      assert.equal(got.reason, v.expect.reason, where);
+    }
+    checked++;
+  }
+  // A vector file that silently emptied would pass every assertion above.
+  assert.ok(checked >= 25, `only ${checked} vectors ran — the contract file looks truncated`);
 });

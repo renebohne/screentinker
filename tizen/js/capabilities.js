@@ -39,6 +39,24 @@
       'playback.video', 'playback.image', 'playback.widget', 'playback.youtube',
       'playback.zones', 'playback.transitions', 'playback.pip',
 
+      /*
+       * ⚠️ NOT trigger.http / trigger.udp, and this is a platform limit rather than an omission.
+       *
+       * External triggers require the player to LISTEN — a bound TCP port for the HTTP door, a
+       * dgram socket for the UDP one. A Tizen web application has neither: the Web Device API
+       * exposes no raw socket and no way to accept an inbound connection, so there is nothing to
+       * probe and nothing that could be made to work by trying harder. A screen on this platform is
+       * reachable by the hub and by nothing else on the LAN.
+       *
+       * Declaring these anyway would be the offline.cache mistake in a new place: a capability that
+       * passes a presence check, is advertised to the fleet, and cannot do one byte of the work. An
+       * integrator picking screens for a Crestron install needs the absence to be truthful, because
+       * the alternative is discovering it on site.
+       *
+       * If a future Tizen profile gains a socket API, probe it by TRYING — bind, then declare — and
+       * never by version-sniffing the platform.
+       */
+
       // Per-item mute, honouring the shared rule in server/lib/media-mute.js (including the
       // YouTube embed, which used to be hardcoded muted and unmutable).
       'audio.mute',
