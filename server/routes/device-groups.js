@@ -11,6 +11,7 @@ const { requireScope } = require('../middleware/apiToken');
 const { resolveSyncBackend, BACKENDS } = require('../lib/sync-backend');
 const playerCapabilities = require('../lib/player-capabilities');
 const { resolveItemDuration } = require('../lib/item-duration');
+const { stripDeviceSecretsForList } = require('../lib/device-sanitize');
 
 const VALID_COLOR = /^#[0-9A-Fa-f]{6}$/;
 const ALLOWED_COMMANDS = [
@@ -223,7 +224,18 @@ router.get('/:id/devices', requireGroupRead, (req, res) => {
     WHERE dgm.group_id = ?
     ORDER BY d.name ASC
   `).all(req.params.id);
-  res.json(devices);
+  /*
+   * ⚠️ THIS ENDPOINT HAD NO SANITIZER AT ALL, and /api/groups is token-reachable with READ scope.
+   *
+   * `SELECT d.*` carries `device_token` — the credential a device proves with on the /device
+   * socket, i.e. full impersonation — plus `settings_pin` and `trigger_secret`. A read-scoped
+   * integration token could list a group and walk away with all three for every screen in it.
+   *
+   * The device_token half predates the trigger work; the trigger secret simply widened an
+   * existing hole. Same list treatment as GET /api/devices — see lib/device-sanitize.js, whose
+   * docblock this route was quietly contradicting.
+   */
+  res.json(devices.map(stripDeviceSecretsForList));
 });
 
 // Add device to group. If the group has a playlist set (via the assign-playlist

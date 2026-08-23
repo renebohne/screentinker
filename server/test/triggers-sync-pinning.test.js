@@ -216,3 +216,35 @@ test('the capability is declared from the BOUND listener, not from the flag', ()
   assert.match(PLAYER, /triggerStats\.listeners && triggerStats\.listeners\.http\)\s*\{\s*caps\.push\('trigger\.http'\)/s,
     'a flag that is on and a port that never bound are different facts');
 });
+
+test('⚠️ a trigger-only change RE-PINS, or the media is evicted rather than merely un-cached', () => {
+  /*
+   * requestOfflineCache had exactly ONE call site, inside the content-CHANGED branch. Assign a
+   * trigger to a screen whose base playlist is stable and the unchanged branch returns before
+   * reaching it — and because `urls` is declared COMPLETE to the service worker, pruneToPlaylist()
+   * then DELETES the trigger's media. Not "not prefetched": evicted. The trigger fires against
+   * nothing on exactly the day it matters.
+   *
+   * handlePlaylistUpdate has too many live dependencies to slice and execute, so this asserts on
+   * structure — the same approach player-media-error-multiadvance.test.js takes for this shape.
+   */
+  const fn = PLAYER.slice(PLAYER.indexOf('function handlePlaylistUpdate'));
+  const unchanged = fn.slice(0, fn.indexOf("console.log('Playlist changed, updating')"));
+  assert.match(unchanged, /triggersRepin\s*=\s*true/,
+    'the adoption block must record that the trigger set changed');
+  assert.match(unchanged, /if \(triggersRepin\)\s*\{\s*requestOfflineCache\(/,
+    'the unchanged branch must re-pin before it returns');
+  // ⚠️ POSITION, not just presence. A QA pass moved this whole block BELOW the `return;` —
+  // semantically dead, textually identical — and the assertion above still passed. Reachability is
+  // the property being claimed, so it has to be the property asserted.
+  const repinAt = unchanged.indexOf('if (triggersRepin)');
+  const returnAt = unchanged.lastIndexOf('return;');
+  assert.ok(repinAt > 0 && repinAt < returnAt,
+    'the re-pin sits after the early return, so it can never execute');
+  // The keep-set must be the RAW assignments: multi-zone items live in their own lists, and a
+  // keep-set that omits them makes the worker prune assets a live zone is still playing.
+  const call = unchanged.slice(unchanged.indexOf('if (triggersRepin)'));
+  assert.match(call, /data\.assignments/,
+    'pinning the split `playlist` would prune zone media the player is still showing');
+  assert.match(call, /triggerItems\(triggers\)/, 'trigger media must be in the keep-set');
+});

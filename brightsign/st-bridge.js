@@ -427,6 +427,24 @@
     // The player IS the web player; these are properties of the renderer, not of the hardware.
     add('playback.video'); add('playback.image'); add('playback.widget'); add('playback.youtube');
     add('playback.zones');
+    /*
+     * ⚠️ DECLARED ON AN ASSUMPTION NOBODY HAS TESTED. These say the DOM's `el.muted` / `el.volume`
+     * reach the audio path. On this platform video decodes onto a HARDWARE PLANE the DOM cannot
+     * touch — that is why the screen-off path tears the source down rather than pausing — and
+     * whether AUDIO routes the same way has never been established: DWS exposes no audio-state
+     * endpoint and no JS API reports whether sound is leaving the box, so it cannot be settled
+     * remotely. It needs ears at a panel.
+     *
+     * This matters more since base-audio suppression shipped (a trigger overlay silences the base
+     * playlist): if neither property reaches the plane, that suppression is a silent no-op on
+     * exactly the hardware the feature exists for, and there is NO host-side fallback here to use
+     * instead — nothing in this bridge touches @brightsign/audiooutput.
+     *
+     * Left declared rather than withdrawn because withdrawing on a suspicion would remove a
+     * feature that may well work, and the player writes BOTH muted and volume = 0 so it survives
+     * either one being honoured. But this is the one capability here asserted rather than probed,
+     * against the rule the file states below, and it should be resolved by experiment.
+     */
     add('audio.mute'); add('audio.volume');
     add('sync.clock');            // clock-derived group sync is pure JS and needs nothing
     add('remote.input');          // synthesised DOM events; needs no host and no mouse_enabled

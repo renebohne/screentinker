@@ -34,7 +34,8 @@ function requireFleetWrite(req, res, next) {
 }
 
 const MODES = ['once', 'until_cleared'];
-const POSITIONS = ['top-right', 'top-left', 'bottom-right', 'bottom-left', 'center'];
+// POSITIONS is gone: geometry is reserved (see validate). The `position` column is still written
+// as 'center' so existing rows keep a consistent value, but nothing reads it.
 const TARGET_KINDS = ['playlist'];   // 'url' is designed for and deliberately not built yet
 
 /*
@@ -89,12 +90,94 @@ function validate(req, b, { id = null } = {}) {
    * trigger at another tenant's playlist and have the device pin and display it — the assignment
    * check on the device would never catch it, because by then it is just a playlist id.
    */
-  const pl = db.prepare('SELECT id FROM playlists WHERE id = ? AND workspace_id = ?')
+  const pl = db.prepare('SELECT id, published_snapshot FROM playlists WHERE id = ? AND workspace_id = ?')
     .get(String(b.target_ref || ''), req.workspaceId);
   if (!pl) return 'target_ref must be a playlist in this workspace';
 
-  const position = b.position == null || b.position === '' ? 'center' : b.position;
-  if (!POSITIONS.includes(position)) return `invalid position, use one of: ${POSITIONS.join(', ')}`;
+  /*
+   * ⚠️ THE TARGET MUST BE PLAYABLE OFFLINE, which is a stronger claim than "the target is a
+   * playlist" and is the one that actually matters.
+   *
+   * The reason this feature targets a playlist rather than a URL (§1) is that playlist items are
+   * library content and therefore PINNABLE. That reasoning has a hole: requestOfflineCache pins
+   * `it.filepath && !it.remote_url`, so a playlist item carrying a remote_url is never pinned, and
+   * a YouTube item cannot be pinned at all. Such a trigger passes every structural check and still
+   * fires against nothing on exactly the day the WAN is down — the failure the playlist rule was
+   * written to prevent, arriving through the front door.
+   *
+   * Caught at SAVE time, because the alternative is catching it during an alarm. YouTube is doubly
+   * disqualified: createYoutubeEmbed is a singleton shared with the base playlist, so a YouTube
+   * item in a trigger destroys the base player outright (the player drops them defensively for
+   * definitions already cached in the field).
+   */
+  /*
+   * ⚠️ FAIL CLOSED. This used to be `if (pl.published_snapshot) { … }`, so a playlist that had
+   * never been published skipped the whole check and saved with a 200 — and deviceSocket.js uses
+   * the same guard, so such a trigger syncs with `items: []` and renders nothing, forever,
+   * silently. A green save on a trigger that can never fire is the worst outcome available here.
+   */
+  if (!pl.published_snapshot) {
+    return 'that playlist has never been published — publish it first, or the trigger has nothing to render';
+  }
+  {
+    let items;
+    try { items = JSON.parse(pl.published_snapshot); } catch (e) { items = null; }
+    // A non-array parses fine and then throws on for..of — which, with no error middleware, is a
+    // 500 rather than a 400. Checked rather than caught.
+    if (!Array.isArray(items)) return "that playlist's published snapshot is unreadable — republish it";
+    if (!items.length) return 'that playlist is empty — the trigger would fire against nothing';
+    const unpinnable = [];
+    for (const it of items) {
+      if (!it) continue;
+      const label = it.filename || it.title || it.content_id || 'an item';
+      /*
+       * ⚠️ THE RULE IS "EXACTLY WHAT requestOfflineCache PINS", not a denylist of known-bad types.
+       * That function keeps `it.filepath && !it.remote_url` (server/player/index.html), so the
+       * inverse is the honest test — and it catches the two shapes a hand-written denylist missed:
+       *
+       *   • WIDGETS. A widget snapshot item has widget_id set and filepath/remote_url/mime_type
+       *     all NULL, so it matched neither branch. It is fetched LIVE from serverUrl at render
+       *     time, and sw.js documents that it cannot be service-worker cached at all — the
+       *     sandboxed iframe is an opaque origin, so the worker never sees its request. When that
+       *     fetch fails the worker serves a BLACK PAGE. An "Evacuation — proceed to Exit B" HTML
+       *     widget is the most natural thing an operator would build, and it would have produced a
+       *     fullscreen black box during a fire alarm with the WAN down.
+       *   • DANGLING CONTENT. A content row deleted after publish leaves the item in the snapshot
+       *     with every joined column NULL — no filepath, not pinnable, previously accepted.
+       */
+      if (it.mime_type === 'video/youtube' || it.youtube_id) unpinnable.push(`${label} (YouTube)`);
+      else if (it.remote_url) unpinnable.push(`${label} (remote URL)`);
+      else if (it.widget_id) unpinnable.push(`${label} (widget — re-rendered from the server on every play)`);
+      else if (!it.filepath) unpinnable.push(`${label} (no local file — deleted from the library?)`);
+    }
+    if (unpinnable.length) {
+      return `that playlist cannot be held on the device for offline playback: `
+        + `${unpinnable.slice(0, 3).join(', ')}${unpinnable.length > 3 ? `, +${unpinnable.length - 3} more` : ''}. `
+        + 'A trigger must fire with the network down, so its playlist may only contain uploaded '
+        + 'media. See docs/triggers-design.md §1.';
+    }
+  }
+
+  /*
+   * ⚠️ GEOMETRY IS RESERVED, and saying so is the point.
+   *
+   * These five were copied from the PiP contract and never wired to anything: the renderer
+   * discards them (a trigger is always fullscreen and opaque), the shared cross-platform contract
+   * omits them, and they are no longer projected to devices. Accepting them with a 200 tells an
+   * API client the overlay was positioned when it was not — a lie that only surfaces during an
+   * emergency. A 400 naming the reason is worth more than a 200 that is wrong.
+   *
+   * The columns remain (SQLite drops need a table rebuild, and this schema treats unused columns
+   * as the no-migration hook). If a non-fullscreen mode is wanted, add ONE semantic field
+   * (takeover | banner) rather than resurrecting five raw CSS primitives.
+   */
+  const geo = ['width', 'height', 'opacity', 'border_radius']
+    .filter((k) => b[k] != null && b[k] !== '');
+  if (b.position != null && b.position !== '' && b.position !== 'center') geo.unshift('position');
+  if (geo.length) {
+    return `${geo.join(', ')} ${geo.length > 1 ? 'are' : 'is'} reserved — a trigger renders `
+      + 'fullscreen; see docs/triggers-design.md §4';
+  }
 
   if (!intInRange(b.max_duration_sec, 0, 0, 86400).ok) return 'max_duration_sec must be 0-86400 (0 = no cap)';
   if (!intInRange(b.priority, 0, -1000, 1000).ok) return 'priority must be -1000..1000';
@@ -106,12 +189,37 @@ function validate(req, b, { id = null } = {}) {
     if (!intInRange(b.lease_sec, 0, 5, 86400).ok) return 'lease_sec must be 5-86400 seconds';
   }
 
-  const clash = id
-    ? db.prepare('SELECT id FROM triggers WHERE workspace_id = ? AND match_token = ? AND id != ?')
-      .get(req.workspaceId, String(b.match_token), id)
-    : db.prepare('SELECT id FROM triggers WHERE workspace_id = ? AND match_token = ?')
-      .get(req.workspaceId, String(b.match_token));
-  if (clash) return 'match_token is already used by another trigger in this workspace';
+  /*
+   * ⚠️ FIRE AND CLEAR TOKENS SHARE ONE NAMESPACE, so uniqueness has to span both columns.
+   *
+   * evaluate() walks the device's triggers in query order and, per trigger, tests match_token and
+   * then clear_token. So if trigger A's clear_token equals trigger B's match_token, the token
+   * resolves to whichever row the SELECT happened to return first — and the losing case is the bad
+   * one: an emergency trigger becomes silently UNFIRABLE because an unrelated trigger's clear
+   * shadows it. Nothing logs, because from the resolver's point of view the token matched.
+   *
+   * The unique index only covers (workspace_id, match_token), and an index error would surface as
+   * a 500 rather than something an operator can act on, so this is checked here and named.
+   */
+  const tokens = [String(b.match_token)];
+  if (b.clear_token) tokens.push(String(b.clear_token));
+  const rows = id
+    ? db.prepare('SELECT match_token, clear_token FROM triggers WHERE workspace_id = ? AND id != ?')
+      .all(req.workspaceId, id)
+    : db.prepare('SELECT match_token, clear_token FROM triggers WHERE workspace_id = ?')
+      .all(req.workspaceId);
+  const taken = new Set();
+  for (const r of rows) {
+    if (r.match_token) taken.add(r.match_token);
+    if (r.clear_token) taken.add(r.clear_token);
+  }
+  for (const tok of tokens) {
+    if (taken.has(tok)) {
+      return `"${tok}" is already used as a fire or clear token by another trigger in this `
+        + 'workspace — fire and clear tokens share one namespace, and a duplicate would resolve '
+        + 'to whichever trigger the database returned first';
+    }
+  }
 
   return null;
 }
@@ -175,6 +283,38 @@ router.get('/:id', (req, res) => {
   res.json(withAssignments(row));
 });
 
+/**
+ * Push the new definitions AND their media to every device this trigger touches, now.
+ *
+ * ⚠️ THIS IS THE HALF THAT MAKES THE OFFLINE GUARANTEE TRUE. A trigger's whole point is that it
+ * fires with the WAN down, which requires the device to be holding both the definition and the
+ * target playlist's content BEFORE anything goes wrong. Without a push, none of that happens until
+ * the panel next reconnects — for a screen that has been up for weeks, effectively never. The
+ * definition sits in the database looking configured, the media is not pinned, and the first time
+ * anyone learns otherwise is when an alarm fires against nothing.
+ *
+ * The payload the device receives carries `triggers` with their playlists resolved inline, and the
+ * player's own handler re-pins on a trigger-set change — so one playlist-update does both jobs.
+ *
+ * `before` lets a delete/reassign reach the devices that are LOSING the trigger as well as the
+ * ones gaining it; a device dropped from the assignment list still needs to be told, or it keeps
+ * a definition nobody can see in the dashboard.
+ */
+function pushTrigger(req, triggerId, before) {
+  try {
+    const io = req.app && req.app.get('io');
+    if (!io) return;
+    const { buildPlaylistPayload } = require('../ws/deviceSocket');
+    const commandQueue = require('../lib/command-queue');
+    const { devicesForTrigger } = require('../lib/device-triggers');
+    const ns = io.of('/device');
+    const ids = new Set(before || []);
+    for (const id of devicesForTrigger(db, triggerId)) ids.add(id);
+    for (const id of ids) commandQueue.queueOrEmitPlaylistUpdate(ns, id, buildPlaylistPayload);
+    if (ids.size) console.log(`[trigger] pushed ${triggerId} to ${ids.size} device(s)`);
+  } catch (e) { console.warn(`[trigger] push failed: ${e && e.message}`); }
+}
+
 router.post('/', requireScope('full'), requireFleetWrite, (req, res) => {
   const b = req.body || {};
   const bad = validate(req, b);
@@ -195,6 +335,7 @@ router.post('/', requireScope('full'), requireFleetWrite, (req, res) => {
   if (aErr) { db.prepare('DELETE FROM triggers WHERE id = ?').run(id); return res.status(400).json({ error: aErr }); }
 
   console.log(`[trigger] created ${id} "${c.name}" token=${c.match_token} mode=${c.mode}`);
+  pushTrigger(req, id);
   res.json(withAssignments(db.prepare('SELECT * FROM triggers WHERE id = ?').get(id)));
 });
 
@@ -206,6 +347,11 @@ router.put('/:id', requireScope('full'), requireFleetWrite, (req, res) => {
   const b = req.body || {};
   const bad = validate(req, b, { id: existing.id });
   if (bad) return res.status(400).json({ error: bad });
+
+  // Captured before the assignment rewrite, so a device REMOVED from the list is still told —
+  // otherwise it holds a definition that no longer appears anywhere in the dashboard.
+  const { devicesForTrigger } = require('../lib/device-triggers');
+  const before = devicesForTrigger(db, existing.id);
 
   const c = columnsFrom(b);
   db.prepare(`UPDATE triggers SET
@@ -223,6 +369,7 @@ router.put('/:id', requireScope('full'), requireFleetWrite, (req, res) => {
   }
 
   console.log(`[trigger] updated ${existing.id} "${c.name}"`);
+  pushTrigger(req, existing.id, before);
   res.json(withAssignments(db.prepare('SELECT * FROM triggers WHERE id = ?').get(existing.id)));
 });
 
@@ -230,9 +377,15 @@ router.delete('/:id', requireScope('full'), requireFleetWrite, (req, res) => {
   const existing = db.prepare('SELECT id FROM triggers WHERE id = ? AND workspace_id = ?')
     .get(req.params.id, req.workspaceId);
   if (!existing) return res.status(404).json({ error: 'trigger not found' });
-  // trigger_assignments cascades on this delete (FK declared inline, foreign_keys is ON).
+  // ⚠️ Read the affected devices BEFORE the row goes: trigger_assignments cascades on this delete
+  // (FK declared inline, foreign_keys is ON), so afterwards there is nothing left to ask.
+  const { devicesForTrigger } = require('../lib/device-triggers');
+  const before = devicesForTrigger(db, existing.id);
   db.prepare('DELETE FROM triggers WHERE id = ?').run(existing.id);
   console.log(`[trigger] deleted ${existing.id}`);
+  // The push also frees the pinned media: the player's keep-set no longer lists it, so the
+  // service worker's prune reclaims the space on the next update rather than holding it forever.
+  pushTrigger(req, existing.id, before);
   res.json({ success: true });
 });
 

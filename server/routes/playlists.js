@@ -154,9 +154,22 @@ function pushToDevices(playlistId, reqOrIo) {
     const { buildPlaylistPayload } = require('../ws/deviceSocket');
     const commandQueue = require('../lib/command-queue');
     const deviceNs = io.of('/device');
-    const devices = db.prepare('SELECT id FROM devices WHERE playlist_id = ?').all(playlistId);
-    for (const d of devices) {
-      commandQueue.queueOrEmitPlaylistUpdate(deviceNs, d.id, buildPlaylistPayload);
+    const ids = new Set(
+      db.prepare('SELECT id FROM devices WHERE playlist_id = ?').all(playlistId).map((d) => d.id)
+    );
+    /*
+     * ⚠️ ALSO the devices that hold this playlist as a TRIGGER TARGET. The base-playlist query
+     * alone misses them entirely: a screen can reference a playlist solely through a trigger, and
+     * such a device is never in `WHERE playlist_id = ?`. Without this an operator swaps the
+     * evacuation notice, publishes, sees "Published" — and every panel keeps firing the OLD items,
+     * with the old asset still pinned and the new one never fetched, until it happens to reconnect.
+     */
+    try {
+      const { devicesForTriggerTarget } = require('../lib/device-triggers');
+      for (const id of devicesForTriggerTarget(db, playlistId)) ids.add(id);
+    } catch (e) { console.warn(`[trigger] target fan-out failed: ${e && e.message}`); }
+    for (const id of ids) {
+      commandQueue.queueOrEmitPlaylistUpdate(deviceNs, id, buildPlaylistPayload);
     }
   } catch (e) { /* silent */ }
 }

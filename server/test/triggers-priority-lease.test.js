@@ -15,6 +15,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const TR = require('../lib/trigger-resolve.js');
+const { makeDocument } = require('./helpers/fake-overlay-dom');
 
 const PLAYER = fs.readFileSync(path.join(__dirname, '..', 'player', 'index.html'), 'utf8');
 const SECRET = 'p'.repeat(16);
@@ -35,10 +36,10 @@ function boot(triggers) {
   const rendered = [];
   const env = {
     window: { TriggerResolve: TR, __debugLog_push() {} },
-    document: {
-      getElementById: () => ({ innerHTML: '', appendChild() {}, style: {} }),
-      createElement: () => ({ style: { cssText: '' }, className: '', appendChild() {} }),
-    },
+    // A #pipContainer fake that models children, classNames and remove() — the previous inline
+    // fake had no querySelectorAll, so scoped teardown threw, the throw escaped into the HTTP
+    // handler, and the test hung instead of failing. See helpers/fake-overlay-dom.js.
+    document: makeDocument(),
     console: { log() {}, warn() {} },
     // Controllable clock: intervals are collected and fired by hand, so a lease can expire in a
     // test without the test taking a minute.

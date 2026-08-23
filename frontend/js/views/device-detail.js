@@ -723,6 +723,7 @@ async function loadDevice(deviceId, activeTab = null) {
           </div>
         </div>
 
+        ${renderTriggerConfig(device)}
         ${renderTriggerDiagnostics(device)}
 
         <!-- Uptime Timeline (24h) -->
@@ -1083,6 +1084,60 @@ async function loadDevice(deviceId, activeTab = null) {
  * need whoever owns the switch. Those are different afternoons, and every other number here is
  * secondary to telling them apart.
  */
+/*
+ * The listener settings — the half that makes triggers reachable at all.
+ *
+ * ⚠️ Until this existed the feature was INERT on any system configured through the product: nothing
+ * wrote trigger_secret or the accept flags, so the secret was always NULL, every payload was
+ * rejected as bad_secret, and no listener bound. The diagnostics panel below it would faithfully
+ * report "nothing has arrived" forever, which was true and useless.
+ *
+ * Both doors default OFF and are shown as separate switches on purpose: UDP is the larger risk of
+ * the two, because one datagram to a broadcast or multicast address reaches EVERY player on the
+ * segment at once, which is categorically more than a unicast POST at one host.
+ */
+function renderTriggerConfig(device) {
+  const secretSet = !!device.trigger_secret;
+  const box = 'padding:6px 8px;background:#0b0f1a;border:1px solid var(--border);border-radius:6px;color:var(--text)';
+  return `
+      <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+        <div style="font-weight:600;margin-bottom:4px">${t('device.trigcfg.title')}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${esc(t('device.trigcfg.intro'))}</div>
+
+        <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+          <label style="display:flex;gap:6px;align-items:center;font-size:13px">
+            <input type="checkbox" id="trigHttp" ${device.triggers_accept_http ? 'checked' : ''}>
+            ${t('device.trigcfg.accept_http')}
+          </label>
+          <input id="trigHttpPort" type="number" min="1024" max="65534" placeholder="8079"
+                 value="${device.trigger_http_port || ''}" style="width:100px;${box}">
+          <label style="display:flex;gap:6px;align-items:center;font-size:13px">
+            <input type="checkbox" id="trigUdp" ${device.triggers_accept_udp ? 'checked' : ''}>
+            ${t('device.trigcfg.accept_udp')}
+          </label>
+          <input id="trigUdpPort" type="number" min="1024" max="65534" placeholder="7847"
+                 value="${device.trigger_udp_port || ''}" style="width:100px;${box}">
+        </div>
+
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+          <input id="trigGroup" type="text" placeholder="${t('device.trigcfg.group_ph')}"
+                 value="${esc(device.trigger_multicast_group || '')}" style="width:180px;${box}">
+          <input id="trigClearAll" type="text" placeholder="${t('device.trigcfg.clear_all_ph')}"
+                 value="${esc(device.trigger_clear_all_token || '')}" style="width:180px;${box}">
+          <button class="btn btn-primary btn-sm" id="saveTrigCfgBtn">${t('device.trigcfg.save')}</button>
+        </div>
+
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+          <span style="font-size:13px">${t('device.trigcfg.secret')}:</span>
+          <code id="trigSecretVal" style="font-size:12px;background:#0b0f1a;border:1px solid var(--border);
+                border-radius:6px;padding:4px 8px">${secretSet ? esc(device.trigger_secret) : t('device.trigcfg.secret_unset')}</code>
+          <button class="btn btn-secondary btn-sm" id="rotateTrigSecretBtn">
+            ${secretSet ? t('device.trigcfg.rotate') : t('device.trigcfg.generate')}</button>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:6px">${esc(t('device.trigcfg.secret_note'))}</div>
+      </div>`;
+}
+
 function renderTriggerDiagnostics(device) {
   let st = null;
   try { st = device.trigger_status ? JSON.parse(device.trigger_status) : null; } catch (e) { st = null; }
@@ -1733,6 +1788,46 @@ function setupActions(device) {
   document.getElementById('clearPipBtn')?.addEventListener('click', async () => {
     try { await api.clearPip(device.id); showToast('Overlay cleared', 'success'); }
     catch (err) { showToast(err.message, 'error'); }
+  });
+
+  // Trigger listener settings. `delivered` distinguishes "the panel has this now" from "it will
+  // pick it up when it reconnects" — the operator is told which, rather than left to assume.
+  document.getElementById('saveTrigCfgBtn')?.addEventListener('click', async () => {
+    const num = (id) => {
+      const v = (document.getElementById(id)?.value || '').trim();
+      return v === '' ? null : Number(v);
+    };
+    const str = (id) => {
+      const v = (document.getElementById(id)?.value || '').trim();
+      return v === '' ? null : v;
+    };
+    try {
+      const res = await api.setTriggerConfig(device.id, {
+        accept_http: !!document.getElementById('trigHttp')?.checked,
+        accept_udp: !!document.getElementById('trigUdp')?.checked,
+        http_port: num('trigHttpPort'),
+        udp_port: num('trigUdpPort'),
+        multicast_group: str('trigGroup'),
+        clear_all_token: str('trigClearAll'),
+      });
+      showToast(res.delivered ? t('device.trigcfg.saved_live') : t('device.trigcfg.saved_queued'),
+        res.delivered ? 'success' : 'warning');
+    } catch (err) { showToast(err.message, 'error'); }
+  });
+
+  document.getElementById('rotateTrigSecretBtn')?.addEventListener('click', async () => {
+    // ⚠️ Rotating invalidates whatever the integrator already typed into their control system, and
+    // there is no way to un-rotate. Confirm rather than treating it as an ordinary button.
+    if (!confirm(t('device.trigcfg.rotate_confirm'))) return;
+    try {
+      const res = await api.setTriggerSecret(device.id, { rotate: true });
+      if (res.secret) {
+        const el = document.getElementById('trigSecretVal');
+        if (el) el.textContent = res.secret;
+      }
+      showToast(res.delivered ? t('device.trigcfg.saved_live') : t('device.trigcfg.saved_queued'),
+        res.delivered ? 'success' : 'warning');
+    } catch (err) { showToast(err.message, 'error'); }
   });
 }
 

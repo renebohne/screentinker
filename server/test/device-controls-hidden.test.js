@@ -72,6 +72,11 @@ function render(device, telemetry) {
     // about which CONTROLS a platform is offered, and a diagnostics panel is not a control. Stubbing
     // keeps the slice honest — the alternative is widening it until the test is about the whole page.
     renderTriggerDiagnostics: () => '',
+    // Same reason as the line above: this harness evaluates the TEMPLATE in a bare VM, so every
+    // helper the template calls has to be stubbed or it is a ReferenceError rather than a missing
+    // section. The subject here is which CONTROLS a platform is offered, not what the trigger
+    // panels render.
+    renderTriggerConfig: () => '',
     localStorage: { getItem: () => null, setItem: () => {} },
     Math, Date, JSON, String, Array, Object,
   };

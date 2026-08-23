@@ -39,6 +39,58 @@ object TriggerResolve {
     )
 
     /** A closed set: these are the counters an installer reads. */
+    /**
+     * Per-source token bucket — the Kotlin half of createRateLimiter in lib/trigger-resolve.js,
+     * with the same defaults (5/s, burst 10, 50/s global).
+     *
+     * ⚠️ The point is not to stop a determined flood; UDP from a LAN cannot be stopped here. It is
+     * to bound the WORK a flood causes, so a chatty or hostile sender cannot turn a screen into a
+     * strobe or a log into a firehose. Android had no limiter at all, which mattered more once the
+     * HTTP door accepted GET: a door reachable from a browser address bar, a curl loop or an AMX
+     * retry storm had no per-source bound on this platform while the web player did.
+     *
+     * Keyed by source address with a global ceiling, so a spoofed source per packet cannot walk
+     * around the per-source limit. The map is bounded for the same reason.
+     */
+    class RateLimiter(
+        private val perSec: Double = 5.0,
+        private val burst: Double = 10.0,
+        private val globalPerSec: Double = 50.0,
+        private val maxKeys: Int = 512
+    ) {
+        private class Bucket(var tokens: Double, var last: Long)
+        private val buckets = LinkedHashMap<String, Bucket>()
+        private var gTokens = globalPerSec
+        private var gLast = 0L
+
+        @Synchronized
+        fun allow(key: String, now: Long): Boolean {
+            if (gLast == 0L) gLast = now
+            gTokens = minOf(globalPerSec, gTokens + ((now - gLast) / 1000.0) * globalPerSec)
+            gLast = now
+            if (gTokens < 1.0) return false
+
+            var b = buckets[key]
+            if (b == null) {
+                // Bounded: a spoofed-source flood would otherwise grow this without limit, which is
+                // a slow memory leak with an attacker holding the tap.
+                if (buckets.size >= maxKeys) {
+                    val oldest = buckets.keys.firstOrNull()
+                    if (oldest != null) buckets.remove(oldest)
+                }
+                b = Bucket(burst, now)
+                buckets[key] = b
+            }
+            b.tokens = minOf(burst, b.tokens + ((now - b.last) / 1000.0) * perSec)
+            b.last = now
+            if (b.tokens < 1.0) return false
+
+            b.tokens -= 1.0
+            gTokens -= 1.0
+            return true
+        }
+    }
+
     enum class Reason { BAD_MAGIC, MALFORMED, TOO_LARGE, BAD_SECRET, UNKNOWN_TOKEN;
         override fun toString() = name.lowercase()
     }

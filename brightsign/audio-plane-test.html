@@ -1,0 +1,61 @@
+<!doctype html><html><head><meta charset="utf-8"><title>ST audio plane probe</title>
+<style>body{margin:0;background:#111;color:#ddd;font:14px monospace}#log{padding:8px;white-space:pre-wrap}
+video{width:480px;height:270px;background:#000}</style></head><body>
+<div id="log">booting…</div><video id="v" playsinline></video>
+<script>
+/*
+ * Does el.muted / el.volume reach the audio path on a BrightSign hardware plane?
+ *
+ * ⚠️ What this CAN establish: whether the properties stick, whether the platform exposes an
+ * independent audio API, and whether hwz is actually engaged for this element. What it CANNOT
+ * establish is whether sound is leaving the box — no JS API and no DWS endpoint reports that.
+ * The audible half needs ears at the panel; this narrows what those ears have to distinguish.
+ */
+var out = [];
+function log(s) { out.push(s); document.getElementById('log').textContent = out.join('\n'); }
+function j(o) { try { return JSON.stringify(o); } catch (e) { return String(o); } }
+
+log('UA: ' + navigator.userAgent);
+log('--- platform audio APIs ---');
+['@brightsign/audiooutput','@brightsign/systemtime','@brightsign/videooutput'].forEach(function (m) {
+  try { require(m); log('  require(' + m + ') OK'); }
+  catch (e) { log('  require(' + m + ') FAILED: ' + (e && e.message)); }
+});
+try {
+  var AudioOutput = require('@brightsign/audiooutput');
+  var ao = new AudioOutput('analog');
+  log('  AudioOutput analog constructed; keys=' + j(Object.keys(ao)));
+  ['getVolume','setVolume','getMute','setMute'].forEach(function (fn) {
+    log('    ' + fn + ': ' + typeof ao[fn]);
+  });
+  try { log('    getVolume() -> ' + j(ao.getVolume && ao.getVolume())); } catch (e) { log('    getVolume threw: ' + e.message); }
+} catch (e) { log('  AudioOutput unavailable: ' + (e && e.message)); }
+
+var v = document.getElementById('v');
+// A tone the operator can hear. Falls back to a silent element if the asset is missing, which the
+// log makes obvious rather than leaving it ambiguous.
+v.src = (location.search.match(/src=([^&]+)/) || [])[1] ? decodeURIComponent(RegExp.$1) : 'test.mp4';
+v.autoplay = true; v.loop = true;
+v.addEventListener('error', function () { log('!! video error code=' + (v.error && v.error.code) + ' src=' + v.src); });
+v.addEventListener('playing', function () { log('video PLAYING readyState=' + v.readyState); });
+
+function report(tag) {
+  log(tag + ' muted=' + v.muted + ' volume=' + v.volume + ' paused=' + v.paused +
+      ' currentTime=' + (v.currentTime || 0).toFixed(1));
+}
+setTimeout(function () {
+  v.play().catch(function (e) { log('play() rejected: ' + (e && e.name)); });
+  report('t+1s  baseline (EXPECT AUDIBLE)');
+}, 1000);
+setTimeout(function () { v.muted = true; report('t+6s  after muted=true (LISTEN: still audible?)'); }, 6000);
+setTimeout(function () { v.muted = false; v.volume = 0; report('t+12s after volume=0 (LISTEN: still audible?)'); }, 12000);
+setTimeout(function () { v.muted = true; v.volume = 0; report('t+18s after BOTH (LISTEN: still audible?)'); }, 18000);
+setTimeout(function () { v.muted = false; v.volume = 1; report('t+24s restored (EXPECT AUDIBLE AGAIN)'); }, 24000);
+setTimeout(function () {
+  log('--- verdict input ---');
+  log('If it went silent at t+6s  -> el.muted reaches the plane. The shipped fix works as written.');
+  log('If it went silent only at t+12s -> muted is ignored, volume=0 is honoured. Fix still works.');
+  log('If it stayed audible through t+18s -> NEITHER reaches the plane; a host-bridge audio');
+  log('   call is required and the base-audio suppression is a no-op on this hardware.');
+}, 26000);
+</script></body></html>

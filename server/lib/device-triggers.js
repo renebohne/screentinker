@@ -54,8 +54,21 @@ function projectTrigger(t, items) {
     // ⚠️ target_ref travels too, but only so the player can LOG which playlist it rendered. It is
     // never resolved on the device; `items` is the content.
     target_ref: t.target_ref || null,
-    position: t.position || 'center',
-    width: t.width, height: t.height, opacity: t.opacity, border_radius: t.border_radius,
+    /*
+     * ⚠️ position / width / height / opacity / border_radius are DELIBERATELY NOT PROJECTED.
+     *
+     * They were copied wholesale from the PiP contract and are dead in every direction: no client
+     * writes them (frontend/js/views/triggers.js sets none), four of the five never entered the
+     * player's change signature so an edit could not reach a device anyway, the renderer discards
+     * all five (triggerFire hardcodes inset:0 opaque black), the Android/shared contract
+     * (TriggerResolve.kt, shared/trigger-vectors.json) has never had them, and no test asserts one.
+     *
+     * Sending a field the device provably ignores is how the next person concludes it works. The
+     * COLUMNS stay — this schema treats unused columns as the no-migration hook, and SQLite would
+     * need a table rebuild to drop them. If a non-fullscreen mode is wanted later, the right shape
+     * is ONE semantic field (takeover | banner), which is also what the mass-notification vendors
+     * expose, rather than five raw CSS primitives.
+     */
     mode: t.mode,
     max_duration_sec: t.max_duration_sec == null ? 0 : t.max_duration_sec,
     lease_sec: t.lease_sec == null ? null : t.lease_sec,
@@ -83,4 +96,55 @@ function triggerMediaUrls(triggers, mediaUrl) {
   return out;
 }
 
-module.exports = { triggersForDevice, projectTrigger, triggerMediaUrls };
+/**
+ * Every device that would render this trigger — directly assigned, or via a group.
+ *
+ * ⚠️ THIS IS WHAT MAKES A NEW TRIGGER ARRIVE. Creating, editing, assigning or deleting a trigger
+ * used to reach devices only on their next reconnect, which for a panel that has been up for
+ * weeks means never. The definition would sit in the database looking configured while the screen
+ * knew nothing about it — and the media it needs would not be pinned either, so the first time
+ * anyone found out was when the alarm fired against nothing.
+ */
+function devicesForTrigger(db, triggerId) {
+  return db.prepare(`
+    SELECT DISTINCT d.id
+      FROM devices d
+      JOIN triggers t ON t.id = ? AND t.workspace_id = d.workspace_id
+      JOIN trigger_assignments ta ON ta.trigger_id = t.id
+     WHERE (
+       (ta.target_type = 'device' AND ta.target_id = d.id)
+       OR (ta.target_type = 'group' AND ta.target_id IN (
+             SELECT group_id FROM device_group_members WHERE device_id = d.id))
+     )
+  `).all(triggerId).map((r) => r.id);
+}
+
+/**
+ * Every device that holds this playlist as a TRIGGER TARGET rather than as its base playlist.
+ *
+ * ⚠️ Publishing a playlist pushed only to devices whose `playlist_id` matched it, so a screen that
+ * referenced it solely through a trigger never heard about the edit. The operator swaps the
+ * evacuation notice, sees "Published", and every panel keeps firing the OLD items — with the old
+ * asset still pinned and the new one never fetched.
+ */
+function devicesForTriggerTarget(db, playlistId) {
+  return db.prepare(`
+    SELECT DISTINCT d.id
+      FROM devices d
+      JOIN triggers t ON t.workspace_id = d.workspace_id
+                     AND t.enabled = 1
+                     AND t.target_kind = 'playlist'
+                     AND t.target_ref = ?
+      JOIN trigger_assignments ta ON ta.trigger_id = t.id
+     WHERE (
+       (ta.target_type = 'device' AND ta.target_id = d.id)
+       OR (ta.target_type = 'group' AND ta.target_id IN (
+             SELECT group_id FROM device_group_members WHERE device_id = d.id))
+     )
+  `).all(playlistId).map((r) => r.id);
+}
+
+module.exports = {
+  triggersForDevice, projectTrigger, triggerMediaUrls,
+  devicesForTrigger, devicesForTriggerTarget,
+};

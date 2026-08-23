@@ -23,7 +23,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * more than a unicast POST at one host.
  */
 class TriggerListeners(
-    private val onPayload: (text: String, source: String, sourceIp: String) -> Unit,
+    /**
+     * ⚠️ RETURNS THE VERDICT. This used to return Unit, so the HTTP door could only answer "did it
+     * parse", not "was it accepted" — and every well-formed request got 200 {"ok":true}, wrong
+     * secret included, while the web player answered 400 bad_secret for the same bytes. Returning
+     * null is allowed (the UDP path has nobody to answer) and is treated as "no opinion".
+     */
+    private val onPayload: (text: String, source: String, sourceIp: String) -> TriggerResolve.Verdict?,
     private val onState: (Stats) -> Unit = {}
 ) {
 
@@ -53,6 +59,11 @@ class TriggerListeners(
         const val DEFAULT_HTTP_PORT = 8079
         const val DEFAULT_GROUP = "239.255.42.1"
         private const val PROBE = "ST1-PROBE "
+
+        // The web player's two anchored form-detection regexes, ported verbatim so the two doors
+        // classify the same body the same way. See startTriggerHttp in server/player/index.html.
+        private val FORM_SHAPE = Regex("^[^=&\\s]+=[^&]*(&|$)")
+        private val FORM_TOKEN = Regex("(^|&)token=")
 
         /**
          * ⚠️ NAMING AN INTERFACE IS NOT OPTIONAL. joinGroup with no interface lets the OS choose, and
@@ -128,7 +139,8 @@ class TriggerListeners(
                         }
                         continue
                     }
-                    onPayload(text, "udp", from)
+                    // Same liberal framing as the HTTP door — see wireClean.
+                    onPayload(wireClean(text), "udp", from)
                 }
             } catch (e: Throwable) {
                 Log.w(TAG, "[trigger] UDP listener failed: ${e.message}")
@@ -211,6 +223,59 @@ class TriggerListeners(
         }
     }
 
+    // ─────────────────────────── framing ───────────────────────────
+
+    /*
+     * ⚠️ BE LIBERAL ABOUT FRAMING — the control-system world is not consistent about it and does
+     * not consider that a bug. Crestron's own worked example emits HTTP/1.0 with BARE LF, not
+     * CRLF. Q-SYS ships an EOL constant literally called `Any` ("any sequence of carriage return
+     * and/or linefeed characters") plus a `Null` (single 0 byte) mode — the existence of `Any` is
+     * the AV industry telling you line endings arrive however they arrive. AMX appends $0D,$0A by
+     * hand, per site, and sometimes forgets.
+     *
+     * We also TRIM, and this comment documents that: BrightSign does not, its docs say
+     * "leading/trailing spaces do matter", and it is a recurring support burden. A trailing space
+     * must never be the reason an evacuation notice does not appear.
+     *
+     * The 1024 cap is Extron's, not ours: ControlScript truncates UDP payloads at 1024 bytes and
+     * delivers at most 1024 per receive event, so a longer message is not one we could have been
+     * sent intact. Must stay identical to wireClean() in server/player/index.html.
+     */
+    private fun wireClean(s: String): String {
+        val capped = if (s.length > 1024) s.substring(0, 1024) else s
+        /*
+         * ⚠️ ONE COMBINED CLASS, not strip-then-trim, and identical to wireClean() in
+         * server/player/index.html. Stripping terminators and THEN trimming meant any whitespace
+         * AFTER a NUL/CR/LF defeated the cleanup entirely — "TOKEN\r\n\u0000  " survived intact and
+         * was rejected as malformed. That is exactly the documented target (Q-SYS's Null EOL plus
+         * AMX's hand-appended padding), and it was broken identically on both platforms.
+         *
+         * \uFEFF is named explicitly: a UTF-8 BOM is whitespace to neither language's trim(), and
+         * .NET senders emit one. Without it the web player fired and the Android panel beside it
+         * answered bad_magic for the same bytes.
+         */
+        return capped.trim { it.isWhitespace() || it == '\u0000' || it == '\uFEFF' }
+    }
+
+    /** Minimal query parser — mirrors parseQuery() in the web player. */
+    private fun parseQuery(url: String): Map<String, String> {
+        val out = HashMap<String, String>()
+        val i = url.indexOf('?')
+        if (i < 0) return out
+        for (pair in url.substring(i + 1).split('&')) {
+            if (pair.isEmpty()) continue
+            val eq = pair.indexOf('=')
+            val k = if (eq < 0) pair else pair.substring(0, eq)
+            val v = if (eq < 0) "" else pair.substring(eq + 1)
+            try {
+                out[java.net.URLDecoder.decode(k, "UTF-8")] = java.net.URLDecoder.decode(v, "UTF-8")
+            } catch (e: Throwable) {
+                out[k] = v   // a bad %-escape must not lose the whole request
+            }
+        }
+        return out
+    }
+
     // ───────────────────────────── HTTP ─────────────────────────────
 
     /**
@@ -248,23 +313,111 @@ class TriggerListeners(
                                 if (n > 0) String(chars, 0, n) else ""
                             } else ""
 
-                            val ok = requestLine.startsWith("POST")
-                            if (ok) {
-                                // Accept the raw line OR a JSON envelope: some gear can only POST a
-                                // string, some can only POST JSON. Same wire format underneath.
-                                val text = try {
-                                    val j = org.json.JSONObject(body)
-                                    if (j.has("token")) "ST1 " + j.optString("secret", "") + " " + j.optString("token")
-                                    else body.trim()
-                                } catch (e: Throwable) { body.trim() }
-                                onPayload(text, "http", client.inetAddress?.hostAddress ?: "unknown")
+                            val method = requestLine.substringBefore(' ').uppercase()
+                            val target = requestLine.split(' ').getOrNull(1) ?: "/"
+                            var text: String? = null
+                            var err: String? = null
+
+                            /*
+                             * ⚠️ GET IS NOT A CONVENIENCE — it is the only HTTP an AMX or Extron
+                             * installer can emit. AMX NetLinx has no HTTP client and no TLS
+                             * anywhere in the language: every request is hand-concatenated strings
+                             * with a manually computed Content-Length. Extron's Global Scripter
+                             * forbids the http, socket and ssl modules outright, so urllib is gone
+                             * too, while still allowing json/hmac/hashlib. A POST-only door is
+                             * unreachable from both platforms. The secret rides in the query string
+                             * for the same reason Carousel's CAP endpoint takes its token there:
+                             * plenty of this gear cannot set a request header at all.
+                             *
+                             * Kept in step with the web player's startTriggerHttp deliberately —
+                             * two doors that disagree about what a valid request looks like means
+                             * an integrator who tests on one platform and deploys on the other.
+                             */
+                            when (method) {
+                                "GET" -> {
+                                    // takeIf { isNotEmpty() }: the web player tests TRUTHINESS, so
+                                    // `?m=` falls through to ?token= there and `?token=` is a named
+                                    // reject. Null-testing here made the two doors disagree on
+                                    // exactly the requests a misconfigured sender produces.
+                                    val q = parseQuery(target)
+                                    val m = q["m"]?.takeIf { it.isNotEmpty() }
+                                    val tok = q["token"]?.takeIf { it.isNotEmpty() }
+                                    when {
+                                        m != null -> text = m
+                                        tok != null -> text = "ST1 " + (q["secret"] ?: "") + " " + tok
+                                        // 'ST1' alone parses as ours but incomplete -> `malformed`,
+                                        // a member of the closed reject set, and it goes through the
+                                        // resolver so it moves the counters an installer reads.
+                                        else -> text = "ST1"
+                                    }
+                                }
+                                "POST" -> {
+                                    // Accept the raw line, a JSON envelope, OR a form post: three
+                                    // shapes because different gear can only produce one of them.
+                                    text = try {
+                                        val j = org.json.JSONObject(body)
+                                        // Truthiness, like the web player: has("token") is also true
+                                        // for {"token":""} and {"token":null}, which the web player
+                                        // passes through as a raw line instead.
+                                        val jt = j.optString("token", "")
+                                        if (jt.isNotEmpty()) "ST1 " + j.optString("secret", "") + " " + jt
+                                        else body
+                                    } catch (e: Throwable) {
+                                        // ⚠️ The web player's two ANCHORED regexes, ported verbatim.
+                                        // A bare `contains("token=")` also matched a raw wire line
+                                        // like `ST1 <secret> mytoken=X`, which then parsed as a form
+                                        // with an empty secret — a different token and a different
+                                        // verdict from the same bytes on the other platform.
+                                        if (FORM_SHAPE.containsMatchIn(body) && FORM_TOKEN.containsMatchIn(body)) {
+                                            val q = parseQuery("?" + body)
+                                            val tok = q["token"]?.takeIf { it.isNotEmpty() }
+                                            if (tok != null) "ST1 " + (q["secret"] ?: "") + " " + tok else body
+                                        } else body
+                                    }
+                                }
+                                else -> err = "GET or POST only"
                             }
-                            val res = if (ok) "{\"ok\":true}" else "{\"ok\":false,\"error\":\"POST only\"}"
-                            val status = if (ok) "200 OK" else "405 Method Not Allowed"
+
+                            /*
+                             * ⚠️ THE REPLY COMES FROM THE RESOLVER, not from "did it parse".
+                             *
+                             * This used to discard onPayload's result and answer `ok = err == null`,
+                             * where err was set only for a missing token or a bad method — so EVERY
+                             * syntactically valid request got 200 {"ok":true}, including a wrong
+                             * secret, an unknown token and bad magic. The web player returns 400
+                             * bad_secret for the same request. An integrator who validates their
+                             * secret handling against a web player and deploys to an Android panel
+                             * would get a green light on a botched rotation and find out during an
+                             * alarm. `action` is echoed for the same reason: a control system tells
+                             * a fire from a clear by reading it.
+                             */
+                            var action: String? = null
+                            if (text != null) {
+                                val v = onPayload(wireClean(text!!), "http", client.inetAddress?.hostAddress ?: "unknown")
+                                if (v != null) {
+                                    if (v.ok) action = v.action?.toString() else err = v.reason?.toString() ?: "refused"
+                                }
+                            }
+                            val ok = err == null
+                            // ⚠️ Newline-terminated on purpose: Extron integrators confirm delivery
+                            // with SendAndWait(deliTag=...), i.e. they read until a known suffix. An
+                            // unterminated body blocks them until timeout on a request that worked.
+                            val resBody = if (ok) {
+                                if (action != null) "{\"ok\":true,\"action\":\"$action\"}" else "{\"ok\":true}"
+                            } else "{\"ok\":false,\"error\":\"$err\"}"
+                            val res = resBody + "\n"
+                            val status = when {
+                                ok -> "200 OK"
+                                err == "GET or POST only" -> "405 Method Not Allowed"
+                                else -> "400 Bad Request"
+                            }
+                            val allow = if (status.startsWith("405")) "Allow: GET, POST\r\n" else ""
+                            val bytes = res.toByteArray(Charsets.UTF_8)
                             client.getOutputStream().write(
-                                ("HTTP/1.1 $status\r\nContent-Type: application/json\r\n" +
-                                 "Content-Length: ${res.length}\r\nConnection: close\r\n\r\n$res")
+                                ("HTTP/1.1 $status\r\nContent-Type: application/json\r\n" + allow +
+                                 "Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n")
                                     .toByteArray(Charsets.UTF_8))
+                            client.getOutputStream().write(bytes)
                             client.getOutputStream().flush()
                         } catch (e: Throwable) {
                             Log.w(TAG, "[trigger] http client: ${e.message}")

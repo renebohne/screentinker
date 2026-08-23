@@ -394,7 +394,14 @@ function buildPlaylistPayload(deviceId) {
     for (const t of triggersForDevice(db, deviceId)) {
       let items = [];
       if (t.target_kind === 'playlist' && t.target_ref) {
-        const pl = db.prepare('SELECT published_snapshot FROM playlists WHERE id = ?').get(t.target_ref);
+        // ⚠️ Scoped to the tenant. triggersForDevice already constrains the TRIGGER row to the
+        // device's workspace, but this lookup trusted target_ref absolutely, relying entirely on
+        // validate() having checked it at save time. Any row written by another path — a
+        // migration, mesh replication, a bulk import, a manual fix-up — would render another
+        // tenant's content on the panel. One clause, and the invariant stops being conditional.
+        const pl = db.prepare(
+          'SELECT published_snapshot FROM playlists WHERE id = ? AND workspace_id = ?'
+        ).get(t.target_ref, t.workspace_id);
         if (pl?.published_snapshot) {
           try { items = JSON.parse(pl.published_snapshot); } catch (e) { items = []; }
           refreshWidgetRevs(items);

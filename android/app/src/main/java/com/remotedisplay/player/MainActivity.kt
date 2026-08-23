@@ -64,6 +64,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var wallController: WallController
     private lateinit var groupSchedule: GroupScheduleController
     private lateinit var pipOverlay: PipOverlay // #109: PiP overlay layer
+    /*
+     * ⚠️ The trigger stack, ASSEMBLED. Every piece of it existed and none of it was reachable —
+     * nothing constructed TriggerListeners or TriggerController and nothing consumed `triggers`
+     * from the device payload, so four files of tested code could never fire. If this field is not
+     * constructed the feature is visibly absent rather than quietly inert.
+     */
+    private var triggerManager: com.remotedisplay.player.trigger.TriggerManager? = null
+    private var triggerSweep: Runnable? = null
 
     private lateinit var playerView: PlayerView
     private lateinit var imageView: ImageView
@@ -225,6 +233,35 @@ class MainActivity : AppCompatActivity() {
         pipOverlay = PipOverlay(this, pipLayout, rootView, youtubeWebView) { level, message ->
             wsService?.sendLog("pip", level, message)
         }
+
+        /*
+         * Triggers. Shares the PiP layer, which draws above the playlist and inherits the
+         * orientation transform — the same reasoning as PipOverlay, and the reason both owners
+         * remove only their own views rather than clearing the layer (each was destroying the
+         * other's DOM on the web player, while the other's state machine carried on believing it
+         * was on screen).
+         *
+         * The overlay silences the base through MediaPlayerManager rather than by writing volumes
+         * itself: a per-element write is undone by the next item mount, so the suppression has to
+         * live where the volume is DECIDED.
+         */
+        val trigOverlay = com.remotedisplay.player.trigger.TriggerOverlay(
+            this, pipLayout, contentCache,
+            setBaseAudioSuppressed = { on ->
+                try { if (::mediaPlayer.isInitialized) mediaPlayer.setTriggerMute(on) } catch (e: Throwable) { }
+            }
+        ) { level, message -> wsService?.sendLog("trigger", level, message) }
+        triggerManager = com.remotedisplay.player.trigger.TriggerManager(trigOverlay) { level, message ->
+            wsService?.sendLog("trigger", level, message)
+        }
+        // The lease sweep. ⚠️ This is what stops a lost clear stranding a screen: an until_cleared
+        // trigger whose sender stops re-asserting expires instead of holding the panel forever.
+        triggerSweep = object : Runnable {
+            override fun run() {
+                try { triggerManager?.sweep() } catch (e: Throwable) { }
+                handler.postDelayed(this, 5000)
+            }
+        }.also { handler.postDelayed(it, 5000) }
 
         // Setup zone manager for multi-zone layouts
         zoneManager = ZoneManager(this, rootView as FrameLayout) {
@@ -644,6 +681,13 @@ class MainActivity : AppCompatActivity() {
 
         wsService?.onPlaylistUpdate = { data ->
             try {
+            // ⚠️ Adopt triggers on EVERY payload, before anything else can early-return. The device
+            // learns its listener config and its trigger definitions here and nowhere else, and the
+            // media they need is pinned by the same message that pins the base playlist — which is
+            // the entire offline guarantee.
+            try { triggerManager?.onPayload(data) } catch (e: Throwable) {
+                Log.w("MainActivity", "trigger adopt failed: ${e.message}")
+            }
             // Orientation is applied in the non-wall branch below; wall mode owns the
             // root-view transform itself and must not be rotated.
             // Check if device is suspended (trial expired / over limit)
@@ -1549,6 +1593,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        // ⚠️ Stop the listeners and the sweep. A bound socket and a self-re-arming Runnable both
+        // outlive the Activity otherwise — the socket then holds the port against the next launch,
+        // which presents as "triggers stopped working after an app restart".
+        try { triggerSweep?.let { handler.removeCallbacks(it) } } catch (e: Throwable) { }
+        try { triggerManager?.stop() } catch (e: Throwable) { }
+        triggerManager = null
         remoteStreaming = false
         // Everything below this line exists for the same reason the wall/group shutdown does, and
         // was missing: these Handlers are on the MAIN LOOPER, which outlives the Activity.
