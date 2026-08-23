@@ -324,7 +324,14 @@ router.get('/', (req, res) => {
   if (!req.workspaceId) return res.json([]);
   const playlists = db.prepare(`
     SELECT p.*, COUNT(DISTINCT pi.id) as item_count, COUNT(DISTINCT d.id) as display_count,
-           EXISTS(SELECT 1 FROM playlist_items z WHERE z.playlist_id = p.id AND z.zone_id IS NOT NULL) as zoned
+           EXISTS(SELECT 1 FROM playlist_items z WHERE z.playlist_id = p.id AND z.zone_id IS NOT NULL) as zoned,
+           -- ⚠️ How many OTHER playlists include this one. Surfaced so the UI can mark it before the
+           -- operator tries to delete it and hits a 409 — BrightSign's lock-icon idea, which is the
+           -- one thing every vendor with shared children either has or conspicuously lacks.
+           (SELECT COUNT(DISTINCT n.playlist_id) FROM playlist_items n WHERE n.child_playlist_id = p.id) as used_by_count,
+           -- Whether this playlist itself nests, so the UI can show it and so a client can tell
+           -- "cannot take a child" without a second round trip.
+           EXISTS(SELECT 1 FROM playlist_items k WHERE k.playlist_id = p.id AND k.child_playlist_id IS NOT NULL) as has_children
     FROM playlists p
     LEFT JOIN playlist_items pi ON p.id = pi.playlist_id
     LEFT JOIN devices d ON d.playlist_id = p.id
@@ -503,6 +510,37 @@ router.delete('/:id', requirePlaylistWrite, (req, res) => {
   // Which screens are about to lose their playlist — read BEFORE the delete, because
   // devices.playlist_id is ON DELETE SET NULL and the association is gone immediately after.
   const affected = db.prepare('SELECT id FROM devices WHERE playlist_id = ?').all(req.params.id);
+
+  /*
+   * ⚠️ REFUSE, AND SAY WHAT IS USING IT — the reverse-dependency check.
+   *
+   * playlist_items.child_playlist_id is ON DELETE RESTRICT, so this DELETE throws a raw
+   * SqliteError when the playlist is nested somewhere. Unhandled, that reached the client as a
+   * 500 carrying "FOREIGN KEY constraint failed" AND a stack trace with server paths in it.
+   *
+   * The constraint is right — SET NULL would leave an item expanding to nothing (a documented
+   * black screen on BrightSign XD and Samsung Tizen) and CASCADE would delete the parent's item.
+   * What was missing is the answer to the only question the operator has at that moment: WHICH
+   * playlist is using this one. Appspace ships the failure with no reverse view at all
+   * ("deleting content from a source affects every zone and channel linked to it"); BrightSign
+   * gets it right with a lock icon on anything used by an active presentation. This is that,
+   * as an error you can act on.
+   */
+  const usedBy = db.prepare(`
+    SELECT DISTINCT p.name FROM playlist_items pi
+      JOIN playlists p ON p.id = pi.playlist_id
+     WHERE pi.child_playlist_id = ?
+     ORDER BY p.name
+  `).all(req.params.id).map((r) => r.name);
+  if (usedBy.length) {
+    const shown = usedBy.slice(0, 3).map((n) => `"${n}"`).join(', ');
+    const more = usedBy.length > 3 ? ` and ${usedBy.length - 3} more` : '';
+    return res.status(409).json({
+      error: `This playlist is used inside ${shown}${more}. Remove it from `
+        + `${usedBy.length > 1 ? 'those playlists' : 'that playlist'} first.`,
+      used_by: usedBy,
+    });
+  }
 
   db.prepare('DELETE FROM playlists WHERE id = ?').run(req.params.id);
 

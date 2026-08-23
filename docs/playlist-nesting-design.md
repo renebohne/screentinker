@@ -142,6 +142,22 @@ This was caught by a test, not by review. It is the flatten-at-publish tax: the 
 player ignorant of nesting. Worth paying, but only if it is paid once, in the shared publish path.
 `publishPlaylist()` now republishes published ancestors; drafts stay drafts.
 
+### ⚠️ Also found while building: ON DELETE RESTRICT needs a reverse-dependency view
+
+Adding the constraint made deleting a nested child throw a raw `SqliteError`, which reached the
+client as a **500 carrying "FOREIGN KEY constraint failed" and a stack trace with server paths in
+it** — a regression introduced by the constraint itself, found by running it rather than reading it.
+
+The constraint is still right. What was missing is the answer to the only question the operator has
+at that moment: *which playlist is using this one*. Delete now returns **409 naming the parents**
+(`used_by`), and the list endpoint carries `used_by_count` / `has_children` so the UI can mark a
+shared block **before** anyone tries to delete it.
+
+That is BrightSign's lock-icon idea — *"a lock icon on an item indicates that it is being used in an
+active presentation… and cannot be deleted"* — and it is the thing Appspace conspicuously lacks:
+*"deleting content from a source affects every zone and channel linked to it"*, with no reverse view
+and no confirmation.
+
 ### Deferred to phase 2 (cursored), deliberately
 
 - the cursor itself (`play N per rotation`, advancing across parent loops)

@@ -226,3 +226,56 @@ test('⚠️ publishing a CHILD reaches a device that only holds the PARENT', as
     assert.ok(payload, 'publishing the child never reached a device that only holds the parent');
   } finally { try { sock.close(); } catch { /* */ } }
 });
+
+test('⚠️ deleting a playlist that is nested elsewhere is REFUSED, and names what uses it', async () => {
+  /*
+   * child_playlist_id is ON DELETE RESTRICT, so this DELETE throws a raw SqliteError. Unhandled it
+   * reached the client as a 500 carrying "FOREIGN KEY constraint failed" AND a stack trace with
+   * server paths in it — a regression introduced by adding the constraint, caught by running it.
+   *
+   * The constraint is correct; what was missing is the answer to the only question the operator has
+   * at that moment: which playlist is using this one. Appspace ships this failure with no reverse
+   * view at all; BrightSign gets it right with a lock icon on anything in use.
+   */
+  const child = await newPlaylist('shared-block'); const parent = await newPlaylist('uses-it');
+  await addContent(child.id);
+  await addChild(parent.id, child.id);
+
+  const r = await api(`/api/playlists/${child.id}`, J(jwt, undefined, 'DELETE'));
+  assert.equal(r.status, 409, `expected a named refusal, got ${r.status}`);
+  assert.match(r.body.error, /"uses-it"/, 'the error must name the playlist using it');
+  assert.deepEqual(r.body.used_by, ['uses-it']);
+
+  const raw = dbHandle();
+  const still = raw.prepare('SELECT id FROM playlists WHERE id = ?').get(child.id);
+  raw.close();
+  assert.ok(still, 'the playlist was deleted despite the refusal');
+});
+
+test('a playlist nobody nests still deletes cleanly', async () => {
+  // The guard must refuse USE, not deletion in general.
+  const lonely = await newPlaylist('lonely');
+  await addContent(lonely.id);
+  assert.equal((await api(`/api/playlists/${lonely.id}`, J(jwt, undefined, 'DELETE'))).status, 200);
+});
+
+test('removing the reference releases the child for deletion', async () => {
+  const child = await newPlaylist('releasable'); const parent = await newPlaylist('holder');
+  await addContent(child.id);
+  const item = (await addChild(parent.id, child.id)).body;
+  assert.equal((await api(`/api/playlists/${child.id}`, J(jwt, undefined, 'DELETE'))).status, 409);
+  assert.equal((await api(`/api/playlists/${parent.id}/items/${item.id}`, J(jwt, undefined, 'DELETE'))).status, 200);
+  assert.equal((await api(`/api/playlists/${child.id}`, J(jwt, undefined, 'DELETE'))).status, 200,
+    'the child stayed locked after its only reference was removed');
+});
+
+test('the list reports used_by_count and has_children so the UI can warn first', async () => {
+  const child = await newPlaylist('counted'); const p1 = await newPlaylist('h1'); const p2 = await newPlaylist('h2');
+  await addContent(child.id);
+  await addChild(p1.id, child.id); await addChild(p2.id, child.id);
+  const list = (await api('/api/playlists', { headers: { Authorization: `Bearer ${jwt}` } })).body;
+  const row = list.find((x) => x.id === child.id);
+  assert.equal(row.used_by_count, 2, 'a shared child must report how many playlists include it');
+  assert.equal(row.has_children, 0, 'a leaf must not claim to have children');
+  assert.equal(list.find((x) => x.id === p1.id).has_children, 1);
+});
