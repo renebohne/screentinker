@@ -54,8 +54,21 @@ function projectTrigger(t, items) {
     // ⚠️ target_ref travels too, but only so the player can LOG which playlist it rendered. It is
     // never resolved on the device; `items` is the content.
     target_ref: t.target_ref || null,
-    position: t.position || 'center',
-    width: t.width, height: t.height, opacity: t.opacity, border_radius: t.border_radius,
+    /*
+     * ⚠️ position / width / height / opacity / border_radius are DELIBERATELY NOT PROJECTED.
+     *
+     * They were copied wholesale from the PiP contract and are dead in every direction: no client
+     * writes them (frontend/js/views/triggers.js sets none), four of the five never entered the
+     * player's change signature so an edit could not reach a device anyway, the renderer discards
+     * all five (triggerFire hardcodes inset:0 opaque black), the Android/shared contract
+     * (TriggerResolve.kt, shared/trigger-vectors.json) has never had them, and no test asserts one.
+     *
+     * Sending a field the device provably ignores is how the next person concludes it works. The
+     * COLUMNS stay — this schema treats unused columns as the no-migration hook, and SQLite would
+     * need a table rebuild to drop them. If a non-fullscreen mode is wanted later, the right shape
+     * is ONE semantic field (takeover | banner), which is also what the mass-notification vendors
+     * expose, rather than five raw CSS primitives.
+     */
     mode: t.mode,
     max_duration_sec: t.max_duration_sec == null ? 0 : t.max_duration_sec,
     lease_sec: t.lease_sec == null ? null : t.lease_sec,
