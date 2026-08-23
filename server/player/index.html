@@ -1197,10 +1197,33 @@
       if (on) {
         document.querySelectorAll('video, audio').forEach((el) => {
           if (isOverlayMedia(el)) return;
+          /*
+           * ⚠️ BOTH muted AND volume, deliberately, and this is not belt-and-braces for its own
+           * sake. On BrightSign video decodes onto a HARDWARE PLANE that the DOM cannot touch —
+           * documented at the suppressMedia comment below, where pausing was found insufficient
+           * because the last decoded frame stays on screen. Whether AUDIO routes the same way is
+           * unverified: DWS exposes no audio-state endpoint, and no JS API can report whether
+           * sound is leaving the box, so it cannot be settled remotely.
+           *
+           * Writing volume = 0 as well costs nothing and covers the case where `muted` never
+           * reaches the plane, because the two travel different paths in most stacks. If BOTH are
+           * ignored the fallback is a host-bridge audio call, and the failure mode until then is
+           * the pre-existing one (base audio continues) rather than a new one.
+           */
           try { el.muted = true; } catch (e) { /* torn down */ }
+          try { el.volume = 0; } catch (e) { /* torn down */ }
         });
-        try { if (activeYtPlayer) activeYtPlayer.mute(); } catch (e) { /* not ready */ }
+        try { if (activeYtPlayer) { activeYtPlayer.mute(); activeYtPlayer.setVolume(0); } } catch (e) { /* not ready */ }
       } else {
+        // Restore the LEVEL first, then re-resolve mute. Order matters: applyMute decides silence
+        // from the four-input resolver, and a restored element still sitting at volume 0 would be
+        // silently mute regardless of what that resolver decided.
+        const level = (typeof mediaVolume === 'number' && mediaVolume != null) ? mediaVolume : 1;
+        document.querySelectorAll('video, audio').forEach((el) => {
+          if (isOverlayMedia(el)) return;
+          try { el.volume = level; } catch (e) { /* torn down */ }
+        });
+        try { if (activeYtPlayer) activeYtPlayer.setVolume(Math.round(level * 100)); } catch (e) {}
         applyMute();
       }
     }

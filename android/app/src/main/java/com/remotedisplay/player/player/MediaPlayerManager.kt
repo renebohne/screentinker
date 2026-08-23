@@ -45,6 +45,15 @@ class MediaPlayerManager(
     // Wall mode: followers must stay muted even as the leader's sync switches them
     // to a new (possibly unmuted) item, so the mute has to survive each playVideo.
     private var wallMute = false
+    /*
+     * ⚠️ Base audio while a TRIGGER overlay covers the screen. Separate from wallMute because the
+     * two are different facts with different lifetimes — a wall follower is silent permanently, a
+     * base playlist is silent for the duration of an alarm — and OR-ing them at each use site is
+     * what makes both survive a playVideo. The web player learned this as `baseAudioSuppressed`:
+     * a per-element write is undone by the next item mount, so the flag has to be consulted where
+     * the volume is DECIDED, not applied once when the trigger fires.
+     */
+    private var triggerMute = false
     // #group-sync loop state, tracked so it can be applied to a freshly-swapped double-buffer player.
     private var videoLooping = false
     // #group-sync double buffer: a second ExoPlayer that pre-opens/pre-buffers the NEXT clip so the
@@ -187,7 +196,7 @@ class MediaPlayerManager(
         mountGeneration++
         currentType = MediaType.YOUTUBE
         currentWidgetUrl = null   // surface reused - a later widget show must reload
-        youtubeMuted = muted || wallMute
+        youtubeMuted = muted || wallMute || triggerMute
 
         playerView.visibility = android.view.View.GONE
         imageView.visibility = android.view.View.GONE
@@ -290,7 +299,7 @@ class MediaPlayerManager(
         youtubeWebView?.visibility = android.view.View.GONE
 
         exoPlayer?.apply {
-            volume = if (muted || wallMute) 0f else 1f
+            volume = if (muted || wallMute || triggerMute) 0f else 1f
             setMediaItem(MediaItem.fromUri(Uri.parse(url)))
             prepare()
             playWhenReady = true
@@ -399,7 +408,7 @@ class MediaPlayerManager(
             preloadPlayer = old
             preloadedFile = null
             pp.apply {
-                volume = if (muted || wallMute) 0f else 1f
+                volume = if (muted || wallMute || triggerMute) 0f else 1f
                 repeatMode = if (videoLooping) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
                 playWhenReady = true
             }
@@ -411,7 +420,7 @@ class MediaPlayerManager(
 
         Log.i("MediaPlayerManager", "Playing video: ${file.absolutePath} (muted=$muted)")
         exoPlayer?.apply {
-            volume = if (muted || wallMute) 0f else 1f
+            volume = if (muted || wallMute || triggerMute) 0f else 1f
             setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
             prepare()
             playWhenReady = true
@@ -497,6 +506,20 @@ class MediaPlayerManager(
     fun setWallMute(mute: Boolean) {
         wallMute = mute
         if (mute) exoPlayer?.volume = 0f
+    }
+
+    /**
+     * Silence the BASE playlist while a trigger overlay covers the screen, and restore it after.
+     *
+     * ⚠️ Restoring re-derives from the flags rather than forcing 1f: an item an operator muted, or
+     * a wall follower, must stay silent when the alarm clears. Forcing full volume here would be a
+     * fifth rule that immediately disagreed with the four already in force.
+     */
+    fun setTriggerMute(mute: Boolean) {
+        if (triggerMute == mute) return
+        triggerMute = mute
+        exoPlayer?.volume = if (mute || wallMute) 0f else 1f
+        setYoutubeMuted(youtubeMuted || mute)
     }
 
     /**

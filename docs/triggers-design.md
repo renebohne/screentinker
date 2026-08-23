@@ -33,9 +33,36 @@ media are already local. So:
 - The payload carries each trigger's playlist resolved inline, and the player re-pins on a
   trigger-set change, so one message delivers both the definition and the cache instruction.
 
-Remaining: the Android renderer (`PipOverlay` renders a single `uri`, a trigger targets a playlist);
-a dashboard form for the config above; and hardware verification, since `el.muted` has never been
-tested against a BrightSign hardware audio plane.
+### Android
+
+The stack is assembled in `MainActivity` — `TriggerManager` ties transports → resolver → state
+machine → `TriggerOverlay`, which renders the trigger's playlist into the PiP layer from the OFFLINE
+CACHE and never fetches on the fire path. It owns its own ExoPlayer: reusing the base playlist's
+would tear down the thing the overlay is supposed to be covering, and a clear would have nothing to
+return to. Base audio is suppressed through `MediaPlayerManager.setTriggerMute`, a flag consulted
+where the volume is decided rather than a one-shot write the next item mount would undo.
+
+⚠️ `TriggerRenderer` is an interface so the arbitration logic is testable without a Context. That is
+not ceremony: the web player's fire-path suite stubs its renderer, which is exactly how it shipped
+green while a trigger produced a black, silent screen on real hardware.
+
+### ⚠️ Unverified on BrightSign hardware
+
+`audio.mute` / `audio.volume` are DECLARED capabilities asserting that the DOM's `el.muted` and
+`el.volume` reach the audio path. On this platform video decodes onto a hardware plane the DOM
+cannot touch — which is why the screen-off path tears the source down rather than pausing — and
+whether audio routes the same way has never been established. DWS exposes no audio-state endpoint
+and no JS API reports whether sound is leaving the box, so **it cannot be settled remotely; it needs
+ears at a panel.**
+
+Mitigation shipped: the player writes BOTH `muted = true` and `volume = 0`, so it survives either
+one being honoured. If NEITHER reaches the plane, base-audio suppression is a silent no-op on
+exactly the hardware the feature exists for, and there is no host-side fallback — nothing in
+`brightsign/st-bridge.js` touches `@brightsign/audiooutput`. `brightsign/audio-plane-test.html` is a
+probe that plays a tone and toggles each mechanism in turn with a printed verdict table; it needs
+someone at the panel to say when it goes silent.
+
+Remaining: the hardware check above, and Tizen (deliberately excluded — no raw socket).
 tested against a BrightSign hardware audio plane.
 
 ## Why

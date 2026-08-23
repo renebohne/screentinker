@@ -2015,6 +2015,22 @@ export default {
   'trigger.confirm_delete': 'Delete this trigger?',
 
   // Trigger diagnostics on the device page (docs/triggers-design.md §13).
+  // Trigger listener settings — the half that makes the feature reachable at all.
+  'device.trigcfg.title': 'Triggers — listener settings',
+  'device.trigcfg.intro': 'Lets a control system on this LAN interrupt the playlist. Both doors are off until you turn them on, and nothing works without a secret.',
+  'device.trigcfg.accept_http': 'Accept HTTP',
+  'device.trigcfg.accept_udp': 'Accept UDP',
+  'device.trigcfg.group_ph': 'multicast group (239.x.x.x)',
+  'device.trigcfg.clear_all_ph': 'clear-all token',
+  'device.trigcfg.save': 'Save settings',
+  'device.trigcfg.secret': 'Shared secret',
+  'device.trigcfg.secret_unset': 'not set — triggers cannot fire',
+  'device.trigcfg.secret_note': 'The integrator types this into their control system. Anything on this LAN that knows it can change what this screen shows.',
+  'device.trigcfg.generate': 'Generate',
+  'device.trigcfg.rotate': 'Rotate',
+  'device.trigcfg.rotate_confirm': 'Rotate the shared secret? Any control system already configured with the old one stops working until it is updated.',
+  'device.trigcfg.saved_live': 'Saved — the screen has it now',
+  'device.trigcfg.saved_queued': 'Saved — the screen is offline and will pick it up when it reconnects',
   'device.trig.title': 'Triggers',
   'device.trig.none_seen': 'Nothing has reached this screen yet — either nothing has been sent, or it is not getting here.',
   'device.trig.arriving_refused': 'Messages ARE reaching this screen but are being refused — check the token and the shared secret, not the network.',
