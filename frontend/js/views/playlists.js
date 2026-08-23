@@ -133,6 +133,11 @@ async function loadPlaylists() {
             <div style="font-size:16px;font-weight:600;color:var(--text-primary)">${esc(p.name)}</div>
             ${p.is_auto_generated ? `<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:var(--bg-input);color:var(--text-muted)">${t('playlist.tag_auto')}</span>` : ''}
             ${p.status === 'draft' ? `<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:#78350f;color:#fbbf24">${t('playlist.tag_draft')}</span>` : ''}
+            ${/* ⚠️ The lock. Shown BEFORE anyone tries to delete it, because deletion is refused
+                  while it is nested and an unexplained refusal is worse than a visible constraint.
+                  BrightSign's pattern; the one thing Appspace conspicuously lacks. */ ''}
+            ${p.used_by_count ? `<span title="${esc(tn('playlist.used_by_tip', p.used_by_count))}" style="font-size:10px;padding:2px 6px;border-radius:4px;background:#1e3a2f;color:#6ee7b7">🔒 ${esc(tn('playlist.used_by', p.used_by_count))}</span>` : ''}
+            ${p.has_children ? `<span title="${esc(t('playlist.contains_tip'))}" style="font-size:10px;padding:2px 6px;border-radius:4px;background:var(--bg-input);color:var(--text-muted)">☰ ${t('playlist.tag_nested')}</span>` : ''}
           </div>
           <div style="font-size:12px;color:var(--text-muted);white-space:nowrap;margin-left:12px">${tn('playlist.item_count', p.item_count)}</div>
         </div>
@@ -501,22 +506,30 @@ function renderItems(items) {
     <div class="playlist-item" data-item-id="${item.id}" data-index="${i}" draggable="true" style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;display:flex;align-items:center;gap:12px;cursor:grab;transition:border-color 0.15s">
       <div style="color:var(--text-muted);font-size:12px;min-width:24px;text-align:center;user-select:none">${i + 1}</div>
       <div style="width:48px;height:36px;border-radius:4px;overflow:hidden;background:var(--bg-input);flex-shrink:0;display:flex;align-items:center;justify-content:center">
-        ${item.thumbnail_path
-          ? `<img data-auth-src="/api/content/${esc(item.content_id)}/thumbnail" style="width:100%;height:100%;object-fit:cover">`
-          : `<div style="color:var(--text-muted);opacity:0.5">${getTypeIcon(item)}</div>`
+        ${item.child_playlist_id
+          ? '<div style="color:var(--text-muted)">☰</div>'
+          : item.thumbnail_path
+            ? `<img data-auth-src="/api/content/${esc(item.content_id)}/thumbnail" style="width:100%;height:100%;object-fit:cover">`
+            : `<div style="color:var(--text-muted);opacity:0.5">${getTypeIcon(item)}</div>`
         }
       </div>
       <div style="flex:1;min-width:0">
-        <div style="font-size:14px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(item.filename || item.widget_name || t('common.unknown'))}</div>
+        <div style="font-size:14px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(item.child_playlist_name || item.filename || item.widget_name || t('common.unknown'))}</div>
         <div style="font-size:12px;color:var(--text-muted);display:flex;align-items:center;gap:8px;min-width:0">
-          <span style="white-space:nowrap">${item.widget_id ? t('playlist.item_widget') : esc(item.mime_type || t('playlist.unknown_type'))}</span>
+          <span style="white-space:nowrap">${item.child_playlist_id ? t('playlist.item_nested') : item.widget_id ? t('playlist.item_widget') : esc(item.mime_type || t('playlist.unknown_type'))}</span>
           ${item.schedules && item.schedules.length ? `<span style="font-size:11px;padding:1px 6px;border-radius:4px;background:#0c2a3f;color:#7dd3fc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(scheduleSummary(item.schedules))}">🕐 ${esc(scheduleSummary(item.schedules))}</span>` : ''}
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-        <label style="font-size:12px;color:var(--text-muted)">${t('playlist.duration')}</label>
+        ${item.child_playlist_id
+          // ⚠️ No duration control on a nested reference, deliberately. Phase 1 plays the whole
+          // child through; each of ITS items keeps its own duration. A box here would imply the
+          // parent can cap or override the child, which is phase 2 (cursored) and not built —
+          // and five of six vendors surveyed do not let a parent reach inside either.
+          ? `<span style="font-size:12px;color:var(--text-muted)" title="${esc(t('playlist.nested_duration_hint'))}">${esc(t('playlist.plays_through'))}</span>`
+          : `<label style="font-size:12px;color:var(--text-muted)">${t('playlist.duration')}</label>
         <input type="number" class="input item-duration" data-item-id="${item.id}" value="${item.duration_sec}" min="1" style="width:60px;padding:4px 8px;font-size:13px;text-align:center">
-        <span style="font-size:12px;color:var(--text-muted)">${t('playlist.sec')}</span>
+        <span style="font-size:12px;color:var(--text-muted)">${t('playlist.sec')}</span>`}
       </div>
       <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
         <button class="btn-icon item-schedule" data-item-id="${item.id}" title="${t('itemsched.title')}" aria-label="${t('itemsched.title')}" style="color:${item.schedules && item.schedules.length ? '#38bdf8' : 'var(--text-muted)'};background:none;border:none;cursor:pointer;padding:4px;border-radius:4px">
@@ -761,6 +774,7 @@ async function showAddItemModal(playlistId, opts = {}) {
       <div style="display:flex;gap:8px;margin-bottom:12px">
         <button class="btn btn-primary btn-sm tab-btn active" data-tab="content">${t('playlist.tab_content')}</button>
         <button class="btn btn-secondary btn-sm tab-btn" data-tab="widgets">${t('playlist.tab_widgets')}</button>
+        ${replaceItemId ? '' : `<button class="btn btn-secondary btn-sm tab-btn" data-tab="playlists">${t('playlist.tab_playlists')}</button>`}
       </div>
       <input type="text" id="addItemSearch" class="input" placeholder="${t('playlist.search_placeholder')}" style="width:100%;margin-bottom:12px">
       <div id="addItemList" style="flex:1;overflow-y:auto;min-height:200px;max-height:400px"></div>
@@ -774,19 +788,86 @@ async function showAddItemModal(playlistId, opts = {}) {
   let activeTab = 'content';
   let allContent = [];
   let allWidgets = [];
+  let allPlaylists = [];
+  // Whether THIS playlist may take a child at all. The server refuses if it is already used as one
+  // (that would build two levels from the far end), so the tab explains rather than letting the
+  // user pick something and collect a 400.
+  let nestingBlockedBy = null;
 
   try {
-    [allContent, allWidgets] = await Promise.all([
+    [allContent, allWidgets, allPlaylists] = await Promise.all([
       api.getContent(),
-      api.getWidgets ? api.getWidgets() : Promise.resolve([])
+      api.getWidgets ? api.getWidgets() : Promise.resolve([]),
+      api.getPlaylists().catch(() => [])
     ]);
+    const self = allPlaylists.find(p => p.id === playlistId);
+    if (self && self.used_by_count > 0) nestingBlockedBy = self.used_by_count;
   } catch (err) {
     document.getElementById('addItemList').innerHTML = `<div style="color:var(--text-muted);padding:20px;text-align:center">${t('playlist.load_failed', { error: esc(err.message) })}</div>`;
+  }
+
+  /*
+   * Playlists that may be nested here. Three exclusions, and each one mirrors a server rule so the
+   * user never picks something that will be refused:
+   *   - this playlist itself (it cannot contain itself)
+   *   - any playlist that already contains a playlist (depth is capped at one level)
+   *   - all of them, if THIS playlist is already used as a child somewhere
+   * The last case is explained rather than silently emptying the list — "nothing here" reads as a
+   * bug, and the reason is not guessable.
+   */
+  function renderPlaylistsTab(list, search) {
+    if (nestingBlockedBy) {
+      list.innerHTML = `<div style="color:var(--text-muted);padding:24px;text-align:center;line-height:1.6">
+        ${esc(tn('playlist.nest_blocked', nestingBlockedBy))}</div>`;
+      return;
+    }
+    const candidates = allPlaylists.filter(p =>
+      p.id !== playlistId && !p.has_children && (p.name || '').toLowerCase().includes(search));
+
+    if (!candidates.length) {
+      list.innerHTML = `<div style="color:var(--text-muted);padding:24px;text-align:center;line-height:1.6">
+        ${esc(t('playlist.no_playlists_nestable'))}</div>`;
+      return;
+    }
+
+    list.innerHTML = candidates.map(p => `
+      <div class="add-item-row" style="display:flex;align-items:center;gap:12px;padding:10px;border-radius:var(--radius)">
+        <div style="width:48px;height:36px;border-radius:4px;background:var(--bg-input);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--text-muted)">☰</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:14px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">
+            ${esc(tn('playlist.n_items', p.item_count || 0))}${p.status !== 'published' ? ' · ' + esc(t('playlist.nest_draft_note')) : ''}
+          </div>
+        </div>
+        <button class="btn btn-primary btn-sm add-child-btn" data-id="${esc(p.id)}">${t('playlist.add_btn')}</button>
+      </div>
+    `).join('');
+
+    list.querySelectorAll('.add-child-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        try {
+          btn.disabled = true;
+          btn.textContent = t('playlist.adding');
+          await api.addPlaylistItem(playlistId, { child_playlist_id: btn.dataset.id });
+          btn.textContent = t('playlist.added');
+          btn.classList.remove('btn-primary');
+          btn.classList.add('btn-secondary');
+          refreshAfterMutation();
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = t('playlist.add_btn');
+          showToast(err.message, 'error');   // the server's message already names the playlist
+        }
+      });
+    });
   }
 
   function renderTab() {
     const list = document.getElementById('addItemList');
     const search = (document.getElementById('addItemSearch')?.value || '').toLowerCase();
+
+    if (activeTab === 'playlists') return renderPlaylistsTab(list, search);
+
     const items = activeTab === 'content' ? allContent : allWidgets;
     const filtered = items.filter(item => {
       const name = (item.filename || item.name || '').toLowerCase();

@@ -75,6 +75,7 @@ function buildSnapshotItems(playlistId) {
     FROM playlist_items pi
     LEFT JOIN content c ON pi.content_id = c.id
     LEFT JOIN widgets w ON pi.widget_id = w.id
+    LEFT JOIN playlists cp ON pi.child_playlist_id = cp.id
     WHERE pi.playlist_id = ?
       -- #157: a content-backed item is dropped from the snapshot once it's deactivated
       -- (is_active=0) or past its expiry (expires_at<=now). Widget items (content_id NULL)
@@ -366,13 +367,14 @@ router.post('/', (req, res) => {
 router.get('/:id', requirePlaylistRead, (req, res) => {
   const items = db.prepare(`
     SELECT pi.*,
-           COALESCE(c.filename, w.name) as filename,
+           COALESCE(c.filename, w.name) as filename, cp.name as child_playlist_name,
            c.mime_type, c.filepath, c.thumbnail_path,
            c.duration_sec as content_duration, c.file_size, c.remote_url,
            w.name as widget_name, w.widget_type, w.config as widget_config, w.updated_at as widget_rev
     FROM playlist_items pi
     LEFT JOIN content c ON pi.content_id = c.id
     LEFT JOIN widgets w ON pi.widget_id = w.id
+    LEFT JOIN playlists cp ON pi.child_playlist_id = cp.id
     WHERE pi.playlist_id = ?
     ORDER BY pi.sort_order ASC
   `).all(req.params.id);
@@ -442,13 +444,14 @@ router.post('/:id/publish', requirePlaylistWrite, (req, res) => {
   // with GET /:id (also duplicated in /discard and POST /:id/items/reorder).
   const items = db.prepare(`
     SELECT pi.*,
-           COALESCE(c.filename, w.name) as filename,
+           COALESCE(c.filename, w.name) as filename, cp.name as child_playlist_name,
            c.mime_type, c.filepath, c.thumbnail_path,
            c.duration_sec as content_duration, c.file_size, c.remote_url,
            w.name as widget_name, w.widget_type, w.config as widget_config, w.updated_at as widget_rev
     FROM playlist_items pi
     LEFT JOIN content c ON pi.content_id = c.id
     LEFT JOIN widgets w ON pi.widget_id = w.id
+    LEFT JOIN playlists cp ON pi.child_playlist_id = cp.id
     WHERE pi.playlist_id = ?
     ORDER BY pi.sort_order ASC
   `).all(req.params.id);
@@ -492,13 +495,14 @@ router.post('/:id/discard', requirePlaylistWrite, (req, res) => {
 
   const items = db.prepare(`
     SELECT pi.*,
-           COALESCE(c.filename, w.name) as filename,
+           COALESCE(c.filename, w.name) as filename, cp.name as child_playlist_name,
            c.mime_type, c.filepath, c.thumbnail_path,
            c.duration_sec as content_duration, c.file_size, c.remote_url,
            w.name as widget_name, w.widget_type, w.config as widget_config, w.updated_at as widget_rev
     FROM playlist_items pi
     LEFT JOIN content c ON pi.content_id = c.id
     LEFT JOIN widgets w ON pi.widget_id = w.id
+    LEFT JOIN playlists cp ON pi.child_playlist_id = cp.id
     WHERE pi.playlist_id = ?
     ORDER BY pi.sort_order ASC
   `).all(req.params.id);
@@ -569,13 +573,14 @@ router.delete('/:id', requirePlaylistWrite, (req, res) => {
 router.get('/:id/items', requirePlaylistRead, (req, res) => {
   const items = db.prepare(`
     SELECT pi.*,
-           COALESCE(c.filename, w.name) as filename,
+           COALESCE(c.filename, w.name) as filename, cp.name as child_playlist_name,
            c.mime_type, c.filepath, c.thumbnail_path,
            c.duration_sec as content_duration, c.file_size, c.remote_url,
            w.name as widget_name, w.widget_type, w.config as widget_config, w.updated_at as widget_rev
     FROM playlist_items pi
     LEFT JOIN content c ON pi.content_id = c.id
     LEFT JOIN widgets w ON pi.widget_id = w.id
+    LEFT JOIN playlists cp ON pi.child_playlist_id = cp.id
     WHERE pi.playlist_id = ?
     ORDER BY pi.sort_order ASC
   `).all(req.params.id);
@@ -746,13 +751,14 @@ router.post('/:id/items', requirePlaylistWrite, async (req, res) => {
 
     const item = db.prepare(`
       SELECT pi.*,
-             COALESCE(c.filename, w.name) as filename,
+             COALESCE(c.filename, w.name) as filename, cp.name as child_playlist_name,
              c.mime_type, c.filepath, c.thumbnail_path,
              c.duration_sec as content_duration, c.file_size, c.remote_url,
              w.name as widget_name, w.widget_type, w.config as widget_config, w.updated_at as widget_rev
       FROM playlist_items pi
       LEFT JOIN content c ON pi.content_id = c.id
       LEFT JOIN widgets w ON pi.widget_id = w.id
+    LEFT JOIN playlists cp ON pi.child_playlist_id = cp.id
       WHERE pi.id = ?
     `).get(result.lastInsertRowid);
 
@@ -830,13 +836,14 @@ router.put('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
 
   const updated = db.prepare(`
     SELECT pi.*,
-           COALESCE(c.filename, w.name) as filename,
+           COALESCE(c.filename, w.name) as filename, cp.name as child_playlist_name,
            c.mime_type, c.filepath, c.thumbnail_path,
            c.duration_sec as content_duration, c.file_size, c.remote_url,
            w.name as widget_name, w.widget_type, w.config as widget_config, w.updated_at as widget_rev
     FROM playlist_items pi
     LEFT JOIN content c ON pi.content_id = c.id
     LEFT JOIN widgets w ON pi.widget_id = w.id
+    LEFT JOIN playlists cp ON pi.child_playlist_id = cp.id
     WHERE pi.id = ?
   `).get(req.params.itemId);
   res.json(updated);
@@ -878,13 +885,14 @@ router.post('/:id/items/:itemId/duplicate', requirePlaylistWrite, (req, res) => 
 
   const newItem = db.prepare(`
     SELECT pi.*,
-           COALESCE(c.filename, w.name) as filename,
+           COALESCE(c.filename, w.name) as filename, cp.name as child_playlist_name,
            c.mime_type, c.filepath, c.thumbnail_path,
            c.duration_sec as content_duration, c.file_size, c.remote_url,
            w.name as widget_name, w.widget_type, w.config as widget_config, w.updated_at as widget_rev
     FROM playlist_items pi
     LEFT JOIN content c ON pi.content_id = c.id
     LEFT JOIN widgets w ON pi.widget_id = w.id
+    LEFT JOIN playlists cp ON pi.child_playlist_id = cp.id
     WHERE pi.id = ?
   `).get(newId);
   res.status(201).json(newItem);
@@ -907,13 +915,14 @@ router.post('/:id/items/reorder', requirePlaylistWrite, (req, res) => {
 
   const items = db.prepare(`
     SELECT pi.*,
-           COALESCE(c.filename, w.name) as filename,
+           COALESCE(c.filename, w.name) as filename, cp.name as child_playlist_name,
            c.mime_type, c.filepath, c.thumbnail_path,
            c.duration_sec as content_duration, c.file_size, c.remote_url,
            w.name as widget_name, w.widget_type, w.config as widget_config, w.updated_at as widget_rev
     FROM playlist_items pi
     LEFT JOIN content c ON pi.content_id = c.id
     LEFT JOIN widgets w ON pi.widget_id = w.id
+    LEFT JOIN playlists cp ON pi.child_playlist_id = cp.id
     WHERE pi.playlist_id = ?
     ORDER BY pi.sort_order ASC
   `).all(req.params.id);
