@@ -233,7 +233,11 @@
        #playerContainer, so corner positions track the visible content in every orientation.
        Pointer-transparent and empty (invisible) until an overlay is shown. */
     #pipContainer { position: fixed; inset: 0; pointer-events: none; z-index: 9000; }
-    #pipContainer > .pip-box { position: absolute; overflow: hidden; box-sizing: border-box; box-shadow: 0 6px 28px rgba(0,0,0,0.55); }
+    /* ⚠️ Two owners share this layer: the manual PiP path and the trigger engine. Without an
+       explicit stack, DOM insertion order decides who paints on top — so a PiP pushed during an
+       alarm would cover the alarm. A trigger always outranks a PiP. */
+    #pipContainer > .trigger-box { position: absolute; inset: 0; overflow: hidden; z-index: 2; }
+    #pipContainer > .pip-box { position: absolute; overflow: hidden; box-sizing: border-box; box-shadow: 0 6px 28px rgba(0,0,0,0.55); z-index: 1; }
     #pipContainer > .pip-box > .pip-title { font: 600 16px sans-serif; padding: 6px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #pipContainer > .pip-box > img,
     #pipContainer > .pip-box > iframe { display: block; width: 100%; border: 0; }
@@ -548,8 +552,18 @@
         t.id, t.match_token, t.clear_token || '', t.mode, t.priority || 0,
         t.max_duration_sec || 0, t.lease_sec == null ? '' : t.lease_sec,
         t.source_http ? 'h' : '', t.source_udp ? 'u' : '',
-        t.position || '', t.target_kind || '', t.target_ref || '',
-        (t.items || []).map((i) => (i && (i.content_id || i.widget_id || i.filepath)) || '').join('+'),
+        // `position` is deliberately absent: it is not projected to the device and changes
+        // nothing on screen, so including it would force a full re-sync AND (since the re-pin
+        // fix) a prune-and-re-pin of every asset, for an edit with no visible effect.
+        t.target_kind || '', t.target_ref || '',
+        /*
+         * ⚠️ IDENTITY *AND* BYTES. Keying on content_id alone made this blind to the one edit that
+         * silently breaks an asset: PUT /api/content/:id/replace KEEPS the id and writes a new
+         * random filepath. Identical signature -> triggers never re-adopted -> no re-pin, and the
+         * cached array still holds the DEAD filepath, which is what both pin calls keep pinning.
+         * The trigger then fires against a 404 on the day the WAN is down.
+         */
+        (t.items || []).map((i) => (i ? `${i.content_id || i.widget_id || ''}:${i.filepath || ''}` : '')).join('+'),
       ].join('|')).join(',');
     }
     /** Every media item the assigned triggers need, flattened for pinning. */
@@ -1087,6 +1101,17 @@
     // null from false is the difference between "operator wants sound" and "nobody has said".
     let remoteMuteOverride = null;
 
+    /*
+     * ⚠️ Declared HERE, above applyMute, deliberately. Every function below reads it, and this file
+     * has been bricked once already by a `let` read from above its own declaration — the boot-TDZ
+     * that threw on every boot and could not be fixed by rebooting. Moving this line down is a
+     * regression even if nothing appears to break.
+     *
+     * True while a trigger overlay is COVERING the screen. Not "while a trigger is active": see
+     * triggerSyncAudio, which derives it from what the renderer actually drew.
+     */
+    let baseAudioSuppressed = false;
+
     function muteState(item) {
       return {
         wallFollower: (typeof isWallFollower === 'function') ? !!isWallFollower() : false,
@@ -1102,6 +1127,10 @@
     // The decision alone, touching no surface — needed when BUILDING a player, where the answer
     // is a construction parameter rather than something applied afterwards.
     function applyMuteWanted(item) {
+      // ⚠️ Must honour suppression: this is what the YouTube onReady path decides from, so a base
+      // playlist advancing onto a YouTube item mid-alarm would otherwise unMute() itself and there
+      // is no applyMute() afterwards to correct it.
+      if (baseAudioSuppressed) return true;
       return window.MediaMute ? window.MediaMute.resolveMuted(muteState(item)) : true;
     }
 
@@ -1110,16 +1139,70 @@
       const want = window.MediaMute
         ? window.MediaMute.resolveMuted(muteState(activeMuteItem))
         : true;   // no resolver loaded => stay silent rather than blare
+      /*
+       * ⚠️ SKIP THE OVERLAY ENTIRELY. This selector is document-wide, and `want` is the BASE
+       * playlist's mute decision — it has no authority over an emergency overlay.
+       *
+       * The previous version wrote `want || (baseAudioSuppressed && !isOverlayMedia(el))`, which
+       * scoped only the SUPPRESSION term and applied `want` to every element including the
+       * overlay. That was not a corner case: resolveMuted() returns true whenever there is no user
+       * gesture (lib/media-mute.js), and a signage panel never gets one — so `want` is true on
+       * essentially every deployed screen, and ANY applyMute() during an alarm silenced the alarm.
+       * The comment that used to sit here said that must never happen, directly above the line
+       * that did it.
+       */
       document.querySelectorAll('video, audio').forEach((el) => {
-        try { el.muted = want; } catch (e) { /* torn down */ }
+        if (isOverlayMedia(el)) return;   // the overlay belongs to the trigger/PiP engines
+        try { el.muted = want || baseAudioSuppressed; } catch (e) { /* torn down */ }
       });
       if (activeYtPlayer) {
         try {
-          if (want) activeYtPlayer.mute();
+          // activeYtPlayer is always the BASE embed — trigger playlists drop YouTube items in
+          // triggerFire precisely because this singleton is shared.
+          if (want || baseAudioSuppressed) activeYtPlayer.mute();
           else { activeYtPlayer.unMute(); activeYtPlayer.setVolume(mediaVolume != null ? Math.round(mediaVolume * 100) : 100); }
         } catch (e) { /* player not ready yet; onReady applies it again */ }
       }
       return want;
+    }
+
+    /*
+     * Is this element part of the OVERLAY layer (#pipContainer) rather than the base playlist?
+     *
+     * ⚠️ The `__stOverlay` latch is not belt-and-braces. This file has a documented class of
+     * DETACHED-but-still-decoding media (#146 ghost audio), and the transition path builds and
+     * warm-plays a <video> before it is ever appended — in both cases `closest()` cannot find a
+     * parent, and an unlatched overlay video would be misread as base media and silenced.
+     */
+    function isOverlayMedia(el) {
+      if (!el) return false;
+      if (el.__stOverlay) return true;
+      try { return !!(el.closest && el.closest('#pipContainer')); } catch (e) { return false; }
+    }
+
+    /*
+     * Silence the BASE playlist while an overlay covers the screen — the fix for two audio streams
+     * playing at once during an alarm.
+     *
+     * ⚠️ RELEASING RE-RESOLVES, it does not un-mute. applyMute() runs the four-input resolver in
+     * lib/media-mute.js (wall follower, operator override, item flag, autoplay gesture), so a
+     * screen that was deliberately silent before the alarm is still silent after it. A blanket
+     * un-mute here would invent a fifth rule that immediately disagrees with the other four.
+     */
+    function setBaseAudioSuppressed(on) {
+      // Idempotent: triggerFire calls triggerStop('superseded') first, so a re-assert would
+      // otherwise release and re-apply on every repeat — and control gear repeats on a timer.
+      if (baseAudioSuppressed === !!on) return;
+      baseAudioSuppressed = !!on;
+      if (on) {
+        document.querySelectorAll('video, audio').forEach((el) => {
+          if (isOverlayMedia(el)) return;
+          try { el.muted = true; } catch (e) { /* torn down */ }
+        });
+        try { if (activeYtPlayer) activeYtPlayer.mute(); } catch (e) { /* not ready */ }
+      } else {
+        applyMute();
+      }
     }
     let ytGeneration = 0;
     // #215: fallback advance timer for YouTube. Shorts (and some Android TV WebViews)
@@ -1151,6 +1234,9 @@
     function tryUnmuteLeader() {
       const video = document.querySelector('#playerContainer video');
       if (!video) return false;
+      // Scoped to #playerContainer, so this is BASE media by construction — un-muting it while an
+      // overlay covers the screen is exactly the double-audio bug this suppression exists to stop.
+      if (baseAudioSuppressed) return false;
       if (!video.muted) return true;
       // Capture state, unmute, do a fresh pause+play within the same task.
       // Firefox is more permissive when play() is treated as a brand-new
@@ -1211,8 +1297,9 @@
         if (isWallFollower()) return;
         if (wasFirst) console.log('[wall/audio] first user gesture detected — attempting unmute');
         tryUnmuteLeader();
-        // Unmute YouTube player if active
-        if (activeYtPlayer && typeof activeYtPlayer.unMute === 'function') {
+        // Unmute YouTube player if active. Guarded like the identical block in unlockAudio: a tap
+        // on a touch panel during an alarm must not restore the BASE playlist's audio underneath it.
+        if (activeYtPlayer && typeof activeYtPlayer.unMute === 'function' && !baseAudioSuppressed) {
           try { activeYtPlayer.unMute(); activeYtPlayer.setVolume(100); console.log('Unmuted YouTube player'); } catch {}
         }
       }, { once: false });
@@ -1422,11 +1509,21 @@
       } catch(e) { console.warn('Audio unlock failed:', e); }
       // Wall followers must stay muted — leader is the only audio source.
       if (isWallFollower()) return;
-      // Unmute any playing HTML5 video
-      document.querySelectorAll('video').forEach(v => { v.muted = false; });
+      /*
+       * ⚠️ PER-ELEMENT, not an early return — and the difference matters.
+       *
+       * The wall-follower check above bails out of the whole function, which is right there: a
+       * follower has no audio at all. Doing the same for suppression would be wrong: a gesture
+       * during an alarm should unlock the ALARM's audio, not be swallowed because the base is
+       * silenced. So the base stays muted and the overlay is allowed through.
+       */
+      document.querySelectorAll('video').forEach(v => {
+        if (baseAudioSuppressed && !isOverlayMedia(v)) return;
+        v.muted = false;
+      });
       // Unmute the active YouTube embed (iframe — querySelectorAll('video') misses it)
       try {
-        if (activeYtPlayer && typeof activeYtPlayer.unMute === 'function') {
+        if (activeYtPlayer && typeof activeYtPlayer.unMute === 'function' && !baseAudioSuppressed) {
           activeYtPlayer.unMute();
           activeYtPlayer.setVolume(100);
         }
@@ -1990,14 +2087,16 @@
             break;
           case 'KEYCODE_VOLUME_UP':
             // Wall followers ignore volume changes — they stay silent.
-            if (video && !isWallFollower()) { video.volume = Math.min(1, video.volume + 0.1); video.muted = false; }
+            // baseAudioSuppressed: a volume key must not un-silence the base under a live alarm.
+            // There is no play() after this write, so the 'play' capture net would never correct it.
+            if (video && !isWallFollower() && !baseAudioSuppressed) { video.volume = Math.min(1, video.volume + 0.1); video.muted = false; }
             break;
           case 'KEYCODE_VOLUME_DOWN':
             if (video) { video.volume = Math.max(0, video.volume - 0.1); }
             break;
           case 'KEYCODE_MENU':
             // Toggle mute (followers can't unmute)
-            if (video && !(isWallFollower() && video.muted)) { video.muted = !video.muted; }
+            if (video && !baseAudioSuppressed && !(isWallFollower() && video.muted)) { video.muted = !video.muted; }
             break;
           case 'KEYCODE_HOME':
             // Go back to first item
@@ -2049,7 +2148,10 @@
           // Was `<video>`-only, so a YouTube item ignored the toggle entirely.
           remoteMuteOverride = !!data.muted;
           applyMute();
-          try { currentVideoEl.muted = !!data.muted; } catch (_) {}
+          // currentVideoEl is the BASE surface by definition. applyMute has already resolved the
+          // right value (and honours suppression); writing data.muted straight in would let an
+          // operator's un-mute punch through a live overlay's silence.
+          try { currentVideoEl.muted = !!data.muted || baseAudioSuppressed; } catch (_) {}
         }
       });
 
@@ -2067,9 +2169,15 @@
      * localStorage; the target playlist's media is pinned by the same message that pins the base
      * playlist. With the WAN down every part of this still works, which is the entire feature.
      *
-     * Step 4 scope: one internal handler, both doors, HTTP transport. Priority, the held set and
-     * the lease are step 6 — until then a fire is last-wins, which is the same rule the manual PiP
-     * path has always used, so the behaviour is at least consistent rather than half a policy.
+     * ⚠️ A fire is NOT last-wins. Highest priority wins, ties go to the last arrival, and a
+     * preempted `until_cleared` trigger is HELD and restored when the winner clears — see
+     * triggerPromote and the lease sweep below. (This comment used to describe the step-4 state
+     * and said the opposite of the code directly beneath it, which is worse than no comment.)
+     *
+     * Base audio: while a trigger COVERS the screen the base playlist is silenced. That is derived
+     * from triggerActive.coversBase via triggerSyncAudio, never from `triggerActive !== null` — a
+     * trigger that covers only part of the screen leaves the base visible, and silencing it then
+     * would be wrong.
      */
     let triggerActive = null;                 // { trigger, mode, since, source, leaseUntil }
     let triggerTimers = {};                   // its OWN store — clearZoneTimers() must not reach it
@@ -2171,9 +2279,68 @@
       triggerTimers = {};
       const was = triggerActive;
       triggerActive = null;
-      const c = document.getElementById('pipContainer');
-      if (c) c.innerHTML = '';
+      /*
+       * ⚠️ REMOVE ONLY OUR OWN BOX. #pipContainer has TWO owners — this and the manual PiP path
+       * (pipTeardown) — and both used to do `innerHTML = ''`, so each silently destroyed the
+       * other's DOM while the other's state machine carried on believing it was on screen. The
+       * dangerous direction was this one: wiping a live .pip-box here left pipTimer/pipCurrent
+       * set, and that orphaned timer later fired pipClear() -> pipTeardown() and erased a live
+       * emergency overlay, from a timer belonging to an overlay that no longer existed.
+       *
+       * The media teardown is not decoration: `innerHTML = ''` on a container holding a playing
+       * <video> leaves it detached-but-DECODING, which is the #146 ghost-audio bug (see the fix
+       * at the bottom of teardownCurrentMedia). Same three-line shape as the zone path.
+       *
+       * Deliberately inlined rather than shared with pipTeardown: three tests slice this file
+       * textually and compile the region with `new Function`, so a helper declared outside the
+       * slice would be a ReferenceError there.
+       */
+      /*
+       * ⚠️ The whole removal is wrapped: triggerStop runs on the fire path (superseded), the
+       * clear path and the lease sweep, and a throw here used to escape into the HTTP handler
+       * and leave the response unsent — the sender hangs instead of getting an error. Clearing
+       * an overlay must never be able to wedge the door that clears it.
+       */
+      try {
+        const c = document.getElementById('pipContainer');
+        if (c && c.querySelectorAll) c.querySelectorAll('.trigger-box').forEach((b) => {
+          try {
+            b.querySelectorAll('video').forEach((v) => {
+              try { v.onended = null; v.onerror = null; v.pause(); v.removeAttribute('src'); v.load(); } catch (e) {}
+            });
+          } catch (e) { /* no media in this box */ }
+          try { b.remove(); } catch (e) {}
+        });
+      } catch (e) { try { console.warn('[trigger] overlay teardown failed: ' + e.message); } catch (e2) {} }
+      /*
+       * ⚠️ NOT on a supersede. triggerFire opens with triggerStop('superseded') and then syncs at
+       * its own end, so syncing here too would drive the base true -> false -> true and let its
+       * audio blip through the gap every time one trigger replaces another. The idempotence guard
+       * in setBaseAudioSuppressed cannot absorb that, because the state genuinely changes twice.
+       * On a supersede the caller is mid-transaction and owns the final sync; every other reason
+       * (cleared, clear-all, lease expiry, duration cap) is a settled state and syncs here.
+       */
+      if (reason !== 'superseded') triggerSyncAudio();
       if (was) { triggerLog('info', `cleared "${was.trigger.name}" (${reason})`); reportTriggerStatus(); }
+    }
+
+    /*
+     * ONE derived-state sync, called from triggerFire and triggerStop — not two imperative calls.
+     *
+     * ⚠️ triggerFire begins with triggerStop('superseded'), so a release-then-suppress pair would
+     * un-mute the base for a tick on EVERY re-assert. Control gear re-asserts on a timer (Extron
+     * has StartKeepAlive for precisely this, Q-SYS's own protocol expects traffic every 60s), so
+     * that tick would recur every few seconds for the whole duration of an alarm. Deriving the
+     * state instead, plus the idempotence guard in setBaseAudioSuppressed, makes supersede,
+     * promote, lease expiry, clear-all and the duration cap all correct without a call each —
+     * every one of those paths ends in triggerFire or triggerStop.
+     *
+     * typeof-guarded because three tests compile this region in isolation with `new Function`,
+     * where the helper is outside the slice. Same idiom the file already uses for isWallFollower.
+     */
+    function triggerSyncAudio() {
+      if (typeof setBaseAudioSuppressed !== 'function') return;
+      try { setBaseAudioSuppressed(!!(triggerActive && triggerActive.coversBase)); } catch (e) {}
     }
 
     /*
@@ -2189,22 +2356,58 @@
      */
     function triggerFire(trigger, source, carriedLease) {
       const container = document.getElementById('pipContainer');
-      if (!container) return;
-      const items = Array.isArray(trigger.items) ? trigger.items : [];
+      if (!container) return false;
+      /*
+       * ⚠️ YOUTUBE ITEMS ARE DROPPED FROM A TRIGGER PLAYLIST, and this is a containment fix rather
+       * than a policy: createYoutubeEmbed is a SINGLETON shared with the base playlist. It does
+       * ++ytGeneration and activeYtPlayer.destroy() on entry, so a YouTube item inside a trigger
+       * DESTROYS the base playlist's player outright — and triggerStop has no path to rebuild it,
+       * so the base is stuck on a dead item for the rest of its life. Its error path is worse
+       * still: `if (playlist.length > 1) setTimeout(nextItem, 2000)` reads the BASE playlist, so a
+       * bad video id inside a trigger silently advances the content underneath it.
+       *
+       * It is also unpinnable, which already violates this feature's foundation — the target is a
+       * playlist rather than a URL precisely so every item is library content that can be held on
+       * disk. A trigger item that needs the WAN is not a trigger item.
+       *
+       * Dropped here rather than only refused at the API because definitions are cached on devices
+       * in the field, and a definition saved before this existed must not be able to wedge a panel.
+       */
+      let items = Array.isArray(trigger.items) ? trigger.items : [];
+      const yt = items.filter((i) => i && (i.mime_type === 'video/youtube' || i.youtube_id));
+      if (yt.length) {
+        items = items.filter((i) => !(i && (i.mime_type === 'video/youtube' || i.youtube_id)));
+        triggerLog('warn', `"${trigger.name}": dropped ${yt.length} YouTube item(s) — not playable `
+          + 'offline, and the embed is shared with the base playlist');
+      }
       if (!items.length) {
         // A fire against nothing is the failure the pinning work exists to prevent, so it is loud.
         triggerLog('warn', `"${trigger.name}" fired but its playlist is empty on this device`);
-        return;
+        return false;
       }
       triggerStop('superseded');
 
       const box = document.createElement('div');
       box.className = 'trigger-box';
       box.style.cssText = 'position:absolute;inset:0;background:#000;overflow:hidden;';
+      // Latched so media inside is recognised as overlay even when DETACHED — the transition path
+      // warm-plays a <video> before appending it, and #146 left detached elements still decoding.
+      box.__stOverlay = true;
       container.appendChild(box);
 
       triggerActive = {
         trigger, mode: trigger.mode, since: Date.now(), source,
+        /*
+         * ⚠️ Whether the overlay COVERS the screen — computed here, beside the line that decides
+         * the box's shape, so the two can never drift. Today it is unconditionally true because
+         * the box is hardcoded inset:0 opaque; geometry is reserved at the API for exactly that
+         * reason. If a banner/partial mode is ever added, this expression changes on the same
+         * line as the style and the audio rule follows automatically.
+         *
+         * Base audio is suppressed from THIS, never from `triggerActive !== null`: a trigger that
+         * only covers a corner leaves the base visible, and silencing it would be wrong.
+         */
+        coversBase: true,
         // A restored trigger keeps the lease it had — being covered for a while is not a renewal,
         // and resetting the clock would let a preemption silently extend a lapsed assertion.
         leaseUntil: carriedLease !== undefined ? carriedLease : triggerLeaseUntil(trigger),
@@ -2213,7 +2416,21 @@
         triggerLeaseTimer = setInterval(triggerLeaseSweep, 5000);
         if (triggerLeaseTimer && triggerLeaseTimer.unref) triggerLeaseTimer.unref();
       }
-      showZoneItem({ id: '__trigger__' }, box, items, 0, triggerTimers);
+      /*
+       * ⚠️ WRAPPED. Everything above has already committed: the previous overlay is gone, the box
+       * is on screen and triggerActive is set. A throw out of the renderer would leave an opaque
+       * black box with no content, the base silenced, and — because this runs inside the HTTP
+       * handler — the response never sent, so the control processor blocks to timeout. That is the
+       * same wedge triggerStop was hardened against; the fire path was left open.
+       */
+      try {
+        showZoneItem({ id: '__trigger__' }, box, items, 0, triggerTimers);
+      } catch (e) {
+        triggerLog('warn', `"${trigger.name}" failed to render: ${(e && e.message) || e}`);
+        triggerStop('render failed');
+        return false;
+      }
+      triggerSyncAudio();
 
       /*
        * `once` = play the playlist through once. max_duration_sec is an UPPER BOUND, not the
@@ -2247,6 +2464,11 @@
       }
       triggerLog('info', `fired "${trigger.name}" via ${source} (${trigger.mode}, ${items.length} item(s))`);
       reportTriggerStatus();
+      // ⚠️ The return value is load-bearing: the arbitration path pushes the outgoing trigger onto
+      // the held list BEFORE calling this, and un-pushes it when this reports false. Otherwise a
+      // trigger that never rendered leaves the previous one both active and held, and clearing it
+      // fires it straight back.
+      return true;
     }
 
     /**
@@ -2338,16 +2560,28 @@
              * last-show-wins rule the manual PiP path has always used, so the triggered and manual
              * paths cannot disagree about what happens.
              */
+            let heldEntry = null;
             if (triggerActive && triggerActive.mode === 'until_cleared') {
-              triggerHeld.push({
+              heldEntry = {
                 trigger: triggerActive.trigger,
                 source: triggerActive.source,
                 leaseUntil: triggerActive.leaseUntil,
-              });
+              };
+              triggerHeld.push(heldEntry);
               triggerLog('info',
                 `"${triggerActive.trigger.name}" held while "${incoming.name}" shows`);
             }
-            triggerFire(incoming, source);
+            /*
+             * ⚠️ UN-HOLD IF THE INCOMING TRIGGER NEVER RENDERED. triggerFire bails out for an
+             * empty playlist (including one emptied by the YouTube drop) or a missing container,
+             * deliberately BEFORE it disturbs the live overlay. Without this, the current trigger
+             * is left both active AND on the held list — so clearing it fires it straight back,
+             * and an operator watches the alarm they just cleared reappear on its own.
+             */
+            if (!triggerFire(incoming, source) && heldEntry) {
+              const i = triggerHeld.indexOf(heldEntry);
+              if (i >= 0) triggerHeld.splice(i, 1);
+            }
           }
         }
       }
@@ -2366,6 +2600,54 @@
      * ⚠️ OFF BY DEFAULT. This opens a listening port on the LAN that changes what a screen shows.
      */
     let triggerHttpServer = null;
+    /*
+     * ⚠️ BE LIBERAL ABOUT FRAMING — the control-system world is not consistent about it and does
+     * not consider that a bug. Crestron's own worked example emits HTTP/1.0 with BARE LF, not CRLF.
+     * Q-SYS ships an EOL constant literally called `Any` ("any sequence of carriage return and/or
+     * linefeed characters") plus a `Null` (single 0 byte) mode — the existence of `Any` is the AV
+     * industry telling you line endings arrive however they arrive. AMX appends $0D,$0A by hand,
+     * per site, and sometimes forgets.
+     *
+     * We also TRIM, and this comment is the documentation of that: BrightSign does not trim, its
+     * docs say "leading/trailing spaces do matter", and it is a recurring support burden. A
+     * trailing space must never be the reason an evacuation notice does not appear.
+     *
+     * The 1024 cap is Extron's, not ours: ControlScript truncates UDP payloads at 1024 bytes and
+     * delivers at most 1024 per receive event. Anything longer is not a message we could have been
+     * sent intact, so refusing to consider the tail is honest rather than lossy.
+     */
+    function wireClean(s) {
+      let t = String(s == null ? '' : s);
+      if (t.length > 1024) t = t.slice(0, 1024);
+      /*
+       * ⚠️ ONE COMBINED CLASS, not strip-then-trim. The previous version stripped a trailing run of
+       * terminators and THEN trimmed, so any whitespace AFTER a NUL/CR/LF defeated the whole
+       * cleanup: "TOKEN\r\n\0  " survived as "TOKEN\r\n\0" and was rejected as malformed. That is
+       * precisely the documented target — Q-SYS's Null EOL mode plus AMX's hand-appended padding —
+       * and the old test loop only ever tried one suffix at a time, so it could not see it.
+       * \u0000 is not whitespace to trim(), which is why it has to be named explicitly.
+       * Leading junk is stripped too: a UTF-8 BOM from a .NET sender is otherwise a bad_magic.
+       */
+      return t.replace(/^[\s\0\uFEFF]+/, '').replace(/[\s\0\uFEFF]+$/, '');
+    }
+
+    /** Minimal query parser — no `url` module, which is not present on every player platform. */
+    function parseQuery(u) {
+      const out = {};
+      const i = String(u || '').indexOf('?');
+      if (i < 0) return out;
+      for (const pair of String(u).slice(i + 1).split('&')) {
+        if (!pair) continue;
+        const eq = pair.indexOf('=');
+        const k = eq < 0 ? pair : pair.slice(0, eq);
+        const v = eq < 0 ? '' : pair.slice(eq + 1);
+        try {
+          out[decodeURIComponent(k.replace(/\+/g, ' '))] = decodeURIComponent(v.replace(/\+/g, ' '));
+        } catch (e) { out[k] = v; }   // a bad %-escape must not lose the whole request
+      }
+      return out;
+    }
+
     function startTriggerHttp() {
       if (!triggerConfig.accept_http) return;
       /*
@@ -2384,7 +2666,71 @@
       const port = Number(triggerConfig.http_port) || 8079;
       try {
         const srv = http.createServer((req, res) => {
-          if (req.method !== 'POST') { res.writeHead(405).end(); return; }
+          const ip = (req.socket && req.socket.remoteAddress) || 'unknown';
+          /*
+           * ⚠️ The reply is newline-terminated on purpose. Extron integrators confirm delivery with
+           * SendAndWait(data, timeout, deliTag=...), i.e. they read until a known suffix; a body with
+           * no terminator leaves them blocking until timeout on a request that actually succeeded.
+           * Cheap here, and it turns fire-and-hope into something an integrator can alarm on.
+           */
+          const reply = (v, statusOverride) => {
+            const b = JSON.stringify(v.ok ? { ok: true, action: v.action } : { ok: false, error: v.reason }) + '\n';
+            // typeof-guarded: this region is compiled in isolation by three tests, whose env has no Buffer.
+            const len = (typeof Buffer !== 'undefined' && Buffer.byteLength) ? Buffer.byteLength(b) : b.length;
+            /*
+             * ⚠️ no-store is not hygiene here. A GET that changes what is on a screen is a
+             * non-idempotent "safe" method: any prefetcher, link scanner, AV URL-follower or
+             * intermediate cache that sees the URL can replay the fire. Caching is the one part
+             * of that we can refuse, and the URL should be treated as a bearer credential.
+             */
+            res.writeHead(statusOverride || (v.ok ? 200 : 400), {
+              'Content-Type': 'application/json',
+              'Content-Length': len,
+              'Cache-Control': 'no-store, no-cache, must-revalidate',
+              'Pragma': 'no-cache',
+            });
+            res.end(b);
+          };
+          const fire = (text) => reply(handleTrigger({ text: wireClean(text), source: 'http', sourceIp: ip }));
+
+          /*
+           * ⚠️ GET IS NOT A CONVENIENCE — it is the only HTTP an AMX or Extron installer can reach.
+           * AMX NetLinx has no HTTP client and no TLS at all: every request is hand-concatenated
+           * strings with a manually computed Content-Length, and its own community's advice is to
+           * "start with a full-blown header, then take stuff out one at a time until it breaks".
+           * Extron's Global Scripter forbids the http, socket and ssl modules outright (so urllib is
+           * gone too) while still allowing json/hmac/hashlib. A POST-JSON-only door is unreachable
+           * from both. A GET with query parameters is the second-easiest thing to emit on every
+           * control platform surveyed, after a bare UDP string.
+           *
+           * The secret rides in the query string for the same reason Carousel's CAP endpoint takes
+           * its token there: plenty of this gear cannot set a request header at all.
+           */
+          if (req.method === 'GET') {
+            const q = parseQuery(req.url);
+            // `m` carries a whole raw wire line, for senders that already build one.
+            if (q.m) return fire(q.m);
+            if (q.token) return fire('ST1 ' + (q.secret || '') + ' ' + q.token);
+            /*
+             * ⚠️ ROUTED THROUGH handleTrigger, not short-circuited. A branch that replies without
+             * it is an UNMETERED door that moves no counters — so an installer who typed ?tok=
+             * instead of ?token= watches `received` sit at 0 and concludes their request never
+             * reached the player. That is the exact misreading these counters exist to prevent,
+             * and it also left one door outside the rate limiter.
+             */
+            // 'ST1' alone parses as OURS but incomplete -> reason `malformed`, which is a member of
+            // the closed reject set and is diagnostically distinct from `bad_magic` (stray LAN
+            // broadcast noise). A mistyped ?tok= should not land in the same bucket as a printer
+            // announcing itself.
+            return fire('ST1');
+          }
+          if (req.method !== 'POST') {
+            // Through reply(), so it carries the newline an Extron SendAndWait(deliTag=) reads
+            // until. A bodiless 405 blocks that sender to timeout — the very failure the
+            // termination work exists to prevent, on the one path nobody was testing.
+            res.setHeader('Allow', 'GET, POST');
+            return reply({ ok: false, reason: 'GET or POST only' }, 405);
+          }
           let body = '';
           req.on('data', (c) => {
             body += c;
@@ -2401,13 +2747,12 @@
                 text = 'ST1 ' + (j.secret || '') + ' ' + j.token;
               }
             } catch (e) { /* not JSON: it is the raw line */ }
-            const v = handleTrigger({
-              text: String(text || '').trim(),
-              source: 'http',
-              sourceIp: (req.socket && req.socket.remoteAddress) || 'unknown',
-            });
-            res.writeHead(v.ok ? 200 : 400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(v.ok ? { ok: true, action: v.action } : { ok: false, error: v.reason }));
+            // A form post is the third shape this gear produces, and it costs one branch.
+            if (/^[^=&\s]+=[^&]*(&|$)/.test(body) && /(^|&)token=/.test(body)) {
+              const q = parseQuery('?' + body);
+              if (q.token) text = 'ST1 ' + (q.secret || '') + ' ' + q.token;
+            }
+            fire(text);
           });
         });
         srv.on('error', (e) => {
@@ -2510,7 +2855,10 @@
             }
             return;
           }
-          handleTrigger({ text, source: 'udp', sourceIp: (rinfo && rinfo.address) || 'unknown' });
+          // Same liberal framing as the HTTP door — see wireClean. A datagram from a control
+          // processor may or may not carry a terminator, and its author does not consider that
+          // a detail worth being consistent about.
+          handleTrigger({ text: wireClean(text), source: 'udp', sourceIp: (rinfo && rinfo.address) || 'unknown' });
         });
         sock.on('error', (e) => {
           triggerLog('warn', 'UDP trigger socket error: ' + ((e && e.message) || e));
@@ -2684,7 +3032,18 @@
     function pipTeardown() {
       try { if (pipTimer) clearTimeout(pipTimer); } catch (e) {}
       pipTimer = null; pipCurrent = null;
-      const c = document.getElementById('pipContainer'); if (c) c.innerHTML = '';
+      // ⚠️ Remove only our own box — see the matching note in triggerStop. This used to be
+      // `innerHTML = ''`, which erased a live trigger overlay while triggerActive stayed
+      // non-null: its timers kept running, its lease kept ticking, device:trigger-status kept
+      // reporting "active", and lower-priority triggers kept being dropped, all while the screen
+      // showed a PiP box over the playlist. Media teardown guards the #146 ghost-audio path.
+      const c = document.getElementById('pipContainer');
+      if (c) c.querySelectorAll('.pip-box').forEach((b) => {
+        b.querySelectorAll('video').forEach((v) => {
+          try { v.onended = null; v.onerror = null; v.pause(); v.removeAttribute('src'); v.load(); } catch (e) {}
+        });
+        try { b.remove(); } catch (e) {}
+      });
     }
     function pipShow(p) {
       const container = document.getElementById('pipContainer');
@@ -2693,6 +3052,7 @@
         pipTeardown(); // single slot, last-show-wins
         const box = document.createElement('div');
         box.className = 'pip-box';
+        box.__stOverlay = true;   // overlay layer, like .trigger-box — see isOverlayMedia
         box.style.width = pipPx(p.width, 480);
         box.style.height = pipPx(p.height, 360);
         box.style.background = pipColor(p.background_color) || '#000000';
@@ -3573,11 +3933,13 @@
           triggerLog('warn', 'HTTP triggers disabled — the listener stops at the next restart');
         }
       }
+      let triggersRepin = false;
       if (Array.isArray(data.triggers)) {
         const sig = triggersSig(data.triggers);
         if (sig !== triggersSig(triggers)) {
           triggers = data.triggers;
           saveTriggersCache(triggers);
+          triggersRepin = true;
           console.log('[trigger] ' + triggers.length + ' definition(s) synced');
         }
       }
@@ -3657,6 +4019,25 @@
             hideStatus();
           }
         } catch (e) { /* never let the health check break a refresh */ }
+        /*
+         * ⚠️ THE TRIGGER SET CHANGED AND THE BASE PLAYLIST DID NOT, so the re-pin further down is
+         * never reached and this is the only place it can happen.
+         *
+         * This is not merely "the media was not prefetched". `urls` is declared COMPLETE to the
+         * service worker, and pruneToPlaylist() deletes every content-cache entry absent from it —
+         * so assigning a trigger to a screen whose playlist is stable leaves the trigger's media
+         * EVICTED, and the trigger then fires against nothing on exactly the day it matters. That
+         * is the failure the comment above requestOfflineCache says must not happen.
+         *
+         * Argument shape is byte-identical to the changed-branch call on purpose: the first
+         * argument is the RAW assignments, not the split `playlist`, because multi-zone items live
+         * in their own lists and a keep-set that omits them makes the worker prune assets a live
+         * zone is still playing.
+         */
+        if (triggersRepin) {
+          requestOfflineCache(Array.isArray(data.assignments) ? data.assignments : playlist,
+                              triggerItems(triggers));
+        }
         return;
       }
 
@@ -4871,7 +5252,19 @@
         const video = document.createElement('video');
         video.src = src;
         video.autoplay = true;
-        video.muted = (zone.sort_order > 0); // Only first zone has audio
+        // Propagate the overlay latch from the container: this same function renders BOTH real
+        // zones and the synthetic '__trigger__' zone, and audio suppression must be able to tell
+        // them apart even after the element is detached (#146) or before it is appended.
+        video.__stOverlay = !!div.__stOverlay;
+        /*
+         * ⚠️ An overlay zone (the synthetic '__trigger__') has no sort_order, so `undefined > 0`
+         * is false and the alarm used to be born UNMUTED — which on a panel with no user gesture
+         * means autoplay is REFUSED and the video never starts at all. With a single-item trigger
+         * there is no onended, no onerror and no timer either, so nothing self-heals: the result
+         * was an opaque black box over the playlist, forever. Stated explicitly now rather than
+         * falling out of a comparison against undefined.
+         */
+        video.muted = div.__stOverlay ? false : (zone.sort_order > 0); // Only first zone has audio
         video.loop = !multi; // single-item zone loops; multi advances on end
         video.playsInline = true;
         video.style.cssText = `width:100%;height:100%;object-fit:${zone.fit_mode || 'cover'}`;
@@ -4886,6 +5279,24 @@
           timers[zone.id] = setTimeout(advance, dur + 5000);
         }
         div.appendChild(video);
+        /*
+         * ⚠️ AUTOPLAY IS NOT ENOUGH, and this branch had nothing else. The fullscreen path has
+         * had a play()-with-muted-retry and a 2s kick for years; the zone path relied on the
+         * `autoplay` attribute alone. Unmuted autoplay without a user gesture is refused outright
+         * (lib/media-mute.js says so), so an unmuted zone or trigger video simply never started.
+         * Losing the audio is bad; losing the VIDEO is what turns an alarm into a black screen.
+         */
+        try {
+          const p = video.play();
+          if (p && typeof p.then === 'function') {
+            p.catch(() => {
+              try { video.muted = true; video.play().catch(() => {}); } catch (e) { /* gone */ }
+            });
+          }
+        } catch (e) { /* element torn down mid-call */ }
+        setTimeout(() => {
+          try { if (video.paused && video.isConnected !== false) { video.muted = true; video.play().catch(() => {}); } } catch (e) {}
+        }, 2000);
       } else {
         const img = document.createElement('img');
         img.src = src;
@@ -5297,6 +5708,20 @@
         try { el.pause(); el.removeAttribute('src'); el.load(); el.style.visibility = 'hidden'; } catch (err) {}
         return;
       }
+      /*
+       * ⚠️ PLACEMENT IS LOAD-BEARING: this must sit ABOVE the `mediaVolume == null` return.
+       *
+       * That return fires on every device where no volume command has ever been sent — which is
+       * most of them — so anything below it is simply not reached in the common case. This is the
+       * one chokepoint that catches every newly mounted element (fullscreen, zones, the
+       * preloader), which is why the screen-off case above lives here too.
+       *
+       * It is also what makes the uncancellable 2s "last-resort kick" harmless: that timer calls
+       * play(), which re-enters this handler and re-applies suppression.
+       */
+      if (baseAudioSuppressed && !isOverlayMedia(el)) {
+        try { el.muted = true; } catch (err) { /* gone */ }
+      }
       if (mediaVolume == null) return;
       try { if (typeof isWallFollower === 'function' && isWallFollower()) return; } catch (err) { /* not a wall */ }
       // Level only — see setMediaVolume: the mount path has already resolved this element's mute
@@ -5320,9 +5745,25 @@
         // element. nextItem() rebuilds from scratch, which is the same path a normal advance uses.
         document.querySelectorAll('video, audio').forEach((el) => { try { el.style.visibility = ''; } catch (e) {} });
         try { if (typeof nextItem === 'function') nextItem(); } catch (e) { /* fall back to whatever is on screen */ }
+        /*
+         * ⚠️ nextItem() rebuilds the BASE only. A trigger that was showing when the screen went
+         * off would otherwise come back as a dead, empty, opaque box with triggerActive still set
+         * and baseAudioSuppressed still true — a permanently black AND permanently silent panel
+         * that no timer clears, because an until_cleared trigger with no lease has none.
+         */
+        try {
+          if (typeof triggerActive !== 'undefined' && triggerActive && typeof triggerFire === 'function') {
+            const t = triggerActive.trigger, src = triggerActive.source, lease = triggerActive.leaseUntil;
+            triggerStop('screen came back — re-rendering the overlay');
+            triggerFire(t, src, lease);
+          }
+        } catch (e) { /* never let the overlay cost the base its recovery */ }
         return;
       }
       document.querySelectorAll('video, audio').forEach((el) => {
+        // The overlay layer is torn down and rebuilt by triggerFire above, not by this sweep —
+        // ripping its src out here is what left a live trigger showing nothing.
+        if (isOverlayMedia(el)) return;
         try {
           el.pause();
           // Pausing is not enough on a hardware plane: the last decoded frame STAYS on screen,
@@ -5451,6 +5892,24 @@
       // registration is worse than a narrow one, and nothing about it is visible from here.
       navigator.serviceWorker.register('/sw.js').then(reg => {
         console.log('Service Worker registered');
+        /*
+         * ⚠️ PIN ONCE AT BOOT. requestOfflineCache had only two call sites, both inside
+         * handlePlaylistUpdate, so a device that cold-boots from cache and thereafter sees only
+         * unchanged-playlist updates NEVER pinned anything. If the content cache was lost — a
+         * worker version bump, storage-pressure eviction, a ?reset= — nothing ever re-fetched it,
+         * and the trigger fired against nothing. That is the failure the whole pinning design
+         * exists to prevent, reachable without anyone doing anything wrong.
+         *
+         * Deferred to `ready` because requestOfflineCache needs an ACTIVE controller; on a first
+         * load there is none until the worker takes control.
+         */
+        navigator.serviceWorker.ready.then(() => {
+          try {
+            if (Array.isArray(playlist) && playlist.length) {
+              requestOfflineCache(playlist, triggerItems(triggers));
+            }
+          } catch (e) { console.warn('[cache] boot pin failed: ' + ((e && e.message) || e)); }
+        }).catch(() => { /* no controller yet; the next playlist update pins */ });
         // When a new SW activates, reload so the fresh code takes effect immediately
         reg.addEventListener('updatefound', () => {
           const newWorker = reg.installing;

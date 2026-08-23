@@ -109,7 +109,12 @@ test('⚠️ the probe is answered BEFORE the handler, so it never moves the cou
   const handlerIdx = udp.indexOf('handleTrigger(');
   assert.ok(probeIdx > 0 && handlerIdx > probeIdx,
     'the probe check must come before the shared handler');
-  assert.match(udp, /return;\s*\n\s*\}\s*\n\s*handleTrigger/,
+  // ⚠️ Strip comments before the adjacency check. The property that matters is that the probe
+  // branch RETURNS before the shared handler is reached; requiring the two to be textually
+  // adjacent made an explanatory comment between them a test failure, which is a brittle test
+  // punishing a correct change rather than a guard catching a wrong one.
+  const code = udp.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  assert.match(code, /return;\s*\}\s*handleTrigger/,
     'the probe branch must return rather than falling through');
 });
 

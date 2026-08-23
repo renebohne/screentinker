@@ -22,6 +22,7 @@ const dgram = require('node:dgram');
 const os = require('node:os');
 const TR = require('../lib/trigger-resolve.js');
 const { freePort } = require('./helpers/free-port');
+const { makeDocument } = require('./helpers/fake-overlay-dom');
 
 const PLAYER = fs.readFileSync(path.join(__dirname, '..', 'player', 'index.html'), 'utf8');
 const SECRET = 'u'.repeat(16);
@@ -43,10 +44,10 @@ function boot(port, over = {}) {
   const out = [];
   const env = {
     window: { TriggerResolve: TR, __debugLog_push() {} },
-    document: {
-      getElementById: () => ({ innerHTML: '', appendChild() {}, style: {} }),
-      createElement: () => ({ style: { cssText: '' }, className: '', appendChild() {} }),
-    },
+    // A #pipContainer fake that models children, classNames and remove() — the previous inline
+    // fake had no querySelectorAll, so scoped teardown threw, the throw escaped into the HTTP
+    // handler, and the test hung instead of failing. See helpers/fake-overlay-dom.js.
+    document: makeDocument(),
     console: { log() {}, warn() {} },
     setTimeout, clearTimeout, setInterval, clearInterval, Date, JSON, Number, Array, String, Math, require,
     socket: null,
