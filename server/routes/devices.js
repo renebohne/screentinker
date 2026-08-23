@@ -331,7 +331,10 @@ router.put('/:id', (req, res) => {
   }
 
   const updated = db.prepare('SELECT * FROM devices WHERE id = ?').get(req.params.id);
-  res.json(stripDeviceSecrets(updated));
+  // ⚠️ stripDeviceSecrets only removes device_token. GET /:id additionally calls
+  // stripTriggerSecretForTokens; these two echo paths did not, so a token got the trigger secret
+  // back from a rename — the escalation lib/device-sanitize.js exists to prevent.
+  res.json(stripTriggerSecretForTokens(stripDeviceSecrets(updated), req.viaToken));
 });
 
 // #146 Item D: operator BLOCK / UNBLOCK toggle. Writes devices.blocked; the device
@@ -430,7 +433,10 @@ router.post('/:id/re-adopt', (req, res) => {
   deviceSettings.applyToDevice(req.params.id, fingerprint);
   const updated = db.prepare('SELECT * FROM devices WHERE id = ?').get(req.params.id);
   console.log(`[#150] re-adopted settings (fp ${fingerprint.slice(0, 8)}…) onto device ${req.params.id} by user ${req.user.id}`);
-  res.json(stripDeviceSecrets(updated));
+  // ⚠️ stripDeviceSecrets only removes device_token. GET /:id additionally calls
+  // stripTriggerSecretForTokens; these two echo paths did not, so a token got the trigger secret
+  // back from a rename — the escalation lib/device-sanitize.js exists to prevent.
+  res.json(stripTriggerSecretForTokens(stripDeviceSecrets(updated), req.viaToken));
 });
 
 // Delete device
