@@ -240,6 +240,18 @@ const migrations = [
    */
   "ALTER TABLE playlist_items ADD COLUMN child_playlist_id TEXT REFERENCES playlists(id) ON DELETE RESTRICT",
   "CREATE INDEX IF NOT EXISTS idx_playlist_items_child ON playlist_items(child_playlist_id)",
+  /*
+   * ⚠️ The PRE-EXPANSION item list, kept beside published_snapshot.
+   *
+   * published_snapshot is device-facing and therefore FLAT — nesting is expanded out of it on
+   * purpose, so no player has to understand it. That makes it lossy about STRUCTURE, and "discard
+   * draft changes" rebuilds a playlist from it: discarding on a playlist containing a child
+   * silently replaced the reference with a snapshot-time COPY of the child's items. The nesting was
+   * gone, and it looked like a successful undo.
+   *
+   * So structure is stored separately. Discard restores from this; devices never see it.
+   */
+  "ALTER TABLE playlists ADD COLUMN published_structure TEXT",
   // #129: per-item mute. The legacy `assignments` table had a muted column, but the
   // active device payload is built from playlist_items -> published_snapshot, which never
   // carried it, so the dashboard mute toggle was a no-op end to end.

@@ -8,6 +8,7 @@ const config = require('../config');
 // by read/write helpers gated on the playlist's workspace_id.
 const { accessContext } = require('../lib/tenancy');
 const { resolveItemDuration } = require('../lib/item-duration');
+const { emitMuteChanged } = require('../lib/mute-sync');
 
 // Re-probe video duration with ffprobe if content.duration_sec is missing
 async function probeAndUpdateDuration(content) {
@@ -260,13 +261,31 @@ function publishPlaylist(playlistId, reqOrIo, seen = new Set([playlistId])) {
    * which Carousel proved requires a player release (CSL-9211). Deferred, and named in the design
    * doc so it is not rediscovered.
    */
-  const prev = db.prepare('SELECT status, published_snapshot FROM playlists WHERE id = ?').get(playlistId);
+  const prev = db.prepare('SELECT status, published_snapshot, published_structure FROM playlists WHERE id = ?').get(playlistId);
+
+  // ⚠️ Structure is captured PRE-expansion so "discard" can restore the nesting the flat snapshot
+  // cannot describe. Device-facing data stays in published_snapshot; this is never sent anywhere.
+  const structure = JSON.stringify(db.prepare(`
+    SELECT content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec, muted
+      FROM playlist_items WHERE playlist_id = ? ORDER BY sort_order ASC
+  `).all(playlistId));
+
   if (prev && prev.status === 'published' && prev.published_snapshot === next) {
+    /*
+     * The resolved list is unchanged, so no device is touched and nothing restarts — that is the
+     * point of this early exit. But STRUCTURE can differ while the flat output does not: replacing
+     * a child reference with the child's own items produces a byte-identical snapshot. Returning
+     * here without writing it would leave a stale structure behind, and discard restores from the
+     * structure — so the next undo would resurrect a reference the user had deliberately removed.
+     * Write the column, push nothing.
+     */
+    if (prev.published_structure !== structure) {
+      db.prepare('UPDATE playlists SET published_structure = ? WHERE id = ?').run(structure, playlistId);
+    }
     return { changed: false, items: snapshotItems.length };
   }
-
-  db.prepare("UPDATE playlists SET status = 'published', published_snapshot = ?, updated_at = strftime('%s','now') WHERE id = ?")
-    .run(next, playlistId);
+  db.prepare("UPDATE playlists SET status = 'published', published_snapshot = ?, published_structure = ?, updated_at = strftime('%s','now') WHERE id = ?")
+    .run(next, structure, playlistId);
   pushToDevices(playlistId, reqOrIo);
 
   /*
@@ -468,8 +487,24 @@ router.post('/:id/discard', requirePlaylistWrite, (req, res) => {
     return res.status(400).json({ error: 'Playlist has no unpublished changes' });
   }
 
+  /*
+   * ⚠️ Restore from STRUCTURE, not from the snapshot, when we have it.
+   *
+   * published_snapshot is flat by design — nesting is expanded out of it so no player has to
+   * understand it — which makes it unable to describe a child reference. Rebuilding from it turned
+   * "discard my draft changes" into "silently replace the nested playlist with a copy of whatever
+   * it contained at publish time". The nesting was destroyed and the operation reported success.
+   *
+   * published_structure is the pre-expansion list. Rows published before it existed have none, so
+   * fall back to the snapshot — those playlists cannot contain a child anyway, because the column
+   * and the feature arrived together.
+   */
   let publishedItems;
-  try { publishedItems = JSON.parse(playlist.published_snapshot); } catch (e) {
+  try {
+    publishedItems = playlist.published_structure
+      ? JSON.parse(playlist.published_structure)
+      : JSON.parse(playlist.published_snapshot);
+  } catch (e) {
     return res.status(500).json({ error: 'Corrupt published snapshot' });
   }
 
@@ -477,10 +512,14 @@ router.post('/:id/discard', requirePlaylistWrite, (req, res) => {
     // Clear current draft items
     db.prepare('DELETE FROM playlist_items WHERE playlist_id = ?').run(req.params.id);
     // Re-insert from snapshot, skipping items whose content/widget was deleted
-    const insert = db.prepare('INSERT INTO playlist_items (playlist_id, content_id, widget_id, zone_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?, ?)');
+    // muted rides along too: #129's per-item mute was dropped by the old restore, so discarding an
+    // unrelated draft edit silently un-muted every item that had been muted before publish.
+    const insert = db.prepare('INSERT INTO playlist_items (playlist_id, content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec, muted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
     for (const item of publishedItems) {
       try {
-        insert.run(req.params.id, item.content_id || null, item.widget_id || null, item.zone_id || null, item.sort_order, item.duration_sec);
+        insert.run(req.params.id, item.content_id || null, item.widget_id || null,
+                   item.child_playlist_id || null, item.zone_id || null, item.sort_order, item.duration_sec,
+                   item.muted ? 1 : 0);
       } catch (e) {
         if (e.message.includes('FOREIGN KEY')) {
           console.warn(`Discard: skipping snapshot item (content_id=${item.content_id}, widget_id=${item.widget_id}) — referenced entity was deleted`);
@@ -795,6 +834,25 @@ router.put('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
     updates.push('duration_sec = ?');
     values.push(duration_sec);
   }
+  /*
+   * ⚠️ #129's per-item mute, which this route never read.
+   *
+   * The sibling route on the device page (routes/assignments.js) handled it; here the field was
+   * accepted, dropped, and answered 200. The dashboard's only mute toggle lives on the device page,
+   * so no screen was affected today — but this endpoint is part of the public API surface, and an
+   * API client muting through it got success and silence. Found while auditing playlist_items
+   * writers for nesting: the same shape — a column added later that only some writers were told
+   * about.
+   *
+   * Writing the column is not enough on its own: devices play published_snapshot, not these rows.
+   * emitMuteChanged patches the snapshot (and its parents') and tells live devices.
+   */
+  const existing = db.prepare('SELECT * FROM playlist_items WHERE id = ? AND playlist_id = ?')
+    .get(req.params.itemId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'item not found' });
+  const { muted } = req.body;
+  const mutedChanged = muted !== undefined && (existing.muted ? 1 : 0) !== (muted ? 1 : 0);
+  if (muted !== undefined) { updates.push('muted = ?'); values.push(muted ? 1 : 0); }
 
   // #105 replace: swap the item's content/widget in place while preserving zone_id,
   // duration, sort_order and schedule rows. playlist_items is normalized (no
@@ -825,12 +883,18 @@ router.put('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
     }
     updates.push('content_id = ?'); values.push(newContentId || null);
     updates.push('widget_id = ?'); values.push(newWidgetId || null);
+    // ⚠️ And clear the child reference. "Exactly one of content_id/widget_id ends up set" above was
+    // written when those were the only two, and a swap on a NESTED row left child_playlist_id
+    // standing beside the new content_id. expandChildPlaylists tests child_playlist_id first, so
+    // that row would have kept expanding as a playlist while every UI query showed it as content.
+    updates.push('child_playlist_id = ?'); values.push(null);
   }
 
   if (updates.length > 0) {
     updates.push("updated_at = strftime('%s','now')");
     values.push(req.params.itemId);
     db.prepare(`UPDATE playlist_items SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    if (mutedChanged) emitMuteChanged(req, existing, muted ? 1 : 0);
     markDraft(req.params.id);
   }
 
@@ -870,10 +934,13 @@ router.post('/:id/items/:itemId/duplicate', requirePlaylistWrite, (req, res) => 
   const copy = db.transaction(() => {
     const max = db.prepare('SELECT MAX(sort_order) as m FROM playlist_items WHERE playlist_id = ?').get(req.params.id);
     const order = (max.m || 0) + 1;
+    // child_playlist_id rides along: without it, duplicating a nested row produced an item with
+    // content_id, widget_id AND child_playlist_id all NULL — a ghost that renders as nothing. No
+    // depth check is needed here, because the copy lands in the playlist that already holds it.
     const result = db.prepare(`
-      INSERT INTO playlist_items (playlist_id, content_id, widget_id, zone_id, sort_order, duration_sec)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(req.params.id, item.content_id, item.widget_id, item.zone_id, order, item.duration_sec);
+      INSERT INTO playlist_items (playlist_id, content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(req.params.id, item.content_id, item.widget_id, item.child_playlist_id, item.zone_id, order, item.duration_sec);
     const newId = result.lastInsertRowid;
     const scheds = db.prepare('SELECT active_days, start_time, end_time, start_date, end_date, sort_order FROM playlist_item_schedules WHERE playlist_item_id = ?').all(req.params.itemId);
     const insSched = db.prepare('INSERT INTO playlist_item_schedules (id, playlist_item_id, active_days, start_time, end_time, start_date, end_date, sort_order) VALUES (?,?,?,?,?,?,?,?)');

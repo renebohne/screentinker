@@ -158,7 +158,67 @@ active presentation… and cannot be deleted"* — and it is the thing Appspace 
 *"deleting content from a source affects every zone and channel linked to it"*, with no reverse view
 and no confirmation.
 
-### Deferred to phase 2 (cursored), deliberately
+#### ⚠️ Found by audit: nesting is a COLUMN, and twelve writers never heard about it
+
+Phase 1 added `playlist_items.child_playlist_id` and guarded the one route that sets it. That was
+not enough. `playlist_items` has **twelve writers across seven files**, and every one of them was
+written when a row could only be content or a widget. Five of them handled a nested row wrongly, and
+none of them failed — they returned 200 and quietly produced something else.
+
+| Path | What it did | Severity |
+|---|---|---|
+| `playlists.js` discard-draft | rebuilt from the FLAT `published_snapshot`, replacing the child reference with a snapshot-time **copy** of its contents | **data loss**, silent |
+| `playlists.js` item swap (PUT) | set `content_id` without clearing `child_playlist_id` | **corrupt row** |
+| `playlists.js` item duplicate | copied content/widget only → row with no content, no widget, no child | ghost item |
+| `assignments.js` copy-to-device | same ghost, plus no depth check on the target | ghost + depth hole |
+| `status.js` export/import | column absent from the export; import's `if (!contentId && !widgetId) continue` then **dropped** the row | silent shortening |
+
+Two of these deserve to be remembered as shapes, not incidents:
+
+**The snapshot is lossy about structure, and something was already restoring from it.**
+`published_snapshot` is flat *by design* — that is the whole point of expanding at publish, so no
+player has to understand nesting. Discard rebuilt the draft from it. So the flattening that makes
+the feature safe for players is exactly what made "undo my changes" destroy the feature. The fix is
+a second column, `playlists.published_structure`, holding the **pre-expansion** list; devices never
+see it, and rows published before it existed fall back to the snapshot safely, because the column
+and the feature shipped together.
+
+**"Exactly one of content_id / widget_id ends up set" was a true comment that expired.** The swap
+route says so in its own header. It was correct when there were two columns. Adding a third made the
+sentence false, and nothing in the codebase re-read it. ⚠️ When a new column joins a mutually
+exclusive set, grep for the *prose* describing the old set — not just the code.
+
+The depth hole in copy-to-device is worth naming too: the add-path guard refuses to make a playlist
+a child when it already has children, and refuses to give a child more children. Copying a whole
+playlist *into* a device playlist that is itself used as a child bypasses both, because neither ever
+runs. **A guard on the add path is not a guard on the invariant.** Bulk paths need their own.
+
+### And the same shape, twice more, in a feature that already shipped
+
+The audit was for nesting, but the pattern it looks for — *a column added later that only some
+writers were taught about* — turned up #129's per-item mute doing exactly the same thing:
+
+- **`routes/playlists.js` never read `muted` at all.** Its sibling on the device page
+  (`routes/assignments.js`) handled it; here the field was accepted, dropped and answered 200. The
+  dashboard's only mute toggle is on the device page, so nothing on a screen was wrong today — but
+  this endpoint is public API surface, and a client muting through it got success and silence.
+- **`discard` did not restore it**, so undoing an unrelated draft edit silently un-muted every item.
+- **Muting an item inside a nested child never reached the parent.** `emitMuteChanged` patches the
+  published snapshot surgically — but the parent holds a *flattened copy* of the child, so every
+  screen playing the parent kept the old flag. Same tax `publishPlaylist` pays by republishing
+  ancestors, unpaid in a second place.
+
+The helper now lives in `server/lib/mute-sync.js`, shared by both routes and patching ancestors.
+
+⚠️ **The generalisation worth keeping: flatten-at-publish creates a duty at every write, not just at
+publish.** Any code that edits a *published* snapshot in place has to walk the ancestors too, and
+there is nothing in the type system, the schema, or the tests that will remind the next author. When
+adding such a path, grep for `child_playlist_id` before assuming one snapshot is the only copy.
+
+Nine mutation tests pin all of this (`test/playlist-nesting.test.js`); reverting any single fix fails
+exactly one of them.
+
+## Deferred to phase 2 (cursored), deliberately
 
 - the cursor itself (`play N per rotation`, advancing across parent loops)
 - player-side nesting state, and the diff that preserves it

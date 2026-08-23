@@ -150,7 +150,7 @@ router.get('/export', (req, res) => {
   const playlists = db.prepare('SELECT id, name, description, is_auto_generated, created_at, updated_at FROM playlists WHERE user_id = ?').all(userId);
   const playlistIds = playlists.map(p => p.id);
   const playlistPlaceholders = playlistIds.map(() => '?').join(',') || "'__none__'";
-  const playlistItems = playlistIds.length ? db.prepare(`SELECT id, playlist_id, content_id, widget_id, sort_order, duration_sec FROM playlist_items WHERE playlist_id IN (${playlistPlaceholders})`).all(...playlistIds) : [];
+  const playlistItems = playlistIds.length ? db.prepare(`SELECT id, playlist_id, content_id, widget_id, child_playlist_id, sort_order, duration_sec FROM playlist_items WHERE playlist_id IN (${playlistPlaceholders})`).all(...playlistIds) : [];
 
   const schedules = db.prepare('SELECT id, device_id, group_id, zone_id, content_id, widget_id, layout_id, playlist_id, title, start_time, end_time, timezone, recurrence, recurrence_end, priority, enabled, color, created_at FROM schedules WHERE user_id = ?').all(userId);
   const videoWalls = db.prepare('SELECT * FROM video_walls WHERE user_id = ?').all(userId);
@@ -421,8 +421,13 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
         if (!playlistId) continue;
         const contentId = pi.content_id ? idMap.content[pi.content_id] : null;
         const widgetId = pi.widget_id ? idMap.widgets[pi.widget_id] : null;
-        if (!contentId && !widgetId) continue;
-        db.prepare('INSERT INTO playlist_items (playlist_id, content_id, widget_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?)').run(playlistId, contentId, widgetId, pi.sort_order || 0, pi.duration_sec || 10);
+        // Nested items remap through the SAME playlist id map — every playlist is inserted above,
+        // before any item, so a child's new id is always known here. Without this a nested item had
+        // no content and no widget and was dropped by the guard below: exporting a workspace and
+        // importing it silently returned playlists SHORTER than the ones exported.
+        const childPlaylistId = pi.child_playlist_id ? idMap.playlists[pi.child_playlist_id] : null;
+        if (!contentId && !widgetId && !childPlaylistId) continue;
+        db.prepare('INSERT INTO playlist_items (playlist_id, content_id, widget_id, child_playlist_id, sort_order, duration_sec) VALUES (?, ?, ?, ?, ?, ?)').run(playlistId, contentId, widgetId, childPlaylistId, pi.sort_order || 0, pi.duration_sec || 10);
       }
       // Set device playlist_id references
       for (const d of (data.devices || [])) {

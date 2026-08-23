@@ -279,3 +279,208 @@ test('the list reports used_by_count and has_children so the UI can warn first',
   assert.equal(row.has_children, 0, 'a leaf must not claim to have children');
   assert.equal(list.find((x) => x.id === p1.id).has_children, 1);
 });
+
+/*
+ * ─── The writers that phase 1 did not visit ────────────────────────────────────────────────
+ *
+ * The guards above all sit on the ADD path, because that is where nesting is created. But
+ * playlist_items has twelve writers across seven files, and an audit found four of them silently
+ * corrupting or destroying a nested row. Every test below FAILED before its fix; each was then
+ * mutation-checked by reverting the fix alone.
+ */
+
+const items = async (pl) => (await api(`/api/playlists/${pl}/items`, { headers: { Authorization: `Bearer ${jwt}` } })).body;
+const rawItems = (pl) => {
+  const raw = dbHandle();
+  const rows = raw.prepare('SELECT * FROM playlist_items WHERE playlist_id = ? ORDER BY sort_order').all(pl);
+  raw.close();
+  return rows;
+};
+
+test('⚠️ DISCARDING a draft must not destroy the nesting — the snapshot cannot describe it', async () => {
+  const child = await newPlaylist('d-child'); const parent = await newPlaylist('d-parent');
+  await addContent(child.id);
+  await addChild(parent.id, child.id);
+  await publish(child.id); await publish(parent.id);
+
+  // Dirty the draft, then undo.
+  await addContent(parent.id);
+  assert.equal((await api(`/api/playlists/${parent.id}/discard`, J(jwt, {}))).status, 200);
+
+  const rows = rawItems(parent.id);
+  assert.equal(rows.length, 1, 'discard should restore exactly the one published item');
+  assert.equal(rows[0].child_playlist_id, child.id,
+    'discard rebuilt the playlist from the FLAT snapshot, replacing the child reference with a '
+    + 'snapshot-time copy of its contents — the nesting was destroyed and it reported success');
+});
+
+test('⚠️ SWAPPING a nested item to content must clear the child reference', async () => {
+  const child = await newPlaylist('s-child'); const parent = await newPlaylist('s-parent');
+  await addContent(child.id);
+  const item = (await addChild(parent.id, child.id)).body;
+
+  assert.equal((await api(`/api/playlists/${parent.id}/items/${item.id}`,
+    J(jwt, { content_id: contentId }, 'PUT'))).status, 200);
+
+  const row = rawItems(parent.id)[0];
+  assert.equal(row.content_id, contentId);
+  assert.equal(row.child_playlist_id, null,
+    'both content_id and child_playlist_id were set: expandChildPlaylists tests the child first, '
+    + 'so this row kept expanding as a playlist while every UI query showed it as content');
+});
+
+test('DUPLICATING a nested item copies the reference, not a ghost row', async () => {
+  const child = await newPlaylist('dup-child'); const parent = await newPlaylist('dup-parent');
+  await addContent(child.id);
+  const item = (await addChild(parent.id, child.id)).body;
+
+  assert.equal((await api(`/api/playlists/${parent.id}/items/${item.id}/duplicate`, J(jwt, {}))).status, 201);
+  const rows = rawItems(parent.id);
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every((r) => r.child_playlist_id === child.id),
+    'the duplicate had no content, no widget and no child — an item that renders as nothing');
+});
+
+test('⚠️ EXPORT/IMPORT round-trips nesting instead of quietly shortening the playlist', async () => {
+  const child = await newPlaylist('x-child'); const parent = await newPlaylist('x-parent');
+  await addContent(child.id);
+  await addContent(parent.id); await addChild(parent.id, child.id);
+
+  // ⚠️ /export authenticates by QUERY PARAMETER, not by header — a JWT in a URL. Pre-existing,
+  // noted here because the header form silently 401s and the test would read {error} as a dump.
+  const dump = await (await fetch(`${BASE}/api/status/export?token=${jwt}`)).json();
+  const exported = dump.playlist_items.filter((i) => i.playlist_id === parent.id);
+  assert.equal(exported.length, 2, 'the export dropped an item');
+  assert.ok(exported.some((i) => i.child_playlist_id === child.id),
+    'the export omitted child_playlist_id, so nesting could not survive any restore');
+
+  // Import it into a SECOND workspace and check the reference was remapped, not dropped.
+  const reg2 = await (await fetch(BASE + '/api/auth/register', J(null, {
+    email: `nestimp${Date.now()}@example.com`, password: 'Passw0rd123', name: 'Imp',
+  }))).json();
+  // A multipart upload is ALWAYS treated as a ZIP; a plain dump goes in the JSON body.
+  const imp = await api('/api/status/import', J(reg2.token, dump));
+  assert.equal(imp.status, 200, JSON.stringify(imp.body));
+
+  const raw = dbHandle();
+  const newParent = raw.prepare("SELECT id FROM playlists WHERE name = 'x-parent' AND workspace_id = ?")
+    .get(reg2.current_workspace_id);
+  const newChild = raw.prepare("SELECT id FROM playlists WHERE name = 'x-child' AND workspace_id = ?")
+    .get(reg2.current_workspace_id);
+  const rows = raw.prepare('SELECT * FROM playlist_items WHERE playlist_id = ?').all(newParent.id);
+  raw.close();
+
+  assert.equal(rows.length, 2, 'the imported playlist came back SHORTER than the one exported');
+  const ref = rows.find((r) => r.child_playlist_id);
+  assert.ok(ref, 'the nested item was dropped on import');
+  assert.equal(ref.child_playlist_id, newChild.id,
+    'the child reference was not remapped to the imported copy — it points at another workspace');
+});
+
+test('COPYING a device playlist carries the reference — and refuses to build depth 2 sideways', async () => {
+  const raw = dbHandle();
+  const u = raw.prepare('SELECT id FROM users LIMIT 1').get();
+  const mk = (name) => {
+    const id = crypto.randomUUID();
+    raw.prepare('INSERT INTO devices (id, user_id, workspace_id, name, pairing_code) VALUES (?, ?, ?, ?, ?)')
+      .run(id, u.id, workspaceId, name, crypto.randomUUID().slice(0, 6));
+    return id;
+  };
+  const src = mk('copy-src'); const dst = mk('copy-dst'); const deep = mk('copy-deep');
+  raw.close();
+
+  const child = await newPlaylist('copy-child');
+  await addContent(child.id);
+
+  // Build the SOURCE device's playlist through the device API so ensureDevicePlaylist runs.
+  await api(`/api/assignments/device/${src}`, J(jwt, { content_id: contentId, duration_sec: 10 }));
+  const srcPl = (() => { const r = dbHandle(); const v = r.prepare('SELECT playlist_id FROM devices WHERE id = ?').get(src); r.close(); return v.playlist_id; })();
+  await addChild(srcPl, child.id);
+
+  assert.equal((await api(`/api/assignments/device/${src}/copy-to/${dst}`, J(jwt, { replace: true }))).status, 200);
+  const copied = rawItems((() => { const r = dbHandle(); const v = r.prepare('SELECT playlist_id FROM devices WHERE id = ?').get(dst); r.close(); return v.playlist_id; })());
+  assert.equal(copied.length, 2);
+  assert.ok(copied.some((i) => i.child_playlist_id === child.id),
+    'the copy flattened or dropped the nested item — editing the child would no longer reach this device');
+
+  // Now make the THIRD device's playlist a child of something, then copy into it: that would give
+  // holder -> deepPl -> child, two levels built from the far end. The add-path guard cannot see it.
+  await api(`/api/assignments/device/${deep}`, J(jwt, { content_id: contentId, duration_sec: 10 }));
+  const deepPl = (() => { const r = dbHandle(); const v = r.prepare('SELECT playlist_id FROM devices WHERE id = ?').get(deep); r.close(); return v.playlist_id; })();
+  const holder = await newPlaylist('copy-holder');
+  assert.equal((await addChild(holder.id, deepPl)).status, 201);
+
+  const refused = await api(`/api/assignments/device/${src}/copy-to/${deep}`, J(jwt, { replace: true }));
+  assert.equal(refused.status, 400, 'the copy built a two-level chain the add path would have refused');
+  assert.match(refused.body.error, /copy-holder/, 'the refusal must name the playlist that blocks it');
+});
+
+test('⚠️ an unchanged SNAPSHOT still records changed STRUCTURE, or undo resurrects the reference', async () => {
+  const child = await newPlaylist('id-child'); const parent = await newPlaylist('id-parent');
+  await addContent(child.id, 33);
+  await addChild(parent.id, child.id);
+  await publish(child.id); await publish(parent.id);
+
+  // Replace the reference with the child's own item. The FLAT snapshot is byte-identical, so
+  // publish takes its no-change early exit, pushes nothing and nothing restarts — correct, and the
+  // reason the early exit exists. The structure, however, HAS changed.
+  //
+  // Every UI edit calls markDraft, so today only a writer that mutates items without it can reach
+  // this branch with a real structure change. Rather than assume none ever will, the state is set
+  // up directly: this tests publishPlaylist's contract, not the route that happens to precede it.
+  const ref = rawItems(parent.id)[0];
+  await api(`/api/playlists/${parent.id}/items/${ref.id}`, J(jwt, undefined, 'DELETE'));
+  await addContent(parent.id, 33);
+  { const r = dbHandle(); r.prepare("UPDATE playlists SET status = 'published' WHERE id = ?").run(parent.id); r.close(); }
+
+  await publish(parent.id);
+  assert.deepEqual(snapshot(parent.id).map((i) => i.duration_sec), [33],
+    'the snapshot should be untouched — this is the no-restart path');
+
+  await addContent(parent.id, 99);
+  await api(`/api/playlists/${parent.id}/discard`, J(jwt, {}));
+  const rows = rawItems(parent.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].child_playlist_id, null,
+    'discard restored a stale structure and brought back the child reference the user removed');
+  assert.equal(rows[0].content_id, contentId);
+});
+
+test('discard restores per-item MUTE — it used to silently un-mute everything', async () => {
+  const pl = await newPlaylist('mute-restore');
+  const item = (await addContent(pl.id)).body;
+  await api(`/api/playlists/${pl.id}/items/${item.id}`, J(jwt, { muted: true }, 'PUT'));
+  await publish(pl.id);
+
+  await addContent(pl.id, 99);
+  await api(`/api/playlists/${pl.id}/discard`, J(jwt, {}));
+
+  const rows = rawItems(pl.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].muted, 1, 'discarding an unrelated edit un-muted an item the user had muted');
+});
+
+// The dashboard's mute toggle is on the device page, so this is API surface rather than a broken
+// screen — but the endpoint answered 200 and wrote nothing, which is worse than a 400.
+test('⚠️ the playlist item endpoint persists muted — it dropped the field entirely', async () => {
+  const pl = await newPlaylist('mute-route');
+  const item = (await addContent(pl.id)).body;
+  assert.equal((await api(`/api/playlists/${pl.id}/items/${item.id}`, J(jwt, { muted: true }, 'PUT'))).status, 200);
+  assert.equal(rawItems(pl.id)[0].muted, 1,
+    'the endpoint accepted a mute, reported success and wrote nothing — #129, one route over');
+});
+
+test('⚠️ muting an item inside a CHILD reaches the parent snapshot devices actually play', async () => {
+  const child = await newPlaylist('mute-child'); const parent = await newPlaylist('mute-parent');
+  const item = (await addContent(child.id)).body;
+  await addChild(parent.id, child.id);
+  await publish(child.id); await publish(parent.id);
+  assert.equal(snapshot(parent.id)[0].muted, 0);
+
+  await api(`/api/playlists/${child.id}/items/${item.id}`, J(jwt, { muted: true }, 'PUT'));
+
+  assert.equal(snapshot(child.id)[0].muted, 1);
+  assert.equal(snapshot(parent.id)[0].muted, 1,
+    'the parent holds a FLATTENED copy of the child, so patching only the child leaves every '
+    + 'screen on the parent playing the old flag — the same tax publish pays by republishing ancestors');
+});
