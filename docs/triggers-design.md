@@ -1,21 +1,41 @@
 # Triggers
 
-**Status: BUILT BUT NOT YET ENABLEABLE.** Externally-fired events that put interrupt content over a
-running playlist, resolved entirely on the device.
+**Status: BUILT AND ENABLEABLE over the API; no dashboard UI yet, and unverified on hardware.**
+Externally-fired events that put interrupt content over a running playlist, resolved entirely on the
+device.
 
-⚠️ **There is no API that writes a device's trigger settings.** `trigger_secret`,
-`triggers_accept_http`, `triggers_accept_udp`, the ports, the multicast group and
-`trigger_clear_all_token` are read by `deviceSocket.js` and projected to the player, but **nothing
-writes them** — `PUT /api/devices/:id` does not allowlist any of them and no dedicated route exists.
-So on a system configured through the product the secret is NULL, `evaluate()` returns `bad_secret`
-for every payload, and no listener binds. The definition half is built; the enablement half is not,
-and until it is the feature is inert. This was found by a QA pass *after* this doc had already been
-edited to claim the feature was built — the claim was true of the code that exists and false of the
-system as a whole, which is the more useful thing to state.
+Enablement is `POST /api/devices/:id/trigger-config` (accept flags, ports, multicast group,
+clear-all token) and `POST /api/devices/:id/trigger-secret` (generate or set). Both push the device
+a playlist-update immediately and report whether it was `delivered`, so an operator is told whether
+the panel actually has it rather than left to assume.
 
-Remaining before this is usable: the enablement API (with secret generation/rotation modelled on
-`POST /:id/settings-pin`) and a dashboard form; the Android renderer (`PipOverlay` renders a single
-`uri`, a trigger targets a playlist); and hardware verification, since `el.muted` has never been
+⚠️ **The secret has exactly one write path and is never returned to an API token.** It is the
+credential that lets an unauthenticated LAN datagram change what a screen shows, so rotating it is
+a deliberate act rather than a side effect of editing a port number, and a read-scoped integration
+must never be able to turn "may list your screens" into "may put content on any of them".
+
+⚠️ **The clear-all token is validated against the trigger token namespace.** `evaluate()` tests it
+BEFORE iterating the device's triggers, so a value equal to some trigger's `match_token` would make
+that trigger permanently unfirable on that device — and nothing would log it, because from the
+resolver's point of view the token matched.
+
+### Delivery: the content is on the device before it is needed
+
+A trigger fires with the WAN down, which is only true if the definition *and* the target playlist's
+media are already local. So:
+
+- Creating, editing or deleting a trigger pushes a playlist-update to every device it touches, now.
+  An edit captures the affected set *before* the assignment rewrite, so a device losing the trigger
+  is told too; a delete reads it before the row goes, because `trigger_assignments` cascades.
+- Publishing a playlist fans out to devices that hold it **only as a trigger target**. The base
+  query is `WHERE playlist_id = ?`, which never contained them — so an operator could swap the
+  evacuation notice, see "Published", and have every panel keep firing the old items.
+- The payload carries each trigger's playlist resolved inline, and the player re-pins on a
+  trigger-set change, so one message delivers both the definition and the cache instruction.
+
+Remaining: the Android renderer (`PipOverlay` renders a single `uri`, a trigger targets a playlist);
+a dashboard form for the config above; and hardware verification, since `el.muted` has never been
+tested against a BrightSign hardware audio plane.
 tested against a BrightSign hardware audio plane.
 
 ## Why

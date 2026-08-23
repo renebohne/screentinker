@@ -96,4 +96,55 @@ function triggerMediaUrls(triggers, mediaUrl) {
   return out;
 }
 
-module.exports = { triggersForDevice, projectTrigger, triggerMediaUrls };
+/**
+ * Every device that would render this trigger — directly assigned, or via a group.
+ *
+ * ⚠️ THIS IS WHAT MAKES A NEW TRIGGER ARRIVE. Creating, editing, assigning or deleting a trigger
+ * used to reach devices only on their next reconnect, which for a panel that has been up for
+ * weeks means never. The definition would sit in the database looking configured while the screen
+ * knew nothing about it — and the media it needs would not be pinned either, so the first time
+ * anyone found out was when the alarm fired against nothing.
+ */
+function devicesForTrigger(db, triggerId) {
+  return db.prepare(`
+    SELECT DISTINCT d.id
+      FROM devices d
+      JOIN triggers t ON t.id = ? AND t.workspace_id = d.workspace_id
+      JOIN trigger_assignments ta ON ta.trigger_id = t.id
+     WHERE (
+       (ta.target_type = 'device' AND ta.target_id = d.id)
+       OR (ta.target_type = 'group' AND ta.target_id IN (
+             SELECT group_id FROM device_group_members WHERE device_id = d.id))
+     )
+  `).all(triggerId).map((r) => r.id);
+}
+
+/**
+ * Every device that holds this playlist as a TRIGGER TARGET rather than as its base playlist.
+ *
+ * ⚠️ Publishing a playlist pushed only to devices whose `playlist_id` matched it, so a screen that
+ * referenced it solely through a trigger never heard about the edit. The operator swaps the
+ * evacuation notice, sees "Published", and every panel keeps firing the OLD items — with the old
+ * asset still pinned and the new one never fetched.
+ */
+function devicesForTriggerTarget(db, playlistId) {
+  return db.prepare(`
+    SELECT DISTINCT d.id
+      FROM devices d
+      JOIN triggers t ON t.workspace_id = d.workspace_id
+                     AND t.enabled = 1
+                     AND t.target_kind = 'playlist'
+                     AND t.target_ref = ?
+      JOIN trigger_assignments ta ON ta.trigger_id = t.id
+     WHERE (
+       (ta.target_type = 'device' AND ta.target_id = d.id)
+       OR (ta.target_type = 'group' AND ta.target_id IN (
+             SELECT group_id FROM device_group_members WHERE device_id = d.id))
+     )
+  `).all(playlistId).map((r) => r.id);
+}
+
+module.exports = {
+  triggersForDevice, projectTrigger, triggerMediaUrls,
+  devicesForTrigger, devicesForTriggerTarget,
+};

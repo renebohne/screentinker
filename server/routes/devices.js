@@ -5,6 +5,9 @@ const { PLATFORM_ROLES, ELEVATED_ROLES, isPlatformStaff } = require('../middlewa
 // Phase 2.2a: workspace-aware access. accessContext returns { workspaceRole, actingAs }
 // or null based on the caller's reach into a specific workspace.
 const { accessContext } = require('../lib/tenancy');
+// requireScope gates by API-token scope; the workspace WRITE gate is checkDeviceOwnership, which
+// already rejects workspace_viewer — the same check requireFleetWrite performs in routes/triggers.js.
+const { requireScope } = require('../middleware/apiToken');
 const { stripDeviceSecrets, stripDeviceSecretsForList, stripTriggerSecretForTokens } = require('../lib/device-sanitize');
 const { layoutZones, orphanCountsByDevice } = require('../lib/zone-validate');
 const deviceSettings = require('../lib/device-settings'); // #150 delete+re-pair settings preservation
@@ -357,6 +360,175 @@ router.put('/:id', (req, res) => {
  * at the next pairing — so the operator would believe they had revoked access while the old PIN
  * still opened the menu, which is worse than not offering the feature.
  */
+/*
+ * ⚠️ THE ENABLEMENT HALF OF TRIGGERS. Without this route the feature is INERT: trigger_secret and
+ * the accept flags are read by deviceSocket.js and projected to the player, but nothing wrote them,
+ * so the secret was always NULL, evaluate() answered bad_secret to every payload, and no listener
+ * ever bound. The definitions half shipped and looked complete; a QA pass found the system as a
+ * whole could not be switched on.
+ *
+ * Modelled on POST /:id/settings-pin: rotate-or-set, live push, and the response says whether the
+ * panel actually got it rather than implying it.
+ */
+router.post('/:id/trigger-config', requireScope('full'), (req, res) => {
+  const device = checkDeviceOwnership(req, res);
+  if (!device) return;
+  const b = req.body || {};
+  const sets = [];
+  const vals = {};
+
+  // ⚠️ Same charset as a trigger token (routes/triggers.js TOKEN_RE): printable ASCII, no spaces,
+  // because the wire format is space-separated and a space would shift the fields.
+  const TOKEN_RE = /^[\x21-\x7E]{1,64}$/;
+
+  if (b.accept_http !== undefined) { sets.push('triggers_accept_http = @accept_http'); vals.accept_http = b.accept_http ? 1 : 0; }
+  if (b.accept_udp !== undefined) { sets.push('triggers_accept_udp = @accept_udp'); vals.accept_udp = b.accept_udp ? 1 : 0; }
+
+  for (const [key, col] of [['http_port', 'trigger_http_port'], ['udp_port', 'trigger_udp_port']]) {
+    if (b[key] === undefined) continue;
+    if (b[key] === null || b[key] === '') { sets.push(`${col} = NULL`); continue; }
+    const n = Number(b[key]);
+    // Below 1024 needs root on every platform we run on, and 0/65535 are not bindable.
+    if (!Number.isInteger(n) || n < 1024 || n > 65534) {
+      return res.status(400).json({ error: `${key} must be an integer 1024-65534` });
+    }
+    sets.push(`${col} = @${key}`); vals[key] = n;
+  }
+
+  if (b.multicast_group !== undefined) {
+    if (b.multicast_group === null || b.multicast_group === '') {
+      sets.push('trigger_multicast_group = NULL');
+    } else {
+      const g = String(b.multicast_group);
+      const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(g);
+      const oct = m && m.slice(1).map(Number);
+      // 224.0.0.0/4. Anything else is not a group and would silently never receive: joinGroup on a
+      // unicast address fails, and the failure looks exactly like "the integrator sent nothing".
+      if (!oct || oct.some((o) => o > 255) || oct[0] < 224 || oct[0] > 239) {
+        return res.status(400).json({ error: 'multicast_group must be an IPv4 address in 224.0.0.0/4' });
+      }
+      sets.push('trigger_multicast_group = @multicast_group'); vals.multicast_group = g;
+    }
+  }
+
+  if (b.clear_all_token !== undefined) {
+    if (b.clear_all_token === null || b.clear_all_token === '') {
+      sets.push('trigger_clear_all_token = NULL');
+    } else {
+      const t = String(b.clear_all_token);
+      if (!TOKEN_RE.test(t)) {
+        return res.status(400).json({ error: 'clear_all_token must be 1-64 printable ASCII characters with no spaces' });
+      }
+      /*
+       * ⚠️ THE CLEAR-ALL TOKEN SHARES THE TRIGGER TOKEN NAMESPACE, and it is checked FIRST.
+       * evaluate() tests clearAllToken before it iterates the device's triggers, so a value equal
+       * to some trigger's match_token makes that trigger permanently unfirable on this device —
+       * and nothing logs, because from the resolver's point of view the token matched. An
+       * emergency overlay that silently cannot fire is the worst failure this feature has.
+       */
+      const clash = db.prepare(
+        'SELECT name FROM triggers WHERE workspace_id = ? AND (match_token = ? OR clear_token = ?)'
+      ).get(device.workspace_id, t, t);
+      if (clash) {
+        return res.status(400).json({
+          error: `"${t}" is already used by the trigger "${clash.name}" — the clear-all token is `
+            + 'resolved before per-trigger tokens, so it would silently shadow it',
+        });
+      }
+      sets.push('trigger_clear_all_token = @clear_all_token'); vals.clear_all_token = t;
+    }
+  }
+
+  if (!sets.length) return res.status(400).json({ error: 'nothing to change' });
+  db.prepare(`UPDATE devices SET ${sets.join(', ')}, updated_at = strftime('%s','now') WHERE id = @id`)
+    .run({ id: req.params.id, ...vals });
+
+  // The listeners only bind at player start, so the config change reaches the device now and takes
+  // effect when it next loads the player. Said plainly in the response rather than implied.
+  let delivered = false;
+  try {
+    const io = req.app.get('io');
+    if (io) {
+      const commandQueue = require('../lib/command-queue');
+      const { buildPlaylistPayload } = require('../ws/deviceSocket');
+      commandQueue.queueOrEmitPlaylistUpdate(io.of('/device'), req.params.id, buildPlaylistPayload);
+      const room = io.of('/device').adapter.rooms.get(req.params.id);
+      delivered = !!(room && room.size > 0);
+    }
+  } catch (e) { console.warn(`[trigger-config] push failed: ${e.message}`); }
+
+  const updated = db.prepare('SELECT * FROM devices WHERE id = ?').get(req.params.id);
+  console.log(`[trigger-config] updated ${req.params.id} by user ${req.user && req.user.id}`);
+  res.json({
+    success: true, delivered,
+    trigger_config: {
+      accept_http: !!updated.triggers_accept_http,
+      accept_udp: !!updated.triggers_accept_udp,
+      http_port: updated.trigger_http_port,
+      udp_port: updated.trigger_udp_port,
+      multicast_group: updated.trigger_multicast_group,
+      clear_all_token: updated.trigger_clear_all_token,
+      // ⚠️ Deliberately NOT the secret. It is written and read back only through the dedicated
+      // rotate route below, and never leaves the server to an API token at all.
+      secret_set: !!updated.trigger_secret,
+    },
+  });
+});
+
+/*
+ * Generate or set the device's trigger secret.
+ *
+ * ⚠️ Separate from the config route on purpose. This is the credential that makes an
+ * unauthenticated LAN datagram change what a screen shows, so it has exactly one write path, it is
+ * never echoed to an API token (lib/device-sanitize.js), and rotating it is a deliberate act rather
+ * than a side effect of editing a port number.
+ */
+router.post('/:id/trigger-secret', requireScope('full'), (req, res) => {
+  const device = checkDeviceOwnership(req, res);
+  if (!device) return;
+  const b = req.body || {};
+  let secret;
+  if (b.rotate || b.secret === undefined) {
+    // 32 hex chars from a CSPRNG. The wire format is space-separated, so hex keeps it parseable
+    // and keeps the value safe to paste into a control-system string field.
+    secret = require('crypto').randomBytes(16).toString('hex');
+  } else {
+    secret = String(b.secret);
+    // 16 is the floor because this is guessable-offline: an attacker on the LAN can try tokens as
+    // fast as the rate limiter allows, forever, with no lockout and no audit trail.
+    if (!/^[\x21-\x7E]{16,128}$/.test(secret)) {
+      return res.status(400).json({ error: 'secret must be 16-128 printable ASCII characters with no spaces' });
+    }
+  }
+  db.prepare("UPDATE devices SET trigger_secret = ?, updated_at = strftime('%s','now') WHERE id = ?")
+    .run(secret, req.params.id);
+
+  let delivered = false;
+  try {
+    const io = req.app.get('io');
+    if (io) {
+      const commandQueue = require('../lib/command-queue');
+      const { buildPlaylistPayload } = require('../ws/deviceSocket');
+      commandQueue.queueOrEmitPlaylistUpdate(io.of('/device'), req.params.id, buildPlaylistPayload);
+      const room = io.of('/device').adapter.rooms.get(req.params.id);
+      delivered = !!(room && room.size > 0);
+    }
+  } catch (e) { console.warn(`[trigger-secret] push failed: ${e.message}`); }
+
+  console.log(`[trigger-secret] rotated for ${req.params.id} by user ${req.user && req.user.id}`);
+  /*
+   * ⚠️ The secret IS returned here, and only here. A human configuring a Crestron panel has to
+   * type it somewhere, and this response is the only place it exists — but a request carrying an
+   * API token never gets it, because a read-scoped integration could otherwise turn "may list your
+   * screens" into "may put content on any of them".
+   */
+  if (req.viaToken) {
+    return res.json({ success: true, delivered, secret_set: true,
+      note: 'the secret is not returned to API tokens — read it from the dashboard' });
+  }
+  res.json({ success: true, delivered, secret });
+});
+
 router.post('/:id/settings-pin', (req, res) => {
   const device = checkDeviceOwnership(req, res);
   if (!device) return;
