@@ -1,5 +1,54 @@
 # Changelog
 
+## 2.0.0-alpha4
+
+Triggers become usable, and a QA pass found that the previous build could not switch them on.
+
+### Fixed — the feature could not be enabled at all
+
+Nothing anywhere wrote a device's trigger secret or its accept flags. The server read them, the
+player consumed them, the dashboard rendered their diagnostics — and no route ever set them, so the
+secret was always empty, every payload was refused, and no listener ever started. There is now an
+API and a form on the device page for the listener settings and the shared secret.
+
+### Fixed — a trigger produced a black, silent screen on a real panel
+
+Two bugs compounded. The overlay was created unmuted, and unmuted playback without a user gesture is
+refused outright — a signage panel never gets one — so the alarm video never started, and with a
+single-item trigger there was nothing to recover it. Meanwhile the base playlist was being silenced
+underneath it. The net effect of firing a trigger was worse than not having the feature.
+
+### Fixed — trigger content did not reach the screen until it happened to reconnect
+
+Creating, editing or deleting a trigger pushed nothing, so a panel that had been running for weeks
+never learned about it. Publishing an edited playlist reached only screens using it as their main
+playlist, never those using it as a trigger target — so an operator could swap an evacuation notice,
+see "Published", and have every panel keep showing the old one. Both now deliver immediately, along
+with the content the trigger needs so it still works with the network down.
+
+### Fixed — a trigger could be saved that could never play offline
+
+A trigger whose playlist contained a web page, a YouTube video, or an item whose file had been
+deleted would save without complaint and then show nothing when it mattered. These are now refused
+at save time, naming the item.
+
+### Fixed — device credentials were readable by API tokens
+
+A read-only integration token could list a device group and receive the credential a screen uses to
+authenticate, plus its settings PIN and trigger secret. Two other routes returned the trigger secret
+after a rename. Unrelated to triggers in origin; found while reviewing them.
+
+### Added — the Android player can show triggers
+
+Android renders a trigger's playlist from its local cache, so it works offline, and silences the
+main playlist while the overlay is up.
+
+### Known limitation
+
+Trigger audio behaviour is unverified on BrightSign hardware. The player uses two independent
+mechanisms to silence the main playlist so it works if either is honoured, but confirming it needs
+someone listening at a panel.
+
 ## 2.0.0-alpha3
 
 One fix, and it is the one that makes the previous two releases reach a player at all.
