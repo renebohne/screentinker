@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../db/database');
+const { resolveDevicePlaylist } = require('../lib/resolve-device-playlist');
 const { PLATFORM_ROLES, ELEVATED_ROLES, isPlatformStaff } = require('../middleware/auth');
 // Phase 2.2a: workspace-aware access. accessContext returns { workspaceRole, actingAs }
 // or null based on the caller's reach into a specific workspace.
@@ -133,7 +134,21 @@ router.get('/:id', (req, res) => {
     'SELECT * FROM screenshots WHERE device_id = ? ORDER BY captured_at DESC LIMIT 1'
   ).get(req.params.id);
 
-  // Get playlist items and status if device has an assigned playlist
+  /*
+   * ⚠️ Show what the screen ACTUALLY plays, which is the resolved playlist, not devices.playlist_id.
+   *
+   * The two differ the moment a device inherits: clearing an override now sets both the id and the
+   * source to NULL and lets the group's playlist take over, so reading the raw column would leave
+   * this page reporting "no playlist" while the screen plays the group's. A dashboard that
+   * disagrees with the wall is worse than one that says nothing.
+   *
+   * playlist_source is echoed so the UI can distinguish "chosen here" from "inherited" and offer
+   * the revert — the distinction the old copy-on-assign erased.
+   */
+  const resolved = resolveDevicePlaylist(req.params.id);
+  device.playlist_id = resolved.playlist_id;
+  device.playlist_source = resolved.source;
+
   let assignments = [];
   let playlist_status = null;
   let playlist_has_published = false;
@@ -259,11 +274,20 @@ router.delete('/:id/playlist', (req, res) => {
   const device = checkDeviceOwnership(req, res);
   if (!device) return;
 
-  db.prepare('UPDATE devices SET playlist_id = NULL, updated_at = ? WHERE id = ?')
+  /*
+   * ⚠️ Clearing an override means "stop being special", not "go dark".
+   *
+   * playlist_source is cleared alongside the id, so the resolver falls back to the device's wall or
+   * group. Writing playlist_id = NULL alone used to strand the screen on nothing — a destructive
+   * action wearing the costume of an undo, and the reason "revert to group" could not be offered.
+   */
+  db.prepare('UPDATE devices SET playlist_id = NULL, playlist_source = NULL, updated_at = ? WHERE id = ?')
     .run(Math.floor(Date.now() / 1000), req.params.id);
 
-  // Push the now-empty playlist so the screen stops, rather than leaving the old content up
-  // until something else happens to update it.
+  // Push whatever the device now resolves to — its group's or wall's playlist if it has one, an
+  // empty payload if it does not — rather than leaving the old content up until something else
+  // happens to update it. (This used to say "the now-empty playlist"; since clearing falls back to
+  // inherited, empty is no longer the only outcome.)
   try {
     const io = req.app.get('io');
     if (io) {

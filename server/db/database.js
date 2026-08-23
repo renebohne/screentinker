@@ -1183,6 +1183,20 @@ const migrations = [
   `CREATE INDEX IF NOT EXISTS idx_triggers_ws     ON triggers (workspace_id)`,
   `CREATE INDEX IF NOT EXISTS idx_trigger_assign  ON trigger_assignments (target_type, target_id)`,
 
+  /*
+   * ─── Playlist inheritance ────────────────────────────────────────────────────────────────
+   *
+   * devices.playlist_id had ONE reader and TWELVE writers, so there was no precedence — only
+   * whoever wrote last. A hand-set per-device playlist was destroyed the next time anyone touched
+   * its group or wall, and a device in two groups had no defined winner (the leave-handler picked
+   * "any remaining group with a playlist", i.e. whatever SQLite returned first).
+   *
+   * playlist_source records what the id MEANS, which the column alone cannot: 'device' = someone
+   * chose it for this screen. NULL = inherited, resolve it live. Without this distinction there is
+   * no way to express "this screen overrides its group", and no way to revert.
+   */
+  "ALTER TABLE devices ADD COLUMN playlist_source TEXT",
+
 ];
 // Apply each ALTER idempotently. A "duplicate column name" / "already exists"
 // error means the column is already present (expected on a migrated DB) - benign.
@@ -1922,5 +1936,128 @@ try {
 // #37: fail fast (loud) if migrations left the DB missing schema the code needs.
 const { verifyAndRepairSchema } = require('../lib/schema-check');
 verifyAndRepairSchema(db);
+
+/*
+ * ─── The playlist-inheritance resolver, and its backfill ─────────────────────────────────────
+ *
+ * ⚠️ These run LAST, after every table-rebuilding migration above.
+ *
+ * They started life in the migrations array and broke the tenant delete-cascade migration on every
+ * install: that migration rebuilds tables the SQLite way (create new, copy, drop old), and SQLite
+ * refuses to drop a table a view still references — "error in view device_inherited_playlist: no
+ * such table: main.devices". A view is not a migration you can order casually; it is a dependency
+ * on every table it names, enforced against later schema surgery.
+ *
+ * DROP-then-CREATE rather than IF NOT EXISTS, so the definition can never drift from the code that
+ * ships with it. A view pinned at first-create is a migration you cannot amend.
+ */
+  /*
+   * The resolver, in SQL, so the point lookup and the JOINs share ONE definition.
+   *
+   * ⚠️ Not IF NOT EXISTS: these are DROPped and recreated every boot, so the view can never drift
+   * from the code that ships with it. A view whose definition is pinned at first-create is a
+   * migration you cannot amend.
+   *
+   * Order mirrors schedules.js (device beats group, then priority, then oldest) deliberately — two
+   * inheritance systems in one product that disagree is how an operator loses trust in both.
+   * Walls sit above groups: a wall member playing the group's playlist tears the picture across
+   * the seam, which is visibly broken; a grouped screen playing the wall's playlist is merely not
+   * what you asked for. Where precedence must guess, guess toward the legible failure.
+   */
+db.exec("DROP VIEW IF EXISTS device_inherited_playlist");
+db.exec(`CREATE VIEW device_inherited_playlist AS
+     SELECT d.id AS device_id,
+            (SELECT vw.playlist_id FROM video_walls vw
+              WHERE vw.id = d.wall_id AND vw.playlist_id IS NOT NULL) AS wall_playlist_id,
+            (SELECT g.playlist_id FROM device_groups g
+               JOIN device_group_members m ON m.group_id = g.id
+              WHERE m.device_id = d.id AND g.playlist_id IS NOT NULL
+              ORDER BY g.priority DESC, g.created_at ASC, g.id ASC LIMIT 1) AS group_playlist_id
+       FROM devices d`);
+
+db.exec("DROP VIEW IF EXISTS device_resolved_playlist");
+db.exec(`CREATE VIEW device_resolved_playlist AS
+     SELECT d.id AS device_id,
+            -- ⚠️ 'none' short-circuits everything: it means "this screen deliberately plays
+            -- nothing", which is not the same as "nothing was chosen". Without this branch the
+            -- backfill's carefully-preserved dark screens inherit their group's playlist and light
+            -- up during an upgrade — the exact outcome the backfill exists to prevent.
+            CASE WHEN d.playlist_source = 'none' THEN NULL ELSE COALESCE(
+              CASE WHEN d.playlist_source = 'device' THEN d.playlist_id END,
+              i.wall_playlist_id,
+              i.group_playlist_id,
+              -- ⚠️ LAST RESORT: an id nobody has classified yet.
+              --
+              -- playlist_source is NULL both for "inherits" and for "some writer set playlist_id
+              -- and never learned about the column". Without this branch the second case resolves
+              -- to NOTHING, and that is not a hypothetical: the group and wall fan-outs are not
+              -- converted yet, workspace import/restore sets the id directly, and the full suite
+              -- turned 12 tests red the moment the JOIN went in. Honouring the raw id below the
+              -- inherited sources means an unconverted writer keeps working exactly as it does
+              -- today while the migration is staged, and a stale copy still loses to the group.
+              d.playlist_id
+            ) END AS playlist_id,
+            CASE
+              WHEN d.playlist_source = 'none' THEN NULL
+              WHEN d.playlist_source = 'device' AND d.playlist_id IS NOT NULL THEN 'device'
+              WHEN i.wall_playlist_id  IS NOT NULL THEN 'wall'
+              WHEN i.group_playlist_id IS NOT NULL THEN 'group'
+              WHEN d.playlist_id IS NOT NULL THEN 'device'
+              ELSE NULL
+            END AS source
+       FROM devices d
+       JOIN device_inherited_playlist i ON i.device_id = d.id`);
+
+/*
+ * Playlist inheritance: classify every existing devices.playlist_id as chosen or copied.
+ *
+ * ⚠️ This decides what every screen plays, so it gets the full heavy-migration treatment: a
+ * pre-migration snapshot, and process.exit rather than a half-applied estate. It also VERIFIES
+ * itself before committing — the invariant is "no device changes what it plays", which is checkable
+ * in SQL, so leaving it to a test file would be a choice not to check it against real data.
+ */
+const { backfillPlaylistSource, verifyNoDeviceChanged } = require('../lib/playlist-source-backfill');
+const PLAYLIST_SOURCE_BACKFILL_ID = 'playlist_source_backfill';
+(function backfillPlaylistSourceAtBoot() {
+  try {
+    if (db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(PLAYLIST_SOURCE_BACKFILL_ID)) return;
+  } catch { /* schema_migrations may not exist yet */ }
+
+  const deviceCount = db.prepare('SELECT COUNT(*) AS n FROM devices').get().n;
+  if (deviceCount > 0) {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const snapshotPath = path.join(dbDir, `remote_display.pre-playlist-source-${ts}.db`);
+    try {
+      db.pragma('wal_checkpoint(TRUNCATE)');
+      copyFileBytes(config.dbPath, snapshotPath);
+      console.warn(`[playlist-source backfill] Pre-migration snapshot: ${snapshotPath}`);
+    } catch (e) {
+      console.error(`[playlist-source backfill] Snapshot failed: ${e.message}`);
+      process.exit(1);
+    }
+  }
+
+  try {
+    const stats = backfillPlaylistSource(db);
+    const changed = verifyNoDeviceChanged(db);
+    if (changed.length) {
+      console.error(`[playlist-source backfill] ABORT: ${changed.length} device(s) would change what `
+        + 'they play. No device may change content during a migration. Rolled back.');
+      for (const c of changed.slice(0, 10)) {
+        console.error(`  device ${c.device_id}: was ${c.was} -> now ${c.now} (${c.source})`);
+      }
+      db.prepare('UPDATE devices SET playlist_source = NULL').run();
+      process.exit(1);
+    }
+    db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(PLAYLIST_SOURCE_BACKFILL_ID);
+    if (deviceCount > 0) {
+      console.log(`[playlist-source backfill] ${stats.device} override(s), ${stats.none} explicit-none, `
+        + `${stats.inherit} inheriting; every device resolves to the playlist it already had`);
+    }
+  } catch (e) {
+    console.error(`[playlist-source backfill] FAILED: ${e.message}`);
+    process.exit(1);
+  }
+})();
 
 module.exports = { db, pruneTelemetry, pruneTelemetryRetention, pruneScreenshots, pruneStatusLog, getMaintenanceStats };

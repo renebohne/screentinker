@@ -1,15 +1,18 @@
 # Playlist inheritance
 
-**Status: mechanism settled, LADDER REOPENED by research. Not built.**
+**Status: ladder SETTLED (specificity). Resolver + backfill BUILT and committed; the twelve
+eager writers are not yet removed.**
 How a screen resolves which playlist it plays.
 
 Decided 2026-08-23: walls beat groups; groups get a `priority` column (shipped, inert, `d58bf10`);
 clearing an override falls back to inherited.
 
-⚠️ **Reopened the same day.** Industry research across 17 vendors found that
-**"the most specific level wins" is nobody's model** — which is precisely what the ladder below
-assumes. See *"What the research changed"*. The single-resolver mechanism survives intact; what is
-in question is the rule it applies.
+⚠️ **Reopened, then closed the same day: the specificity ladder stands.** Industry research across
+17 vendors found that **"the most specific level wins" is nobody's model** — see *"What the research
+changed"* — and FWI's per-assignment Behavior selector was the strongest alternative. Decision: keep
+the ladder, because it fixes the actual defect (twelve eager writers and no precedence), and because
+mirroring `schedules.js` means our two inheritance systems cannot drift. The Behavior selector
+remains the natural next step if per-assignment intent is ever needed; nothing here forecloses it.
 
 Separable from playlists-of-playlists and worth doing first: this is a defect-shaped problem that
 exists today, independent of whatever we decide about nesting.
@@ -117,6 +120,75 @@ playlist" (then `playlist_source='device'`). Group and wall paths write only the
 push — the resolver does the rest. That deletes the fan-out loops entirely, including the one in
 `device-groups.js` that walks every member on a group playlist change.
 
+## ⚠️ What building it found — the reader list in this document was wrong
+
+The document said `devices.playlist_id` has **one reader**. It has **seven**, and the six that were
+missing are the ones that would have broken silently:
+
+| Reader | What it does with the column |
+|---|---|
+| `ws/deviceSocket.js` `buildPlaylistPayload` | the known one |
+| `groupSyncMembers` | **group sync membership** — `WHERE d.playlist_id = group.playlist_id` |
+| `deviceSyncGroup` | the device's own sync group, same match |
+| `groupSenderEligible` | decides whose sync broadcasts are **trusted** |
+| `routes/assignments.js` `ensureDevicePlaylist` | returns it, or creates one |
+| `services/scheduler.js` (×2) | reads it to decide whether to apply/revert a schedule |
+
+Group sync defines an eligible member as *a member whose `playlist_id` equals the group's* — that
+is, it reads **the copy the old fan-out left behind** to decide who plays in lockstep. Stop copying
+without touching those queries and every member fails the match, so no group ever syncs again, and
+nothing errors. They now join `device_resolved_playlist`.
+
+⚠️ **`services/scheduler.js` is a fifteenth writer, and a second inheritance system.** It writes the
+active schedule's playlist straight into `devices.playlist_id` and remembers the previous value in
+an **in-memory Map** — so a server restart during an active schedule strands that device on the
+scheduled playlist permanently. For now the scheduler stamps `playlist_source = 'device'` and
+restores the previous *source* as well as the previous id, which preserves today's behaviour exactly.
+That is a stopgap and should be read as one: **schedules belong above `device` as their own tier in
+the view, resolved live from the schedules table**, which would delete the Map and the bug with it.
+
+### The view broke a migration, on every install
+
+The two views were first defined inside the migrations array. The tenant delete-cascade migration
+rebuilds tables the SQLite way — create new, copy, drop old — and SQLite refuses to drop a table a
+view still references:
+
+```
+[tenant-cascade] Migration FAILED: error in view device_inherited_playlist: no such table: main.devices
+```
+
+They now run **after** every table-rebuilding migration. ⚠️ A view is not a statement you can order
+casually; it is a dependency on every table it names, enforced against all later schema surgery.
+
+### ⚠️ An unclassified id must still play — the staged-migration property
+
+The first working view resolved `playlist_source IS NULL` as "inherits", full stop. That turned
+**12 tests red** the moment it went into `buildPlaylistPayload`, and the reason generalises well
+beyond the tests: NULL means *both* "inherits" and "a writer set `playlist_id` and never heard of
+this column". The second case is not hypothetical — the group and wall fan-outs are not converted
+yet, and workspace import/restore writes the id directly. Every one of those devices resolved to
+**nothing**.
+
+The view now falls back to the raw `devices.playlist_id` as a **last resort, below the inherited
+sources**. A stale copy still loses to the group (which is the whole point), but an unconverted
+writer keeps working exactly as it does today. That is what makes the rest of this migration
+stageable: each writer can be converted on its own, and nothing goes dark in between.
+
+### `playlist_source` has four values, not two
+
+`'device'` / `'group'` / `'wall'` was the proposal. Building the backfill produced a fourth:
+**`'none'`** — *deliberately plays nothing*. Devices that sit in a group with a playlist but hold no
+playlist of their own are dark today (usually because the old clear wrote `playlist_id = NULL`).
+Letting them simply inherit is correct under the new model and would **light up screens during an
+upgrade**, which this document forbids. They are stamped `'none'`, which an operator can revert.
+
+⚠️ The first cut of the view ignored `'none'` entirely, so those screens inherited anyway. Caught by
+the migration-invariant test, not by review — the backfill and the view have to agree about a value,
+and only one of them knew about it.
+
+Note that `'group'` and `'wall'` never need storing: they are *derived*, so the view computes them.
+Only `'device'` and `'none'` are facts about the row.
+
 ## What this fixes, concretely
 
 - A group playlist change reaches members **because nothing was copied**, not because a loop
@@ -191,6 +263,35 @@ short answer is you don't."*
 Out of scope here, but it is the feature this design would eventually need to support, and the
 resolver should not make it harder to add.
 
+## Where this stands, and what is left
+
+**Built and committed** (this is the mechanism, not the cleanup):
+
+- `device_inherited_playlist` / `device_resolved_playlist` views — the rule, in SQL, once
+- `lib/resolve-device-playlist.js` — the point lookup
+- `devices.playlist_source` + `lib/playlist-source-backfill.js`, with `verifyNoDeviceChanged`
+  running at boot and aborting the migration rather than changing what a screen plays
+- every **reader** converted: the payload builder, the three group-sync queries,
+  `ensureDevicePlaylist`, the device-detail page
+- every **fan-out** converted (`pushToDevices`, display count, delete-affected, mute, zone guard) —
+  these keyed on the copy, so they skipped precisely the devices that inherit
+- explicit choices stamp `'device'`; clearing an override falls back to inherited
+
+Backfill verified against a real database (35 devices: 20 overrides, 15 inheriting, **0 changed**).
+
+**Left to do:**
+
+1. **Delete the eager copies** in `device-groups.js` (4), `video-walls.js` (3) and
+   `routes/status.js` (2). They are redundant now — the resolver ignores an unclassified copy in
+   favour of the group or wall — but they are also the fan-out loops this design set out to remove.
+2. **Schedules as their own tier**, above `device`, resolved live. Deletes `services/scheduler.js`'s
+   in-memory `activeOverrides` Map and the restart-strands-the-device bug with it.
+3. **UI**: surface `playlist_source` — "inherited from *Lobby*" vs "overridden", with a revert. The
+   row can finally answer this; nothing shows it yet.
+4. `assignments.js` `ensureDevicePlaylist` still returns the shared playlist for an inheriting
+   device, so "add content to this screen" edits the group's playlist and therefore every screen in
+   it. Pre-existing, deliberately unchanged here, and worth its own decision.
+
 ## Risks, and the one that matters most
 
 ⚠️ **The structural fingerprint.** The player restarts playback when this changes
@@ -226,11 +327,9 @@ Lesser risks:
 
 ## Open questions for the user
 
-0. ⚠️ **REOPENED — is the ladder a specificity rule at all?** Research says nobody resolves content
-   by "most specific level wins". The strongest alternative is FWI's per-assignment **Behavior**
-   selector (empty-only / before / after / override), which expresses both models and makes the
-   intent explicit. This is now the biggest open question in the document, and it sits *above* the
-   three below — they are all tiebreaks within a rule we may be replacing.
+0. ~~Is the ladder a specificity rule at all?~~ **Settled: yes, keep it.** FWI's per-assignment
+   Behavior selector is the better long-term model and is recorded above, but the ladder is what
+   fixes the defect in front of us and it keeps base playlists and schedules resolving the same way.
 
 1. ~~Wall above group?~~ **Settled 2026-08-23: walls win** — and this survives either model, because
    a wall member playing anything but the wall's playlist is visibly broken. See the note under the

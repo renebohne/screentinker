@@ -62,7 +62,9 @@ function emitMuteChanged(req, item, muted) {
     const commandQueue = require('../lib/command-queue');
     const payload = { content_id: item.content_id || null, widget_id: item.widget_id || null, muted: m };
     const notify = (playlistId) => {
-      const devices = db.prepare('SELECT id FROM devices WHERE playlist_id = ?').all(playlistId);
+      // Resolved: a device that inherits this playlist holds no copy of its id, and would
+      // otherwise be the one device a mute toggle silently skipped.
+      const devices = db.prepare('SELECT device_id AS id FROM device_resolved_playlist WHERE playlist_id = ?').all(playlistId);
       for (const d of devices) {
         deviceNs.to(d.id).emit('device:mute-changed', payload);                        // current playthrough
         commandQueue.queueOrEmitPlaylistUpdate(deviceNs, d.id, buildPlaylistPayload);  // future loads

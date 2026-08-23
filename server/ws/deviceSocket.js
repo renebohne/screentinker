@@ -226,10 +226,18 @@ function logDeviceStatus(deviceId, status, reason, detail) {
 // native-vs-ours from what the members ARE (BrightSign?) and where they are (one L2 network?).
 function groupSyncMembers(group) {
   if (!group || !group.playlist_id) return [];
+  /*
+   * ⚠️ Membership is decided on the RESOLVED playlist. This used to read d.playlist_id, i.e. the
+   * copy the old fan-out left on each device — so once group and wall playlists stopped being
+   * copied down, every member would have failed this match and no group would ever have synced.
+   * Five readers of that column lived here, none of them listed in the inheritance design doc;
+   * they were found by grepping before the writers were changed, not after.
+   */
   return db.prepare(`
     SELECT d.id, d.status, d.platform, d.ip_address FROM devices d
     JOIN device_group_members dgm ON dgm.device_id = d.id
-    WHERE dgm.group_id = ? AND d.playlist_id = ? ORDER BY d.id
+    JOIN device_resolved_playlist r ON r.device_id = d.id
+    WHERE dgm.group_id = ? AND r.playlist_id = ? ORDER BY d.id
   `).all(group.id, group.playlist_id);
 }
 
@@ -259,6 +267,7 @@ function deviceSyncGroup(deviceId, devicePlaylistId) {
 
 // Build the group_sync block for a device, or null (the playlist-match guard lives in deviceSyncGroup).
 function resolveGroupSync(device, deviceId) {
+  // device.playlist_id is already the resolved id (buildPlaylistPayload selects it from the view).
   const group = deviceSyncGroup(deviceId, device?.playlist_id);
   if (!group) return null;
   const members = groupSyncMembers(group);
@@ -367,10 +376,20 @@ function refreshContentRevs(assignments) {
 const { triggersForDevice, projectTrigger } = require('../lib/device-triggers');
 
 function buildPlaylistPayload(deviceId) {
-  const device = db.prepare(`SELECT playlist_id, layout_id, orientation, wall_id, timezone, reported_timezone,
-      triggers_accept_http, triggers_accept_udp, trigger_secret, trigger_http_port,
-      trigger_udp_port, trigger_multicast_group, trigger_clear_all_token
-      FROM devices WHERE id = ?`).get(deviceId);
+  /*
+   * ⚠️ playlist_id comes from the RESOLVER, not from the devices row.
+   *
+   * The column is now only half the answer: it is meaningful when playlist_source = 'device' and
+   * stale otherwise, because group and wall playlists are no longer copied down. Reading it
+   * directly here would show a screen whatever the last writer happened to leave behind — which is
+   * the bug this replaced. See lib/resolve-device-playlist.js.
+   */
+  const device = db.prepare(`SELECT r.playlist_id AS playlist_id, r.source AS playlist_source,
+      d.layout_id, d.orientation, d.wall_id, d.timezone, d.reported_timezone,
+      d.triggers_accept_http, d.triggers_accept_udp, d.trigger_secret, d.trigger_http_port,
+      d.trigger_udp_port, d.trigger_multicast_group, d.trigger_clear_all_token
+      FROM devices d JOIN device_resolved_playlist r ON r.device_id = d.id
+      WHERE d.id = ?`).get(deviceId);
 
   let assignments = [];
   if (device?.playlist_id) {
@@ -1621,9 +1640,12 @@ module.exports = function setupDeviceSocket(io) {
     // Sender must be an eligible member: in the group (m2m) AND on the group's shared playlist.
     function groupSenderEligible(group) {
       if (!group || !group.sync_enabled || !group.playlist_id) return false;
+      // Resolved playlist, for the same reason as groupSyncMembers: the raw column is stale for
+      // any device that inherits, and this guard decides whose sync broadcasts are trusted.
       return !!db.prepare(`
-        SELECT 1 FROM device_group_members dgm JOIN devices d ON d.id = dgm.device_id
-        WHERE dgm.group_id = ? AND dgm.device_id = ? AND d.playlist_id = ?
+        SELECT 1 FROM device_group_members dgm
+        JOIN device_resolved_playlist r ON r.device_id = dgm.device_id
+        WHERE dgm.group_id = ? AND dgm.device_id = ? AND r.playlist_id = ?
       `).get(group.id, currentDeviceId, group.playlist_id);
     }
 

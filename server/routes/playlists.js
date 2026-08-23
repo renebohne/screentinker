@@ -201,7 +201,13 @@ function pushToDevices(playlistId, reqOrIo) {
     const commandQueue = require('../lib/command-queue');
     const deviceNs = io.of('/device');
     const ids = new Set(
-      db.prepare('SELECT id FROM devices WHERE playlist_id = ?').all(playlistId).map((d) => d.id)
+/*
+       * ⚠️ Resolved, not the raw column: a device that INHERITS its playlist has no copy of the id
+       * on its row, so a fan-out keyed on devices.playlist_id skips exactly the devices the change
+       * is for. Same shape as the trigger fan-out that selected WHERE playlist_id = ? and missed
+       * every device referencing the playlist only as a trigger target.
+       */
+      db.prepare('SELECT device_id AS id FROM device_resolved_playlist WHERE playlist_id = ?').all(playlistId).map((d) => d.id)
     );
     /*
      * ⚠️ ALSO the devices that hold this playlist as a TRIGGER TARGET. The base-playlist query
@@ -397,7 +403,8 @@ router.get('/:id', requirePlaylistRead, (req, res) => {
     WHERE pi.playlist_id = ?
     ORDER BY pi.sort_order ASC
   `).all(req.params.id);
-  const displayCount = db.prepare('SELECT COUNT(*) as count FROM devices WHERE playlist_id = ?').get(req.params.id).count;
+  // Resolved, so the count matches the screens that actually play it, inherited ones included.
+  const displayCount = db.prepare('SELECT COUNT(*) as count FROM device_resolved_playlist WHERE playlist_id = ?').get(req.params.id).count;
   for (const it of items) it.schedules = schedulesForItem(it.id); // #156: editor read-path needs the blocks (mirror :351)
   // #104's layout derivation, reused so the editor can SHOW where each item lands. A playlist
   // has no intrinsic layout — it is inferred from its own zone-bound items — so without this
@@ -552,7 +559,8 @@ router.post('/:id/discard', requirePlaylistWrite, (req, res) => {
 router.delete('/:id', requirePlaylistWrite, (req, res) => {
   // Which screens are about to lose their playlist — read BEFORE the delete, because
   // devices.playlist_id is ON DELETE SET NULL and the association is gone immediately after.
-  const affected = db.prepare('SELECT id FROM devices WHERE playlist_id = ?').all(req.params.id);
+  // Resolved: a device inheriting this playlist is just as affected as one pinned to it.
+  const affected = db.prepare('SELECT device_id AS id FROM device_resolved_playlist WHERE playlist_id = ?').all(req.params.id);
 
   /*
    * ⚠️ REFUSE, AND SAY WHAT IS USING IT — the reverse-dependency check.
@@ -1010,7 +1018,10 @@ router.post('/:id/assign', requirePlaylistWrite, (req, res) => {
     return res.status(403).json({ error: 'Device is not in this playlist\'s workspace' });
   }
 
-  db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?').run(req.params.id, device_id);
+  // The one action that genuinely means "this screen, this playlist" — stamp it as an override so
+  // the resolver honours it above the device's group and wall, and so a later group edit cannot
+  // silently destroy it the way the old copy-on-assign did.
+  db.prepare("UPDATE devices SET playlist_id = ?, playlist_source = 'device' WHERE id = ?").run(req.params.id, device_id);
 
   // Push update to device
   try {

@@ -53,12 +53,24 @@ function checkDeviceAccess(req, res, paramName = 'deviceId', requireWrite = true
 // visible once playlists.js migrates. Mirrors the 2.2i fix in device-groups.js.
 function ensureDevicePlaylist(deviceId, userId) {
   const device = db.prepare('SELECT playlist_id, workspace_id, name FROM devices WHERE id = ?').get(deviceId);
-  if (device?.playlist_id) return device.playlist_id;
+  /*
+   * ⚠️ The RESOLVED playlist, so this keeps returning the group's/wall's playlist for a device that
+   * inherits one — exactly as it did when that playlist was copied into the row.
+   *
+   * That preserves today's behaviour, including today's footgun: adding content "to this screen"
+   * while it inherits edits the shared playlist, and therefore every other screen using it. Left
+   * alone deliberately — changing edit semantics is a product decision, not a side effect of
+   * introducing a resolver — but it should not stay unnamed.
+   */
+  const resolved = resolveDevicePlaylistId(deviceId);
+  if (resolved) return resolved;
 
   const playlistId = uuidv4();
   db.prepare('INSERT INTO playlists (id, user_id, workspace_id, name, is_auto_generated) VALUES (?, ?, ?, ?, 1)')
     .run(playlistId, userId, device?.workspace_id || null, `${device?.name || 'Display'} playlist`);
-  db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?').run(playlistId, deviceId);
+  // A playlist made FOR this screen is a choice, not an inheritance: stamp it, or the resolver
+  // would look straight past it at the group and the new playlist would never play.
+  db.prepare("UPDATE devices SET playlist_id = ?, playlist_source = 'device' WHERE id = ?").run(playlistId, deviceId);
   return playlistId;
 }
 
@@ -169,6 +181,7 @@ function checkItemWrite(req, res) {
 
 // Per-item mute lives in lib/mute-sync.js so routes/playlists.js can share it.
 const { emitMuteChanged } = require('../lib/mute-sync');
+const { resolveDevicePlaylistId } = require('../lib/resolve-device-playlist');
 
 // Update playlist item
 router.put('/:id', (req, res) => {
@@ -189,7 +202,9 @@ router.put('/:id', (req, res) => {
     // playlists can't be bound to one layout here, so we leave those to the player fallback.
     let effZone = zone_id || null;
     if (effZone) {
-      const devs = db.prepare('SELECT layout_id FROM devices WHERE playlist_id = ? AND layout_id IS NOT NULL').all(item.playlist_id);
+      const devs = db.prepare(`SELECT d.layout_id FROM devices d
+        JOIN device_resolved_playlist r ON r.device_id = d.id
+        WHERE r.playlist_id = ? AND d.layout_id IS NOT NULL`).all(item.playlist_id);
       if (devs.length === 1) effZone = validZoneForLayout(effZone, devs[0].layout_id, `on update of item ${req.params.id}`);
     }
     updates.push('zone_id = ?'); values.push(effZone);

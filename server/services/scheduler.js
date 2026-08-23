@@ -48,20 +48,34 @@ function evaluateSchedules() {
     if (active) {
       // Apply layout override if schedule has one
       if (active.layout_id && active.layout_id !== device.layout_id) {
-        if (!override) activeOverrides.set(device.id, { layout_id: device.layout_id, playlist_id: device.playlist_id });
+        if (!override) activeOverrides.set(device.id, { layout_id: device.layout_id, playlist_id: device.playlist_id, playlist_source: device.playlist_source });
         db.prepare("UPDATE devices SET layout_id = ? WHERE id = ?").run(active.layout_id, device.id);
         changed = true;
       }
       // Apply playlist override if schedule has one
       if (active.playlist_id && active.playlist_id !== device.playlist_id) {
-        if (!override) activeOverrides.set(device.id, { layout_id: device.layout_id, playlist_id: device.playlist_id });
-        db.prepare("UPDATE devices SET playlist_id = ? WHERE id = ?").run(active.playlist_id, device.id);
+        /*
+         * ⚠️ A scheduled playlist has to outrank the device's own, so it is written as an override
+         * — playlist_source = 'device' — and the previous SOURCE is remembered alongside the
+         * previous id so the revert below can put the row back exactly as it was. Without the
+         * source, reverting a device that had been inheriting would leave it pinned forever.
+         *
+         * This is a stopgap, and it should be read as one: a schedule pretending to be a device
+         * override is not the model. Schedules belong ABOVE 'device' as their own tier in
+         * device_resolved_playlist, resolved live from the schedules table — which would also fix
+         * the bug directly below this line, where the pre-schedule playlist is remembered only in
+         * an in-memory Map, so a server restart during an active schedule strands the device on the
+         * scheduled playlist permanently.
+         */
+        if (!override) activeOverrides.set(device.id, { layout_id: device.layout_id, playlist_id: device.playlist_id, playlist_source: device.playlist_source });
+        db.prepare("UPDATE devices SET playlist_id = ?, playlist_source = 'device' WHERE id = ?").run(active.playlist_id, device.id);
         changed = true;
       }
     } else if (override) {
-      // No active schedule — revert to original playlist/layout
-      db.prepare("UPDATE devices SET playlist_id = ?, layout_id = ? WHERE id = ?")
-        .run(override.playlist_id, override.layout_id, device.id);
+      // No active schedule — revert to original playlist/layout (and its source, so a device that
+      // was inheriting goes back to inheriting rather than staying pinned).
+      db.prepare("UPDATE devices SET playlist_id = ?, playlist_source = ?, layout_id = ? WHERE id = ?")
+        .run(override.playlist_id, override.playlist_source ?? null, override.layout_id, device.id);
       activeOverrides.delete(device.id);
       changed = true;
     }
