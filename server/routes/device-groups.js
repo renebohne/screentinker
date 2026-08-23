@@ -11,6 +11,7 @@ const { requireScope } = require('../middleware/apiToken');
 const { resolveSyncBackend, BACKENDS } = require('../lib/sync-backend');
 const playerCapabilities = require('../lib/player-capabilities');
 const { resolveItemDuration } = require('../lib/item-duration');
+const { resolveDevicePlaylistId, clearInheritedCopy } = require('../lib/resolve-device-playlist');
 const { stripDeviceSecretsForList } = require('../lib/device-sanitize');
 
 const VALID_COLOR = /^#[0-9A-Fa-f]{6}$/;
@@ -60,10 +61,14 @@ function requireGroupWrite(req, res, next) {
 // refusal instead of showing a setting that quietly isn't in force.
 function syncDecisionFor(group) {
   if (!group?.playlist_id) return { sync_effective: null, sync_reason: null, sync_downgraded: false };
+  // Resolved playlist, matching ws/deviceSocket.js's groupSyncMembers exactly. Reading the raw
+  // column here would report "sync off / downgraded" for a group whose members all inherit — the
+  // dashboard explaining a refusal that never happened.
   const members = db.prepare(`
     SELECT d.id, d.platform, d.ip_address FROM devices d
     JOIN device_group_members dgm ON dgm.device_id = d.id
-    WHERE dgm.group_id = ? AND d.playlist_id = ?
+    JOIN device_resolved_playlist r ON r.device_id = d.id
+    WHERE dgm.group_id = ? AND r.playlist_id = ?
   `).all(group.id, group.playlist_id);
   const d = resolveSyncBackend(group.sync_backend, members);
   return { sync_effective: d.backend, sync_reason: d.reason, sync_downgraded: d.downgraded };
@@ -259,15 +264,19 @@ router.post('/:id/devices', requireGroupWrite, (req, res) => {
   try {
     db.prepare('INSERT OR IGNORE INTO device_group_members (device_id, group_id) VALUES (?, ?)').run(device_id, req.params.id);
 
-    // Sync device's playlist to the group's: a defined playlist is inherited,
-    // a group with no playlist clears the device's. The user's mental model
-    // is "joining a group means using its playlist (or none)" — staying on a
-    // stale playlist after joining a no-playlist group was the bug we just hit.
-    const group = db.prepare('SELECT playlist_id FROM device_groups WHERE id = ?').get(req.params.id);
-    const newPlaylist = group?.playlist_id || null;
-    db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?').run(newPlaylist, device_id);
+    /*
+     * ⚠️ Nothing is copied. Membership IS the assignment; the resolver reads it.
+     *
+     * This used to write the group's playlist onto the device — which destroyed any playlist the
+     * operator had set for that screen, because a copied id cannot say whether it was chosen or
+     * inherited. It also had to CLEAR the device when the group had no playlist, to stop a stale
+     * copy lingering. Neither is needed once resolution is live: a group with no playlist simply
+     * contributes nothing, and a device with an explicit override keeps it.
+     *
+     * The push still happens, because the device's resolved playlist may well have changed.
+     */
     pushPlaylistToDevice(req, device_id);
-    res.status(201).json({ success: true, playlist_id: newPlaylist });
+    res.status(201).json({ success: true, playlist_id: resolveDevicePlaylistId(device_id) });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -283,16 +292,16 @@ router.post('/:id/devices', requireGroupWrite, (req, res) => {
 router.delete('/:id/devices/:deviceId', requireGroupWrite, (req, res) => {
   const deviceId = req.params.deviceId;
   db.prepare('DELETE FROM device_group_members WHERE device_id = ? AND group_id = ?').run(deviceId, req.params.id);
+  // Drop a leftover copy of the group's playlist so the last-resort branch of the resolver cannot
+  // resurrect it once the membership that justified it is gone. A device's OWN choice is untouched.
+  clearInheritedCopy(deviceId);
 
-  const remaining = db.prepare(`
-    SELECT g.playlist_id FROM device_groups g
-    JOIN device_group_members dgm ON g.id = dgm.group_id
-    WHERE dgm.device_id = ?
-    ORDER BY g.playlist_id IS NULL, g.name ASC
-    LIMIT 1
-  `).get(deviceId);
-  const newPlaylist = remaining?.playlist_id || null;
-  db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?').run(newPlaylist, deviceId);
+  /*
+   * ⚠️ No re-derivation here either. This used to pick "any remaining group with a playlist",
+   * ordered by name — a winner no operator could see, predict or change, and the reason a device
+   * in two groups had no defined outcome. The resolver now answers it with a stated rule
+   * (priority, then oldest), so leaving a group is just deleting the membership row.
+   */
   pushPlaylistToDevice(req, deviceId);
 
   res.json({ success: true });
@@ -303,12 +312,16 @@ router.delete('/:id/devices/:deviceId', requireGroupWrite, (req, res) => {
 // The auto-created playlist lives in the same workspace as the device, so
 // once playlists.js scopes by workspace_id this helper's rows remain visible.
 function ensureDevicePlaylist(deviceId, userId) {
-  const device = db.prepare('SELECT playlist_id, workspace_id, name FROM devices WHERE id = ?').get(deviceId);
-  if (device?.playlist_id) return device.playlist_id;
+  const device = db.prepare('SELECT workspace_id, name FROM devices WHERE id = ?').get(deviceId);
+  // Resolved, so a device inheriting its group's playlist keeps editing that one rather than
+  // silently getting a second, empty playlist of its own.
+  const resolved = resolveDevicePlaylistId(deviceId);
+  if (resolved) return resolved;
   const playlistId = uuidv4();
   db.prepare('INSERT INTO playlists (id, user_id, workspace_id, name, is_auto_generated) VALUES (?, ?, ?, ?, 1)')
     .run(playlistId, userId, device?.workspace_id || null, `${device?.name || 'Display'} playlist`);
-  db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?').run(playlistId, deviceId);
+  // Made FOR this screen, so it is a choice: without the stamp the resolver looks past it.
+  db.prepare("UPDATE devices SET playlist_id = ?, playlist_source = 'device' WHERE id = ?").run(playlistId, deviceId);
   return playlistId;
 }
 
@@ -350,9 +363,21 @@ router.post('/:id/assign-content', requireGroupWrite, (req, res) => {
 
   const members = db.prepare('SELECT device_id FROM device_group_members WHERE group_id = ?').all(req.params.id);
 
+  /*
+   * ⚠️ De-duplicated by PLAYLIST, not by device.
+   *
+   * Members of a group with a shared playlist all resolve to the SAME playlist, so looping over
+   * devices inserted the item once per member — add one image to a group of five screens and it
+   * appeared five times in a row. Pre-existing (the old copy made every member's playlist_id
+   * identical too), and the resolver does not change it: the fix is to insert once per distinct
+   * playlist.
+   */
   const transaction = db.transaction(() => {
+    const seen = new Set();
     for (const m of members) {
       const playlistId = ensureDevicePlaylist(m.device_id, req.user.id);
+      if (seen.has(playlistId)) continue;
+      seen.add(playlistId);
       const max = db.prepare('SELECT COALESCE(MAX(sort_order),0)+1 as next FROM playlist_items WHERE playlist_id = ?').get(playlistId);
       db.prepare('INSERT INTO playlist_items (playlist_id, content_id, sort_order, duration_sec) VALUES (?, ?, ?, ?)')
         .run(playlistId, content_id, max.next, itemDuration);
@@ -385,12 +410,13 @@ router.post('/:id/assign-playlist', requireGroupWrite, (req, res) => {
 
   const members = db.prepare('SELECT device_id FROM device_group_members WHERE group_id = ?').all(req.params.id);
 
-  const stmt = db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?');
-  const transaction = db.transaction(() => {
-    db.prepare('UPDATE device_groups SET playlist_id = ? WHERE id = ?').run(playlist_id, req.params.id);
-    for (const m of members) stmt.run(playlist_id, m.device_id);
-  });
-  transaction();
+  /*
+   * ⚠️ One row is written: the GROUP's. The fan-out that walked every member and stamped the id on
+   * each of them is gone — that loop was the mechanism by which a group edit destroyed per-device
+   * choices, and the reason a member added later inherited nothing until someone touched the group
+   * again. Members are still pushed to, because what they resolve to has changed.
+   */
+  db.prepare('UPDATE device_groups SET playlist_id = ? WHERE id = ?').run(playlist_id, req.params.id);
 
   for (const m of members) pushPlaylistToDevice(req, m.device_id);
   res.json({ success: true, devices_updated: members.length });

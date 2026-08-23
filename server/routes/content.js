@@ -303,9 +303,13 @@ function purgeContentRow(content) {
   unlink(content.thumbnail_path);
   unlink(content.subtitle_url); // #216 sidecar (undefined on pre-#216 rows — no-op)
 
+  // Resolved: a device that INHERITS the playlist holding this content has no copy of the id on
+  // its row, so joining on devices.playlist_id would leave exactly those screens showing content
+  // that no longer exists on disk.
   const affected = db.prepare(`
     SELECT DISTINCT d.id as device_id FROM devices d
-    JOIN playlists p ON d.playlist_id = p.id
+    JOIN device_resolved_playlist r ON r.device_id = d.id
+    JOIN playlists p ON r.playlist_id = p.id
     JOIN playlist_items pi ON pi.playlist_id = p.id
     WHERE pi.content_id = ?
   `).all(id).map(r => r.device_id);

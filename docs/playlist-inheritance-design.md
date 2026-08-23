@@ -279,18 +279,64 @@ resolver should not make it harder to add.
 
 Backfill verified against a real database (35 devices: 20 overrides, 15 inheriting, **0 changed**).
 
+**The eager copies are gone.** Group join/leave/assign-playlist, wall playlist-change/delete/
+membership, and workspace import/restore no longer write a playlist onto a device row. Membership
+*is* the assignment. Three consequences are now covered by tests:
+
+- joining a group no longer destroys a playlist chosen for that screen
+- a group playlist change reaches members that joined afterwards, because nothing was copied
+- leaving a group or wall no longer strands the screen on the shared playlist
+
+⚠️ **Leaving needs `clearInheritedCopy`.** The view's last-resort branch would otherwise resurrect a
+stale copy the moment inheritance ended — "remove this panel from the wall" would leave the wall's
+content playing on it. The helper drops the copy and *only* the copy: a row marked
+`playlist_source = 'device'` is an operator's decision and is left alone.
+
+⚠️ **Two more readers of the copy, found the same way as the first six**: `syncDecisionFor`
+(`device-groups.js`), which would have told the dashboard a group's sync was downgraded when every
+member merely inherited; and the content-delete fan-out (`routes/content.js`), which would have left
+inheriting screens showing content no longer on disk. **Eight readers, not one.**
+
+⚠️ **A bug the resolver does NOT fix, found on the way.** `POST /groups/:id/assign-content` loops
+over member *devices*, and members of a group with a shared playlist all resolve to the *same*
+playlist — so adding one image to a group of five inserted it five times. Pre-existing (the old copy
+made every member's `playlist_id` identical too). Now de-duplicated by playlist.
+
 **Left to do:**
 
-1. **Delete the eager copies** in `device-groups.js` (4), `video-walls.js` (3) and
-   `routes/status.js` (2). They are redundant now — the resolver ignores an unclassified copy in
-   favour of the group or wall — but they are also the fan-out loops this design set out to remove.
-2. **Schedules as their own tier**, above `device`, resolved live. Deletes `services/scheduler.js`'s
+1. **Schedules as their own tier**, above `device`, resolved live. Deletes `services/scheduler.js`'s
    in-memory `activeOverrides` Map and the restart-strands-the-device bug with it.
-3. **UI**: surface `playlist_source` — "inherited from *Lobby*" vs "overridden", with a revert. The
+2. **UI**: surface `playlist_source` — "inherited from *Lobby*" vs "overridden", with a revert. The
    row can finally answer this; nothing shows it yet.
-4. `assignments.js` `ensureDevicePlaylist` still returns the shared playlist for an inheriting
+3. `assignments.js` `ensureDevicePlaylist` still returns the shared playlist for an inheriting
    device, so "add content to this screen" edits the group's playlist and therefore every screen in
    it. Pre-existing, deliberately unchanged here, and worth its own decision.
+
+### The view SQL lives in one module, because a fixture pasted a schema
+
+`routes/content.js`'s delete fan-out started resolving inheritance, and
+`test/operator-permissions.test.js` went red with *"no such table: device_resolved_playlist"*. That
+test hand-builds a minimal in-memory schema and injects it as the db module, so the migrations never
+run — a fixture that had quietly drifted from the real database.
+
+Pasting `CREATE VIEW` into the fixture would have made the drift worse. The definition now lives in
+`server/lib/playlist-resolver-sql.js` and both the boot migration and the fixture call
+`applyResolverViews(db)`. ⚠️ Any fixture that hand-builds `devices` now needs `playlist_source` and
+`wall_id` on it, plus `video_walls`, `device_groups` and `device_group_members` — which is the point:
+the failure is loud instead of a test proving things about a database that does not exist.
+
+### UI
+
+The device page now shows where its playlist came from — *"Inherited from Lobby"* or *"Set for this
+screen"* with a **Use inherited** button. This is the question the dashboard could not previously
+answer at all: the id was copied down, so a chosen playlist and an inherited one were the same byte.
+`GET /api/devices/:id` returns `playlist_source` and `playlist_source_name` (naming the group or wall
+rather than saying "inherited" and leaving the operator to hunt).
+
+⚠️ **Run both SQLite drivers.** CI's `node:sqlite` job caught a resolver test that compared a result
+row with `deepEqual`: `node:sqlite` returns **null-prototype** rows, better-sqlite3 returns plain
+ones. `resolveDevicePlaylist` now normalises its own return shape. A local run exercises one driver
+only — `ST_SQLITE_DRIVER=node node --test` runs the other.
 
 ## Risks, and the one that matters most
 

@@ -23,10 +23,20 @@ const { db } = require('../db/database');
  */
 const SELECT = 'SELECT playlist_id, source FROM device_resolved_playlist WHERE device_id = ?';
 
-/** @returns {{playlist_id: string|null, source: 'device'|'wall'|'group'|null}} */
+/**
+ * ⚠️ Always returns a PLAIN object with both keys present.
+ *
+ * This project runs on two SQLite drivers (better-sqlite3 and node:sqlite, see the mesh work), and
+ * they do not agree on the prototype of a result row — node:sqlite hands back null-prototype
+ * objects. Callers comparing or spreading the row should not have to know which driver is loaded,
+ * and a missing device should look like a device that resolves to nothing rather than `undefined`.
+ *
+ * @returns {{playlist_id: string|null, source: 'device'|'wall'|'group'|null}}
+ */
 function resolveDevicePlaylist(deviceId) {
   if (!deviceId) return { playlist_id: null, source: null };
-  return db.prepare(SELECT).get(deviceId) || { playlist_id: null, source: null };
+  const row = db.prepare(SELECT).get(deviceId);
+  return { playlist_id: row?.playlist_id ?? null, source: row?.source ?? null };
 }
 
 /** Just the id — the shape most callers replacing `device.playlist_id` want. */
@@ -34,4 +44,21 @@ function resolveDevicePlaylistId(deviceId) {
   return resolveDevicePlaylist(deviceId).playlist_id;
 }
 
-module.exports = { resolveDevicePlaylist, resolveDevicePlaylistId };
+/*
+ * ⚠️ Drop a device's leftover COPY of an inherited playlist — but never its own choice.
+ *
+ * The view falls back to the raw devices.playlist_id as a last resort, so that writers not yet
+ * converted keep working. That fallback has a sharp edge: a device carrying a stale copy of its
+ * group's or wall's playlist would, the moment it LEAVES, stop inheriting and start playing that
+ * stale copy — so "remove this screen from the wall" would leave the wall's content on it instead
+ * of going dark.
+ *
+ * Membership changes therefore clear the copy, and only the copy: a row with
+ * playlist_source = 'device' is an operator's decision and is left exactly alone.
+ */
+function clearInheritedCopy(deviceId) {
+  db.prepare("UPDATE devices SET playlist_id = NULL WHERE id = ? AND IFNULL(playlist_source, '') != 'device'")
+    .run(deviceId);
+}
+
+module.exports = { resolveDevicePlaylist, resolveDevicePlaylistId, clearInheritedCopy };

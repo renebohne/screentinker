@@ -171,8 +171,11 @@ router.get('/export', (req, res) => {
     exported_at: new Date().toISOString(),
     user,
     devices: devices.map(d => {
-      const dev = db.prepare('SELECT playlist_id FROM devices WHERE id = ?').get(d.id);
-      return { ...d, playlist_id: dev?.playlist_id || null };
+      // playlist_source travels with the id: without it a restore cannot tell an operator's
+      // deliberate override from a playlist the device merely inherited, which is the exact
+      // distinction the whole inheritance model exists to record.
+      const dev = db.prepare('SELECT playlist_id, playlist_source FROM devices WHERE id = ?').get(d.id);
+      return { ...d, playlist_id: dev?.playlist_id || null, playlist_source: dev?.playlist_source || null };
     }),
     content,
     widgets: widgets.map(w => ({ ...w, config: JSON.parse(w.config || '{}') })),
@@ -432,7 +435,15 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
       // Set device playlist_id references
       for (const d of (data.devices || [])) {
         if (d.playlist_id && idMap.playlists[d.playlist_id]) {
-          db.prepare('UPDATE devices SET playlist_id = ? WHERE id = ?').run(idMap.playlists[d.playlist_id], idMap.devices[d.id]);
+          /*
+           * ⚠️ An export written before playlist_source existed has none, and a restored device with
+           * an id but no classification would be resolved by the view's LAST-RESORT branch — which
+           * works, but sits BELOW its group and wall, so a restored override would quietly lose to
+           * a group it happens to be in. Defaulting an old export's rows to 'device' preserves what
+           * the backup actually recorded: an id on the device row and no notion of inheritance.
+           */
+          db.prepare('UPDATE devices SET playlist_id = ?, playlist_source = ? WHERE id = ?')
+            .run(idMap.playlists[d.playlist_id], d.playlist_source || 'device', idMap.devices[d.id]);
         }
       }
     } else {

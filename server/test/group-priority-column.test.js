@@ -3,15 +3,14 @@
 /*
  * `device_groups.priority` — the precedence column for a device in MORE THAN ONE group.
  *
- * ⚠️ THIS COLUMN IS DELIBERATELY INERT. Nothing reads it yet: it is the first half of replacing
- * twelve eager writers of `devices.playlist_id` with one resolver, and it ships ahead of that logic
- * so the schema change can be present and backfilled before anything depends on it. These tests pin
- * the CONTRACT the resolver will be written against — default, nullability, and the tiebreak
- * ordering — so the column cannot quietly change shape between now and then.
+ * ⚠️ The column WAS inert when this file was written; it is not any more. `device_resolved_playlist`
+ * orders groups by `priority DESC, created_at ASC`, so this is now the tiebreak that decides what a
+ * multi-group device plays. These tests still pin the column's CONTRACT — default, nullability,
+ * ordering — while the resolver's behaviour is covered in test/playlist-inheritance.test.js.
  *
- * It mirrors `schedules.priority` on purpose. The two inheritance systems in this codebase already
- * disagree (schedules resolve lazily with a stated rule; playlists are copied eagerly with none),
- * and matching the column is what stops them drifting further. See docs/playlist-inheritance-design.md.
+ * It mirrors `schedules.priority` on purpose. The two inheritance systems used to disagree —
+ * schedules resolved lazily with a stated rule, playlists were copied eagerly with none — and
+ * matching the column is part of what closed that gap. See docs/playlist-inheritance-design.md.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');

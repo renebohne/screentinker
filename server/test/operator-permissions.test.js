@@ -50,10 +50,20 @@ db.exec(`
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
   );
   -- Empty, but the DELETE handler queries these for playlist cleanup.
-  CREATE TABLE devices (id TEXT PRIMARY KEY, playlist_id TEXT);
+  -- ⚠️ The device columns here are the ones device_resolved_playlist reads. The delete fan-out
+  -- resolves inheritance rather than reading devices.playlist_id, because a screen that INHERITS
+  -- the playlist holding this content has no copy of the id on its row — and would otherwise be
+  -- left showing a file that no longer exists on disk.
+  CREATE TABLE devices (id TEXT PRIMARY KEY, playlist_id TEXT, playlist_source TEXT, wall_id TEXT);
   CREATE TABLE playlists (id TEXT PRIMARY KEY, workspace_id TEXT, published_snapshot TEXT);
   CREATE TABLE playlist_items (id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id TEXT, content_id TEXT);
+  CREATE TABLE video_walls (id TEXT PRIMARY KEY, playlist_id TEXT);
+  CREATE TABLE device_groups (id TEXT PRIMARY KEY, playlist_id TEXT, priority INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0);
+  CREATE TABLE device_group_members (device_id TEXT, group_id TEXT);
 `);
+// The SAME view definition the migration applies — imported, not pasted, so this fixture cannot
+// drift into proving things about a database that does not exist.
+require('../lib/playlist-resolver-sql').applyResolverViews(db);
 
 const dbModulePath = require.resolve('../db/database');
 require.cache[dbModulePath] = {

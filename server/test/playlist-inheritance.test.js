@@ -21,7 +21,7 @@ process.env.NODE_ENV = 'test';
 const { test, before } = require('node:test');
 const assert = require('node:assert/strict');
 const { db } = require('../db/database');
-const { resolveDevicePlaylist } = require('../lib/resolve-device-playlist');
+const { resolveDevicePlaylist, clearInheritedCopy } = require('../lib/resolve-device-playlist');
 const { backfillPlaylistSource, verifyNoDeviceChanged } = require('../lib/playlist-source-backfill');
 
 const id = () => crypto.randomUUID();
@@ -192,4 +192,87 @@ test('clearing an override leaves the device reachable by the group publish that
   assert.ok(reached.includes(d),
     'the cleared device inherits the group playlist but holds no copy, so publishing that playlist '
     + 'would have skipped the one screen that just started using it');
+});
+
+/*
+ * ─── The writers, now that they no longer copy ─────────────────────────────────────────────
+ *
+ * These assert the three defects named at the top of the design doc, each of which was a direct
+ * consequence of copy-on-assign rather than a bug in any single route.
+ */
+
+test('⚠️ joining a group does NOT destroy a playlist chosen for that screen', () => {
+  const own = mkPlaylist('chosen'); const grpPl = mkPlaylist('group-wants');
+  const d = mkDevice({ playlist_id: own, playlist_source: 'device' });
+  const g = mkGroup(grpPl);
+
+  join(d, g);   // the route writes only the membership row
+
+  assert.deepEqual(resolveDevicePlaylist(d), { playlist_id: own, source: 'device' },
+    'the join used to stamp the group playlist onto the device, and a copied id cannot say whether '
+    + 'it was chosen or inherited — so the choice was simply gone');
+});
+
+test('a group playlist change reaches a member that joined afterwards', () => {
+  const first = mkPlaylist('v1'); const g = mkGroup(first);
+  const d = mkDevice();
+  join(d, g);
+  assert.equal(resolveDevicePlaylist(d).playlist_id, first);
+
+  // What assign-playlist now writes: ONE row, the group's.
+  const second = mkPlaylist('v2');
+  db.prepare('UPDATE device_groups SET playlist_id = ? WHERE id = ?').run(second, g);
+
+  assert.equal(resolveDevicePlaylist(d).playlist_id, second,
+    'members follow the group because nothing was copied, not because a fan-out loop remembered '
+    + 'to visit them');
+});
+
+test('⚠️ leaving a group does not strand the device on the group playlist', () => {
+  const grpPl = mkPlaylist('leaving'); const g = mkGroup(grpPl);
+  const d = mkDevice({ playlist_id: grpPl });   // the stale copy the old join left behind
+  join(d, g);
+
+  db.prepare('DELETE FROM device_group_members WHERE device_id = ? AND group_id = ?').run(d, g);
+  clearInheritedCopy(d);   // the helper the routes call — inlining the SQL here would test nothing
+
+  assert.equal(resolveDevicePlaylist(d).playlist_id, null,
+    "the view's last-resort branch would otherwise resurrect the stale copy, so a device removed "
+    + 'from a wall or group would keep playing its content');
+});
+
+test("leaving a group keeps the device's OWN playlist", () => {
+  const own = mkPlaylist('still-mine'); const g = mkGroup(mkPlaylist('g'));
+  const d = mkDevice({ playlist_id: own, playlist_source: 'device' });
+  join(d, g);
+
+  db.prepare('DELETE FROM device_group_members WHERE device_id = ? AND group_id = ?').run(d, g);
+  clearInheritedCopy(d);   // the helper the routes call — inlining the SQL here would test nothing
+
+  assert.equal(resolveDevicePlaylist(d).playlist_id, own,
+    'clearing the inherited copy must never take an operator\'s choice with it');
+});
+
+test('a wall playlist change reaches its panels without touching a device row', () => {
+  const v1 = mkPlaylist('wall-v1'); const w = mkWall(v1);
+  const panel = mkDevice({ wall_id: w });
+  assert.equal(resolveDevicePlaylist(panel).playlist_id, v1);
+
+  const v2 = mkPlaylist('wall-v2');
+  db.prepare('UPDATE video_walls SET playlist_id = ? WHERE id = ?').run(v2, w);
+
+  assert.equal(resolveDevicePlaylist(panel).playlist_id, v2);
+  assert.equal(db.prepare('SELECT playlist_id FROM devices WHERE id = ?').get(panel).playlist_id, null,
+    'the wall edit should not have written to any device row at all');
+});
+
+test('the resolver views come from ONE definition, shared with any hand-built fixture', () => {
+  const { applyResolverViews } = require('../lib/playlist-resolver-sql');
+  assert.equal(typeof applyResolverViews, 'function');
+  // Re-applying is idempotent: the migration does exactly this on every boot, so a definition
+  // change ships with the code instead of being pinned at first-create.
+  applyResolverViews(db);
+  const pl = mkPlaylist('after-reapply'); const d = mkDevice();
+  join(d, mkGroup(pl));
+  assert.equal(resolveDevicePlaylist(d).playlist_id, pl);
 });

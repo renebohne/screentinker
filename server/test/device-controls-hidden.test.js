@@ -77,6 +77,10 @@ function render(device, telemetry) {
     // section. The subject here is which CONTROLS a platform is offered, not what the trigger
     // panels render.
     renderTriggerConfig: () => '',
+    // Same again for the playlist-inheritance badge ("Inherited from Lobby" / "Set for this
+    // screen" + revert). It is not platform-dependent, so it is not this file's subject; it has
+    // its own coverage in test/device-playlist-source-badge.test.js.
+    playlistSourceBadge: () => '',
     localStorage: { getItem: () => null, setItem: () => {} },
     Math, Date, JSON, String, Array, Object,
   };

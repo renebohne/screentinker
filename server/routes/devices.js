@@ -148,6 +148,17 @@ router.get('/:id', (req, res) => {
   const resolved = resolveDevicePlaylist(req.params.id);
   device.playlist_id = resolved.playlist_id;
   device.playlist_source = resolved.source;
+  // The NAME of whatever it inherits from. "Inherited" alone sends the operator hunting for which
+  // group or wall did it; naming it is the difference between an explanation and a shrug.
+  device.playlist_source_name = resolved.source === 'wall'
+    ? db.prepare('SELECT name FROM video_walls WHERE id = ?').get(device.wall_id)?.name || null
+    : resolved.source === 'group'
+      ? db.prepare(`SELECT g.name FROM device_groups g
+                      JOIN device_group_members m ON m.group_id = g.id
+                     WHERE m.device_id = ? AND g.playlist_id = ?
+                     ORDER BY g.priority DESC, g.created_at ASC, g.id ASC LIMIT 1`)
+          .get(req.params.id, resolved.playlist_id)?.name || null
+      : null;
 
   let assignments = [];
   let playlist_status = null;

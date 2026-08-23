@@ -435,6 +435,7 @@ async function loadDevice(deviceId, activeTab = null) {
             <select class="input" id="playlistPicker" style="font-size:12px;padding:4px 8px;width:200px">
               <option value="">${t('device.playlist.no_playlist')}</option>
             </select>
+            ${playlistSourceBadge(device)}
           </div>
           <div style="display:flex;gap:6px">
             <button class="btn btn-secondary btn-sm" id="copyPlaylistBtn">${t('device.playlist.copy_to_btn')}</button>
@@ -1190,6 +1191,39 @@ function renderTriggerDiagnostics(device) {
       </div>`;
 }
 
+/*
+ * Where this screen's playlist came from.
+ *
+ * Until inheritance existed the dashboard could not answer this: devices.playlist_id was COPIED
+ * down from the group or wall, so a chosen playlist and an inherited one were the same byte and
+ * the UI had nothing to distinguish. The operator's question — "why is this screen showing that?"
+ * — had no answer on the page. Now playlist_source says which, and playlist_source_name says
+ * which group or wall, so the badge can name it rather than shrug.
+ *
+ * The revert only appears on an override, because it is the only state there is something to
+ * revert FROM. It clears the override; it does not blank the screen.
+ */
+function playlistSourceBadge(device) {
+  const chip = (text, title, color) =>
+    `<span title="${esc(title)}" style="font-size:11px;padding:2px 8px;border-radius:10px;`
+    + `background:var(--bg-input);color:${color};white-space:nowrap">${esc(text)}</span>`;
+
+  if (device.playlist_source === 'device') {
+    return chip(t('device.playlist.overridden'), t('device.playlist.overridden_tip'), 'var(--text-secondary)')
+      + `<button class="btn btn-secondary btn-sm" id="revertPlaylistBtn" title="${esc(t('device.playlist.revert_tip'))}"`
+      + ` style="font-size:11px;padding:2px 8px">${t('device.playlist.revert')}</button>`;
+  }
+  if (device.playlist_source === 'group' || device.playlist_source === 'wall') {
+    const name = device.playlist_source_name;
+    return chip(
+      name ? t('device.playlist.inherited_from', { name }) : t('device.playlist.inherited_generic'),
+      name ? t('device.playlist.inherited_tip', { name }) : t('device.playlist.inherited_generic'),
+      'var(--text-secondary)',
+    );
+  }
+  return '';
+}
+
 function renderPlaylist(assignments) {
   if (!assignments.length) {
     return `<div class="empty-state"><h3>${t('device.playlist.empty_title')}</h3><p>${t('device.playlist.empty_desc')}</p></div>`;
@@ -1588,6 +1622,18 @@ function setupActions(device) {
       }
     });
   }
+
+  // Revert an override: clear it and let the group or wall take over again. The server's DELETE
+  // clears playlist_source too, so this is "stop being special", not "go blank".
+  document.getElementById('revertPlaylistBtn')?.addEventListener('click', async () => {
+    try {
+      await api.clearDevicePlaylist(device.id);
+      showToast(t('device.toast.playlist_reverted'));
+      loadDevice(device.id, 'playlist');
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  });
 
   // Copy playlist to another device
   document.getElementById('copyPlaylistBtn')?.addEventListener('click', async () => {

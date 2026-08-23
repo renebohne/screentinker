@@ -537,6 +537,16 @@ export default {
   // Playlist tab
   'device.playlist.label': 'Playlist',
   'device.playlist.no_playlist': 'No playlist',
+  // Playlist inheritance: the row can finally say whether a playlist was CHOSEN for this screen or
+  // inherited from its group/wall, so the UI stops presenting the two as the same thing.
+  'device.playlist.inherited_from': 'Inherited from {name}',
+  'device.playlist.inherited_generic': 'Inherited',
+  'device.playlist.overridden': 'Set for this screen',
+  'device.playlist.overridden_tip': 'This screen has its own playlist. Its group or wall will not change it.',
+  'device.playlist.inherited_tip': 'This screen follows {name}. Changing that playlist changes this screen.',
+  'device.playlist.revert': 'Use inherited',
+  'device.playlist.revert_tip': 'Stop overriding — go back to the playlist this screen inherits.',
+  'device.toast.playlist_reverted': 'Reverted to the inherited playlist',
   'device.playlist.copy_to_btn': 'Copy To...',
   'device.playlist.add_content_btn': 'Add Content',
   'device.playlist.empty_title': 'No content assigned',
