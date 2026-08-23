@@ -1,7 +1,22 @@
 # Triggers
 
-**Status: approved design, not built.** Externally-fired events that put interrupt content over a
+**Status: BUILT BUT NOT YET ENABLEABLE.** Externally-fired events that put interrupt content over a
 running playlist, resolved entirely on the device.
+
+⚠️ **There is no API that writes a device's trigger settings.** `trigger_secret`,
+`triggers_accept_http`, `triggers_accept_udp`, the ports, the multicast group and
+`trigger_clear_all_token` are read by `deviceSocket.js` and projected to the player, but **nothing
+writes them** — `PUT /api/devices/:id` does not allowlist any of them and no dedicated route exists.
+So on a system configured through the product the secret is NULL, `evaluate()` returns `bad_secret`
+for every payload, and no listener binds. The definition half is built; the enablement half is not,
+and until it is the feature is inert. This was found by a QA pass *after* this doc had already been
+edited to claim the feature was built — the claim was true of the code that exists and false of the
+system as a whole, which is the more useful thing to state.
+
+Remaining before this is usable: the enablement API (with secret generation/rotation modelled on
+`POST /:id/settings-pin`) and a dashboard form; the Android renderer (`PipOverlay` renders a single
+`uri`, a trigger targets a playlist); and hardware verification, since `el.muted` has never been
+tested against a BrightSign hardware audio plane.
 
 ## Why
 
@@ -23,10 +38,15 @@ hardware can actually emit, not for what is pleasant to specify.
 
 Three findings from the existing code shaped this more than any preference did.
 
-**`pipShow(p)` / `pipClear(id)` (`server/player/index.html`) are already the single render path.** The
-`device:pip-show` / `device:pip-clear` socket handlers are three-line wrappers around them. So the
-trigger path calls the same functions. Nothing forks per transport, nothing duplicates the overlay
-renderer, and there is no hub round trip to remove because there never was one.
+**`pipShow(p)` / `pipClear(id)` (`server/player/index.html`) render the manual PiP overlay.** They
+share the `#pipContainer` layer with triggers but are NOT the trigger render path — §4 describes what
+was actually built: `triggerFire` creates its own `.trigger-box` and renders the trigger's playlist
+through `showZoneItem`, because a trigger targets a PLAYLIST and `pipShow` renders a single item.
+
+⚠️ Sharing one container has a cost that was found the hard way: both owners used to clear it with
+`innerHTML = ''`, so each silently destroyed the other's DOM while the other's state machine carried
+on believing it was on screen. Each now removes only its own class, and the layer has an explicit
+z-order (a trigger always outranks a PiP).
 
 **`pruneToPlaylist(urls)` (`server/player/sw.js`) deletes any content-cache entry not in the playlist
 URL set.** A trigger target is therefore not merely un-prefetched, it is *actively evicted* unless it
@@ -51,6 +71,20 @@ exactly the WAN-down guarantee failing at the only moment it matters.
 Playlist items are already library content. They already flow through the prefetch chain and are
 already protected from the prune. Pinning becomes: resolve `target_ref` → playlist → item URLs,
 append to `st-cache-playlist`. No policy change, no warning, no asterisk.
+
+⚠️ **"Playlist items are pinnable" was too strong, and the gap is now closed at save time.**
+`requestOfflineCache` pins `filepath && !remote_url`, so a playlist item carrying a `remote_url` is
+never held on the device, and a YouTube item cannot be held at all. A trigger pointing at such a
+playlist satisfies every structural check in this section and *still* fires against nothing with the
+WAN down — the same failure a URL target would cause, arriving through the front door. The API
+therefore refuses a target playlist containing unpinnable items, naming which ones, because the
+alternative is discovering it during an alarm.
+
+The invariant is enforced at four layers, and it is worth knowing all four: the API restricts
+`target_kind` to `playlist` and validates `target_ref` against the workspace; `columnsFrom` never
+writes `target_url`, so it is always NULL; the wire resolves `items` from `published_snapshot` only
+when `target_kind === 'playlist'`; and `triggerFire` renders `trigger.items` — there is no code path
+in any player that renders a URL.
 
 ```sql
 target_kind TEXT NOT NULL DEFAULT 'playlist',   -- v1: 'playlist'; later: 'url'
@@ -77,8 +111,38 @@ ST1 <secret> <token>
 rejecting on a 4-byte compare before parsing keeps that cheap and keeps the reject counters
 meaningful. It also gives a version hook without renegotiation.
 
-The HTTP path accepts `{"secret":…,"token":…}` **or** the same raw line as `text/plain`, because some
-gear can only POST a string.
+The HTTP path accepts **four shapes**, because the control-system world cannot agree on one:
+
+```
+POST /            ST1 <secret> <token>            # raw line, text/plain
+POST /            {"secret":"…","token":"…"}      # JSON envelope
+POST /            secret=…&token=…                # form-encoded
+GET  /trigger?secret=…&token=…                    # query parameters
+GET  /trigger?m=ST1%20<secret>%20<token>          # a whole raw line, url-encoded
+```
+
+⚠️ **GET is not a convenience — it is the only HTTP two of the five major control platforms can
+emit.** AMX NetLinx has no HTTP client and no TLS anywhere in the language: every request is
+hand-concatenated strings with a manually computed `Content-Length`, and its own community's advice
+is to "start with a full-blown header, then take stuff out one at a time until it breaks". Extron's
+Global Scripter *forbids* the `http`, `socket` and `ssl` modules outright (so `urllib` is gone too)
+while still allowing `json`/`hmac`/`hashlib` — an Extron integrator can compute an HMAC but cannot
+open a socket. A POST-JSON-only door is unreachable from both. The secret rides in the query string
+for the same reason Carousel's CAP endpoint takes its token there: plenty of this gear cannot set a
+request header at all.
+
+**Framing is deliberately liberal**, and this is the documentation of that. Trailing `\r`, `\n`,
+`\r\n`, a NUL byte, or nothing at all are all accepted, and leading/trailing whitespace is trimmed.
+Crestron's own worked example emits HTTP/1.0 with bare LF; Q-SYS ships an EOL constant literally
+called `Any` *and* one called `Null`; AMX appends `$0D,$0A` by hand and sometimes forgets. BrightSign
+does **not** trim and its docs warn that "leading/trailing spaces do matter" — a recurring support
+burden we are choosing not to reproduce. Payloads are capped at **1024 bytes**, which is Extron's
+limit rather than ours: ControlScript truncates UDP there and delivers at most 1024 per receive
+event, so a longer message is not one we could have received intact.
+
+**The reply is newline-terminated.** Extron integrators confirm delivery with
+`SendAndWait(data, timeout, deliTag=…)` — they read until a known suffix — so an unterminated body
+blocks them until timeout on a request that actually succeeded.
 
 ⚠️ **This is the core security property, not a convenience.** The wire never carries a URL, a
 duration or a position. An attacker who guesses a token can only display content an operator already
@@ -315,7 +379,13 @@ triggers (
   match_token, clear_token,
   source_http INTEGER DEFAULT 1, source_udp INTEGER DEFAULT 0,
   target_kind TEXT DEFAULT 'playlist', target_ref TEXT, target_url TEXT,
-  position, width, height, opacity, border_radius,   -- reuses the PiP contract verbatim
+  position, width, height, opacity, border_radius,   -- ⚠️ RESERVED: copied from the PiP contract,
+                                  -- wired to nothing. A trigger always renders fullscreen and
+                                  -- opaque. Not projected to devices, not in the shared contract,
+                                  -- and the API 400s if you send one. Columns kept because SQLite
+                                  -- drops need a table rebuild and this schema treats unused
+                                  -- columns as the no-migration hook. If a partial mode is ever
+                                  -- wanted, add ONE semantic field (takeover | banner) instead.
   mode TEXT,                      -- once | until_cleared
   max_duration_sec INTEGER,       -- once: upper bound; 0/unset = no cap
   lease_sec INTEGER,              -- until_cleared: renew-or-expire; unset = indefinite
