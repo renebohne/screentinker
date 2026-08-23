@@ -220,6 +220,26 @@ const migrations = [
   // playlist_items conversion (migrateAssignmentsToPlaylists) dropped this
   // column. Column ADD is idempotent via the surrounding try/catch loop.
   "ALTER TABLE playlist_items ADD COLUMN zone_id TEXT REFERENCES layout_zones(id) ON DELETE SET NULL",
+  /*
+   * Playlists of playlists, phase 1 (stateless). A playlist item may reference a CHILD PLAYLIST
+   * instead of content or a widget; buildSnapshotItems() expands it in place at publish, so the
+   * published snapshot stays a FLAT ordered array and no player learns what nesting is.
+   *
+   * ⚠️ ON DELETE RESTRICT, not SET NULL and not CASCADE. SET NULL would leave an item row that
+   * references nothing and expands to nothing — and three empty nested playlists in a row are a
+   * documented black screen on BrightSign XD and Samsung Tizen. CASCADE would delete the PARENT's
+   * item as a side effect of deleting a child. Refusing the delete is the only option that cannot
+   * surprise someone, and it is what makes a reverse-dependency view a requirement rather than a
+   * nicety.
+   *
+   * ⚠️ The reference is kept on the ITEM even though the snapshot is flattened. Phase 2 (cursored
+   * nesting: "play N of the child per parent rotation") needs somewhere to hang a cursor; if phase
+   * 1 stored only the expansion there would be nothing to attach it to.
+   *
+   * See docs/playlist-nesting-design.md.
+   */
+  "ALTER TABLE playlist_items ADD COLUMN child_playlist_id TEXT REFERENCES playlists(id) ON DELETE RESTRICT",
+  "CREATE INDEX IF NOT EXISTS idx_playlist_items_child ON playlist_items(child_playlist_id)",
   // #129: per-item mute. The legacy `assignments` table had a muted column, but the
   // active device payload is built from playlist_items -> published_snapshot, which never
   // carried it, so the dashboard mute toggle was a no-op end to end.

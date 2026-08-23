@@ -67,7 +67,7 @@ function requirePlaylistWrite(req, res, next) {
 // Build the snapshot item list for a playlist (denormalized for device payload)
 function buildSnapshotItems(playlistId) {
   const items = db.prepare(`
-    SELECT pi.id AS _iid, pi.content_id, pi.widget_id, pi.zone_id, pi.sort_order, pi.duration_sec, pi.muted,
+    SELECT pi.id AS _iid, pi.content_id, pi.widget_id, pi.child_playlist_id, pi.zone_id, pi.sort_order, pi.duration_sec, pi.muted,
            COALESCE(c.filename, w.name) as filename, c.mime_type, c.filepath, c.file_size,
            c.duration_sec as content_duration, c.remote_url, c.unstable_connection,
            c.captions_enabled, c.captions_lang, c.subtitle_url, c.subtitle_lang,
@@ -95,7 +95,51 @@ function buildSnapshotItems(playlistId) {
     if (blocks.length) it.schedules = blocks;
     delete it._iid;
   }
-  return items;
+
+  /*
+   * ⚠️ NESTING IS EXPANDED HERE, AND NOWHERE ELSE.
+   *
+   * This function is the single source of `published_snapshot`, so flattening here means the
+   * snapshot stays a FLAT ordered array and NO PLAYER LEARNS WHAT NESTING IS. Three things fall
+   * out of that for free, and they are the reason this is the right seam:
+   *
+   *   - offline pinning is unchanged: expanded items are ordinary items carrying `filepath`
+   *   - the trigger offline-playability guard is unchanged: it walks published_snapshot, which is
+   *     post-expansion, so a nested unpinnable item is already refused by the rule shipped earlier
+   *   - the player's structural fingerprint sees ordinary items, so nothing there needs teaching
+   *
+   * ⚠️ ONE LEVEL ONLY, and that is enforced when the reference is CREATED (routes below refuse a
+   * child that itself holds a child), not by traversing here. A→B→A therefore cannot be
+   * constructed, so there is no cycle to detect at expansion time. This mirrors how MagicINFO does
+   * it — by type rather than by traversal — because a checker that runs at publish is a checker
+   * that can be reached with data already in the database.
+   *
+   * The `depth` guard below is belt-and-braces against a row written by some other path (an
+   * import, a migration, a manual fix-up). It is not the primary defence and must not become it.
+   */
+  return expandChildPlaylists(items, 0);
+}
+
+/** Max nesting depth. 1 = a playlist may contain playlists, but those may not. */
+const MAX_NEST_DEPTH = 1;
+
+function expandChildPlaylists(items, depth) {
+  if (!items.some((i) => i && i.child_playlist_id)) return items;   // common case: no work, no copy
+  const out = [];
+  for (const it of items) {
+    if (!it || !it.child_playlist_id) { out.push(it); continue; }
+    if (depth >= MAX_NEST_DEPTH) {
+      // Should be unreachable — creation refuses this. Dropping the reference is the only safe
+      // action left: keeping it would ship an item the player cannot render.
+      console.warn(`[playlist] nesting deeper than ${MAX_NEST_DEPTH} at child ${it.child_playlist_id} — reference dropped`);
+      continue;
+    }
+    // Recurse through buildSnapshotItems so the child gets the SAME treatment as a top-level
+    // playlist: the same is_active/expiry filter, the same per-item schedule blocks. Anything less
+    // and a nested item would obey different rules from the identical item played directly.
+    for (const child of buildSnapshotItems(it.child_playlist_id)) out.push(child);
+  }
+  return out;
 }
 
 // #104: a playlist isn't bound to a device, so it has no intrinsic layout. Derive
@@ -168,6 +212,23 @@ function pushToDevices(playlistId, reqOrIo) {
       const { devicesForTriggerTarget } = require('../lib/device-triggers');
       for (const id of devicesForTriggerTarget(db, playlistId)) ids.add(id);
     } catch (e) { console.warn(`[trigger] target fan-out failed: ${e && e.message}`); }
+    /*
+     * ⚠️ AND devices whose base playlist CONTAINS this one. A nested child is not any device's
+     * playlist_id, so the query above cannot see them — edit a shared corporate block, publish, and
+     * every screen showing a parent keeps the old items.
+     *
+     * This is the THIRD time this exact shape has bitten: pushToDevices originally missed
+     * trigger-target devices, and the trigger routes pushed nothing at all. A fan-out that forgets
+     * a case is the recurring bug here, which is why this goes in the same helper rather than
+     * becoming a fourth call site somebody else has to remember.
+     */
+    try {
+      for (const r of db.prepare(`
+        SELECT DISTINCT d.id FROM devices d
+          JOIN playlist_items pi ON pi.playlist_id = d.playlist_id
+         WHERE pi.child_playlist_id = ?
+      `).all(playlistId)) ids.add(r.id);
+    } catch (e) { console.warn(`[playlist] ancestor fan-out failed: ${e && e.message}`); }
     for (const id of ids) {
       commandQueue.queueOrEmitPlaylistUpdate(deviceNs, id, buildPlaylistPayload);
     }
@@ -178,11 +239,82 @@ function pushToDevices(playlistId, reqOrIo) {
 // devices actually consume) + push to devices. POST /:id/publish AND the agency
 // auto-publish path both call this, so they can never drift (a "published" playlist that
 // wasn't snapshotted would be live-on-no-screen).
-function publishPlaylist(playlistId, reqOrIo) {
+function publishPlaylist(playlistId, reqOrIo, seen = new Set([playlistId])) {
   const snapshotItems = buildSnapshotItems(playlistId);
+  const next = JSON.stringify(snapshotItems);
+
+  /*
+   * ⚠️ CHANGE-TRIGGERED, NOT PUBLISH-TRIGGERED. If the resolved snapshot is byte-identical, write
+   * nothing and push nothing.
+   *
+   * This is the mitigation for the one hazard nesting carries: a child edit changes every
+   * ancestor's flattened items, the player's structural fingerprint changes, and every screen
+   * showing any ancestor restarts at item 1 — the #234 shape, estate-wide. BrightSign ships exactly
+   * this defence (a CONTENT_DATA_FEED_UNCHANGED path behind "optimize feed updates (use HEAD
+   * calls)"), and it is what keeps the common case — an edit that does not alter the resolved list
+   * — from interrupting anything.
+   *
+   * It does NOT prevent a restart for a genuine change. Neither vendor that documented this shipped
+   * a true mid-loop splice; doing that properly needs a player-side diff that preserves position,
+   * which Carousel proved requires a player release (CSL-9211). Deferred, and named in the design
+   * doc so it is not rediscovered.
+   */
+  const prev = db.prepare('SELECT status, published_snapshot FROM playlists WHERE id = ?').get(playlistId);
+  if (prev && prev.status === 'published' && prev.published_snapshot === next) {
+    return { changed: false, items: snapshotItems.length };
+  }
+
   db.prepare("UPDATE playlists SET status = 'published', published_snapshot = ?, updated_at = strftime('%s','now') WHERE id = ?")
-    .run(JSON.stringify(snapshotItems), playlistId);
+    .run(next, playlistId);
   pushToDevices(playlistId, reqOrIo);
+
+  /*
+   * ⚠️ REPUBLISH PUBLISHED ANCESTORS. Flattening at publish means a parent's snapshot holds a COPY
+   * of the child's items as they were at the parent's last publish — so editing and publishing a
+   * child alone updates nothing that any screen actually reads.
+   *
+   * Caught by a test rather than by review: pushing to the parent's devices (which this already
+   * did) delivers the parent's STALE snapshot, so the fan-out looked correct and the content was
+   * still wrong. That is the flatten-at-publish tax, and it is the price of keeping the player
+   * ignorant of nesting — worth paying, but only if it is paid here, once, in the shared path.
+   *
+   * Depth is capped at 1, so an ancestor has no ancestor of its own and this cannot recurse beyond
+   * one hop. `seen` is a belt-and-braces stop against a row some other path wrote, not the primary
+   * defence. Only PUBLISHED ancestors are touched: a draft parent must stay a draft.
+   */
+  for (const anc of db.prepare(`
+    SELECT DISTINCT p.id FROM playlists p
+      JOIN playlist_items pi ON pi.playlist_id = p.id
+     WHERE pi.child_playlist_id = ? AND p.status = 'published'
+  `).all(playlistId)) {
+    if (seen.has(anc.id)) continue;
+    seen.add(anc.id);
+    publishPlaylist(anc.id, reqOrIo, seen);
+  }
+
+  return { changed: true, items: snapshotItems.length };
+}
+
+/**
+ * Does this playlist hold a child reference that expands to nothing?
+ *
+ * ⚠️ Not a tidiness check. "Three or more 'empty' nested playlists in succession may fail to skip,
+ * resulting in a black screen. Affected: Samsung Tizen, BrightSign XD (8.5.47)." We ship BrightSign.
+ * The vendor's own workaround is to pad the child with "even if it's just a 1-second image", which
+ * is a fix that lives in the operator's head; refusing the publish puts it in the product.
+ *
+ * @returns {string|null} the offending child's name, or null when clean.
+ */
+function emptyChildReference(playlistId) {
+  const kids = db.prepare(`
+    SELECT DISTINCT p.id, p.name FROM playlist_items pi
+      JOIN playlists p ON p.id = pi.child_playlist_id
+     WHERE pi.playlist_id = ?
+  `).all(playlistId);
+  for (const k of kids) {
+    if (buildSnapshotItems(k.id).length === 0) return k.name;
+  }
+  return null;
 }
 
 // Phase 2.2k: list scoped to caller's current workspace. No platform_admin
@@ -286,6 +418,15 @@ router.put('/:id', requirePlaylistWrite, (req, res) => {
 
 // Publish playlist — snapshot current items and push to devices
 router.post('/:id/publish', requirePlaylistWrite, (req, res) => {
+  // ⚠️ Refuse a nested reference that expands to nothing — a documented black screen on
+  // BrightSign XD and Samsung Tizen. Named so the operator knows which playlist to fill.
+  const empty = emptyChildReference(req.params.id);
+  if (empty) {
+    return res.status(400).json({
+      error: `"${empty}" is included here but has nothing to play. Add an item to it, or remove it `
+        + 'from this playlist — an empty nested playlist can leave some players on a black screen.',
+    });
+  }
   // Snapshot shape (no pi.id) is intentional — published_snapshot is consumed
   // by devices and stored as JSON; row IDs there would be misleading.
   publishPlaylist(req.params.id, req);
@@ -456,10 +597,65 @@ router.put('/:id/items/:itemId/schedules', requirePlaylistWrite, (req, res) => {
 //      playlist's workspace (or be a platform-template).
 router.post('/:id/items', requirePlaylistWrite, async (req, res) => {
   try {
-    const { content_id, widget_id, sort_order, zone_id } = req.body;
+    const { content_id, widget_id, child_playlist_id, sort_order, zone_id } = req.body;
     let { duration_sec } = req.body;
 
-    if (!content_id && !widget_id) return res.status(400).json({ error: 'content_id or widget_id required' });
+    if (!content_id && !widget_id && !child_playlist_id) {
+      return res.status(400).json({ error: 'content_id, widget_id or child_playlist_id required' });
+    }
+    if ([content_id, widget_id, child_playlist_id].filter(Boolean).length > 1) {
+      // The three are alternatives, not a composite. Accepting two would leave the snapshot
+      // builder to pick one silently.
+      return res.status(400).json({ error: 'an item is content, a widget, or a child playlist — not more than one' });
+    }
+
+    /*
+     * ⚠️ DEPTH AND CYCLES ARE BOTH REFUSED HERE, at creation, by TYPE rather than by traversal.
+     *
+     * Refusing a child that itself holds a child caps nesting at one level, and that single rule
+     * also makes A→B→A unconstructible: for the loop to close, B would have to hold a child while
+     * already being one. So there is no cycle detector anywhere in this feature, and none is
+     * needed. MagicINFO does it this way; a traversal-based check is a check that can be reached
+     * with rows some other path already wrote.
+     *
+     * ⚠️ We also say so out loud. Of seventeen vendors surveyed, NOT ONE documents a depth cap or
+     * shows a cycle error — the failure is left to be discovered. Naming the offending playlist
+     * costs one query.
+     */
+    if (child_playlist_id) {
+      if (child_playlist_id === req.params.id) {
+        return res.status(400).json({ error: 'a playlist cannot contain itself' });
+      }
+      const child = db.prepare('SELECT id, name, workspace_id FROM playlists WHERE id = ?').get(child_playlist_id);
+      if (!child) return res.status(404).json({ error: 'Child playlist not found' });
+      if (child.workspace_id && child.workspace_id !== req.playlist.workspace_id) {
+        return res.status(403).json({ error: 'Child playlist is not in this playlist\'s workspace' });
+      }
+      const grandchild = db.prepare(`
+        SELECT p.name FROM playlist_items pi
+          JOIN playlists p ON p.id = pi.child_playlist_id
+         WHERE pi.playlist_id = ? LIMIT 1
+      `).get(child_playlist_id);
+      if (grandchild) {
+        return res.status(400).json({
+          error: `"${child.name}" already contains the playlist "${grandchild.name}", and playlists `
+            + 'may only nest one level deep',
+        });
+      }
+      // ⚠️ And the reverse direction: this playlist must not already BE a child somewhere. Without
+      // it, A (already inside B) could take C, giving B→A→C — two levels, built from the far end.
+      const parent = db.prepare(`
+        SELECT p.name FROM playlist_items pi
+          JOIN playlists p ON p.id = pi.playlist_id
+         WHERE pi.child_playlist_id = ? LIMIT 1
+      `).get(req.params.id);
+      if (parent) {
+        return res.status(400).json({
+          error: `this playlist is already used inside "${parent.name}", so it cannot contain `
+            + 'another playlist — playlists may only nest one level deep',
+        });
+      }
+    }
     if (duration_sec !== undefined && duration_sec !== null && (typeof duration_sec !== 'number' || duration_sec < 1)) {
       return res.status(400).json({ error: 'duration_sec must be a positive integer' });
     }
@@ -502,9 +698,10 @@ router.post('/:id/items', requirePlaylistWrite, async (req, res) => {
     }
 
     const result = db.prepare(`
-      INSERT INTO playlist_items (playlist_id, content_id, widget_id, zone_id, sort_order, duration_sec)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(req.params.id, content_id || null, widget_id || null, zone_id || null, order, duration_sec);
+      INSERT INTO playlist_items (playlist_id, content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(req.params.id, content_id || null, widget_id || null, child_playlist_id || null,
+           zone_id || null, order, duration_sec);
 
     // Mark as draft (items changed since last publish)
     markDraft(req.params.id);

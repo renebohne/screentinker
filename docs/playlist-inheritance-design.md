@@ -1,10 +1,15 @@
 # Playlist inheritance
 
-**Status: design settled, NOT built.** How a screen resolves which playlist it plays.
+**Status: mechanism settled, LADDER REOPENED by research. Not built.**
+How a screen resolves which playlist it plays.
 
-Decided 2026-08-23: walls beat groups; groups get a `priority` column; clearing an override falls
-back to inherited. Still open: whether industry research (in flight) surfaces a tier we have not
-modelled — tags, locations, or folder hierarchies — which would change the ladder, not the mechanism.
+Decided 2026-08-23: walls beat groups; groups get a `priority` column (shipped, inert, `d58bf10`);
+clearing an override falls back to inherited.
+
+⚠️ **Reopened the same day.** Industry research across 17 vendors found that
+**"the most specific level wins" is nobody's model** — which is precisely what the ladder below
+assumes. See *"What the research changed"*. The single-resolver mechanism survives intact; what is
+in question is the rule it applies.
 
 Separable from playlists-of-playlists and worth doing first: this is a defect-shaped problem that
 exists today, independent of whatever we decide about nesting.
@@ -122,6 +127,70 @@ push — the resolver does the rest. That deletes the fan-out loops entirely, in
 - A per-device choice survives group edits, and the UI can finally say *"overridden — revert to
   group"*, because the row knows.
 
+## ⚠️ What the research changed
+
+Three agents, 17 vendors, three tiers. Two findings move this design and one validates it.
+
+### 1. Nobody implements "most specific wins"
+
+The ladder below is a specificity rule: device beats wall beats group. **No surveyed vendor does
+this.** The alternatives actually in use are:
+
+- **Additive rotation** — every applicable playlist plays, in turn. Korbyt: *"A Normal schedule will
+  rotate with other playlists… from the most recently updated playlists to the oldest."* 22Miles
+  puts one player in three groups *plus* its own schedule and expects them to combine. Xibo returns
+  every matching event across all nested groups and lets the player sort it out.
+- **Structurally impossible** — Navori, Poppulo Cloud, BrightSign, MagicINFO, Appspace and Carousel
+  all enforce **one group per device**, so the conflict cannot arise. The industry largely *designed
+  the problem away* rather than solving it.
+
+We allow multi-group membership, so we cannot take the second option without removing a feature.
+That leaves specificity (nobody's model) or additive (several vendors' model).
+
+### 2. ⭐ The best answer found: precedence as an explicit per-assignment choice
+
+Legacy Four Winds attaches a four-valued **Behavior** selector to each location-level playlist
+assignment:
+
+> • **Include only if the player is empty** • **Always include before** player templates
+> • **Always include after** player templates • **Override** player templates
+
+This is better than either alternative, and it is worth restructuring around. It makes precedence an
+**author's stated intent per assignment** rather than a global rule buried in a resolver, and it
+covers fallback-only, merge-before, merge-after and hard-override in one control. It also dissolves
+the specificity-vs-additive argument: *both* are expressible, per assignment.
+
+⚠️ It does not remove the need for `device_groups.priority` — with several group assignments all set
+to "include after", something still has to order them. Priority remains the tiebreak.
+
+### 3. Validated: live resolution, never copy-on-assign
+
+**Unanimous across all 17.** Nobody copies content down a hierarchy at assign time. The universal
+proof is that deleting a child *damages* every parent, which copy semantics could not do. Scala:
+*"Deleting playlists in use will remove them from schedules or master playlists."* Navori:
+*"Changes made to a global playlist will affect every sub-group where the playlist is used."*
+
+So the core of this document — replace twelve eager writers with one lazy resolver — is the industry
+norm, and our current eager-copy fan-out is the outlier. That part is not in question.
+
+⚠️ **One qualification worth stealing (Scala): placement-scoped properties.** Content is shared live,
+but duration/transition/conditions are stored **per placement** — *"applies to the item only in that
+playlist."* A third state between "inherited" and "overridden" that our two-valued
+`playlist_source` does not model.
+
+### 4. Delegation is a real feature elsewhere, and we have nothing like it
+
+"Locked slots" and "share of voice" are **not** the enterprise vocabulary for corporate-vs-local —
+both terms exist but mean ad inventory. The purpose-built mechanism is **Signagelive's Local
+Playlists + Local Users**: corporate places a control asset at a chosen position in the master and
+sets guardrails (**Maximum Number of Assets** — the reserved-slot cap — plus play mode, duration,
+order, and per-player variants). Local users are a separate privilege tier, tag-restricted to a
+content subset. The admin never fills the slot: *"How do I add content to my Local Playlist? The
+short answer is you don't."*
+
+Out of scope here, but it is the feature this design would eventually need to support, and the
+resolver should not make it harder to add.
+
 ## Risks, and the one that matters most
 
 ⚠️ **The structural fingerprint.** The player restarts playback when this changes
@@ -157,7 +226,15 @@ Lesser risks:
 
 ## Open questions for the user
 
-1. ~~Wall above group?~~ **Settled 2026-08-23: walls win.** See the note under the table.
+0. ⚠️ **REOPENED — is the ladder a specificity rule at all?** Research says nobody resolves content
+   by "most specific level wins". The strongest alternative is FWI's per-assignment **Behavior**
+   selector (empty-only / before / after / override), which expresses both models and makes the
+   intent explicit. This is now the biggest open question in the document, and it sits *above* the
+   three below — they are all tiebreaks within a rule we may be replacing.
+
+1. ~~Wall above group?~~ **Settled 2026-08-23: walls win** — and this survives either model, because
+   a wall member playing anything but the wall's playlist is visibly broken. See the note under the
+   table.
 2. ~~Group `priority` column?~~ **Settled 2026-08-23: add `device_groups.priority INTEGER DEFAULT 0`**,
    matching `schedules.priority`, with the same `priority DESC, created_at ASC` tiebreak.
 
