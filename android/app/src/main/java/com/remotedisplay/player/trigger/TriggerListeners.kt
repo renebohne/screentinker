@@ -113,6 +113,31 @@ class TriggerListeners(
                 sock.reuseAddress = true                       // survive a restart that has not released it
                 sock.bind(InetSocketAddress(port))
                 sock.timeToLive = 1                            // a trigger is a LOCAL-site event
+                /*
+                 * ⚠️ TWO SETTINGS THE JOIN DOES NOT COVER, and the self-test caught both.
+                 *
+                 * 1. joinGroup() names the interface for MEMBERSHIP only. Outgoing datagrams still
+                 *    leave by the default route, so on a box with more than one NIC the probe went
+                 *    out one interface while the membership sat on another — and the loopback
+                 *    self-test reported FAIL on a working setup. That is worse than no diagnostic:
+                 *    it sends an installer to check a switch that is fine.
+                 *
+                 * 2. ⚠️ setLoopbackMode IS INVERTED — its argument means DISABLE, so `false` turns
+                 *    loopback ON. This is DEFENSIVE ONLY and is not what fixed the self-test:
+                 *    mutating it out leaves the tests green on this JVM, while mutating out (1)
+                 *    fails them. It is kept because the default is platform-dependent and an
+                 *    Android device is not this JVM, but it is unproven there — said plainly rather
+                 *    than left looking like half of a fix.
+                 *
+                 * Both are best-effort: a stack that refuses either still receives real traffic, so
+                 * failing here must not stop the listener binding.
+                 */
+                try { pickInterface()?.let { sock.networkInterface = it } } catch (e: Throwable) {
+                    Log.w(TAG, "could not set the outgoing multicast interface: ${e.message}")
+                }
+                try { sock.loopbackMode = false } catch (e: Throwable) {
+                    Log.w(TAG, "could not enable multicast loopback: ${e.message}")
+                }
                 udp = sock
                 stats.udpPort = port
                 stats.group = group
