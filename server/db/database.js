@@ -169,6 +169,25 @@ const migrations = [
   "CREATE INDEX IF NOT EXISTS idx_content_folder ON content(folder_id)",
   // Group-level playlist: when set, devices added to the group inherit it.
   "ALTER TABLE device_groups ADD COLUMN playlist_id TEXT REFERENCES playlists(id) ON DELETE SET NULL",
+  /*
+   * Group precedence, for a device that belongs to MORE THAN ONE group.
+   *
+   * ⚠️ Today that case has no defined winner: `devices.playlist_id` is written eagerly by twelve
+   * call sites across seven files, so whichever touched the row last decides, and the leave-handler
+   * picks "any remaining group with a playlist" — whatever SQLite returns first. This column is the
+   * first half of replacing that with one resolver and a stated rule, mirroring `schedules.priority`
+   * so the two inheritance systems cannot drift: highest priority wins, ties break on the oldest
+   * group (priority DESC, created_at ASC).
+   *
+   * ⚠️ INERT UNTIL THE RESOLVER LANDS. Nothing reads it yet, and adding it changes no behaviour —
+   * that is deliberate, so the schema change can ship and be backfilled ahead of the logic rather
+   * than alongside it. See docs/playlist-inheritance-design.md.
+   *
+   * Join-order would have been equally deterministic; priority is chosen for EXPLAINABILITY. "It
+   * joined that group first, eighteen months ago" is invisible in the UI and unactionable; a number
+   * an operator sets and can see is neither.
+   */
+  "ALTER TABLE device_groups ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
   // Group synchronized playback: when sync_enabled, members on the group's playlist play it
   // in lockstep (leader broadcasts index+position; followers align). Reuses the video-wall
   // sync primitive, minus the spatial transform. leader_device_id is an optional pin; if unset
