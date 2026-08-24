@@ -132,13 +132,15 @@ function deviceDetail(db, grants, deviceId, summary) {
   out.active_layout_zones = [];
   if (has('content-metadata') && row && row.playlist_id) {
     out.assignments = safe(() => db.prepare(`
-      SELECT pi.id, pi.content_id, pi.widget_id, pi.zone_id, pi.sort_order, pi.duration_sec,
-             pi.muted, pi.created_at, pi.updated_at,
-             COALESCE(c.filename, w.name) AS filename, c.mime_type, c.duration_sec AS content_duration,
-             w.name AS widget_name, w.widget_type
+      SELECT pi.id, pi.content_id, pi.widget_id, pi.child_playlist_id, pi.zone_id, pi.sort_order,
+             pi.duration_sec, pi.muted, pi.created_at, pi.updated_at,
+             COALESCE(c.filename, w.name, cp.name) AS filename, c.mime_type,
+             c.duration_sec AS content_duration,
+             w.name AS widget_name, w.widget_type, cp.name AS child_playlist_name
         FROM playlist_items pi
         LEFT JOIN content c ON pi.content_id = c.id
         LEFT JOIN widgets w ON pi.widget_id = w.id
+        LEFT JOIN playlists cp ON pi.child_playlist_id = cp.id
        WHERE pi.playlist_id = ? ORDER BY pi.sort_order ASC`).all(row.playlist_id), []);
     const pl = safe(() => db.prepare(
       'SELECT status, published_snapshot FROM playlists WHERE id = ?').get(row.playlist_id), null);
@@ -362,10 +364,28 @@ function answerRead(db, edge, req) {
       if (!row || !inScope(row.workspace_id)) {
         return { ok: false, reason: 'No such playlist on this server.' };
       }
+      /*
+       * ⚠️ Three column names here were wrong and none of them existed: `i.position` (it is
+       * `sort_order`), `c.name` and `c.type` (they are `filename` and `mime_type`). SQLite reports
+       * `c.name` first, so fixing only the one we knew about changed nothing — every playlist
+       * detail read on every node failed, and the catch below rendered it as HTTP 403, whose own
+       * comment says it means "this will never work until somebody changes a grant". No grant
+       * would ever have helped.
+       *
+       * Also enumerated rather than `i.*`: a SELECT * here means any column later added to
+       * playlist_items crosses the wire with no review, which is the opposite of the
+       * add-what-the-grant-allows discipline every other projection in this file follows.
+       */
       const items = db.prepare(
-        `SELECT i.*, c.name AS content_name, c.type AS content_type
-           FROM playlist_items i LEFT JOIN content c ON c.id = i.content_id
-          WHERE i.playlist_id = ? ORDER BY i.position`).all(seg[3]);
+        `SELECT i.id, i.content_id, i.widget_id, i.child_playlist_id, i.zone_id, i.sort_order,
+                i.duration_sec, i.muted,
+                COALESCE(c.filename, w.name, cp.name) AS content_name, c.mime_type AS content_type,
+                w.widget_type, cp.name AS child_playlist_name
+           FROM playlist_items i
+           LEFT JOIN content c ON c.id = i.content_id
+           LEFT JOIN widgets w ON w.id = i.widget_id
+           LEFT JOIN playlists cp ON cp.id = i.child_playlist_id
+          WHERE i.playlist_id = ? ORDER BY i.sort_order ASC`).all(seg[3]);
       return { ok: true, row: { ...row, items }, asOf: nowSec() };
     } catch (e) { return { ok: false, reason: 'Could not read that playlist.' }; }
   }
