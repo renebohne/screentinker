@@ -356,14 +356,27 @@ async function commitStagedAsset(db, edge, entry, stagedPath, deps) {
              entry.dur ?? null, entry.w ?? null, entry.h ?? null, ts, ts);
     }
 
+    /*
+     * ⚠️ `relayable` COMES FROM THE SENDER AND IS THE OWNER'S DECISION, not this node's. It records
+     * that whoever sent this file agreed it may travel further down the tree — a consent only they
+     * can give, because they own it. This node still decides, separately, whether it is willing to
+     * hold anything at all for onward use (the redistributes-content capability), and any server
+     * below still decides whether to accept it. Three parties, three answers, all required.
+     *
+     * Coerced to 0/1 rather than stored as whatever arrived: a truthy string from a peer must not
+     * become a permission, and absent means no.
+     */
+    const relayable = (entry.rl === true || entry.rl === 1) ? 1 : 0;
+
     db.prepare(`INSERT INTO mesh_content_provenance
                   (origin_node_id, origin_content_id, local_content_id, edge_id, bytes,
-                   first_seen_at, last_seen_at)
-                VALUES (?,?,?,?,?,?,?)
+                   first_seen_at, last_seen_at, relayable)
+                VALUES (?,?,?,?,?,?,?,?)
                 ON CONFLICT(origin_node_id, origin_content_id) DO UPDATE SET
                   local_content_id = excluded.local_content_id,
-                  last_seen_at     = excluded.last_seen_at`)
-      .run(edge.peer_node_id, entry.oid, localId, edge.id, stat.size, ts, ts);
+                  last_seen_at     = excluded.last_seen_at,
+                  relayable        = excluded.relayable`)
+      .run(edge.peer_node_id, entry.oid, localId, edge.id, stat.size, ts, ts, relayable);
 
     // The allowance is spent here, in the same transaction as the row that spent it. Accounting
     // that happens separately is accounting that drifts.

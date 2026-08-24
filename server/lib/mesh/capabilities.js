@@ -39,11 +39,20 @@ const CAPABILITIES = Object.freeze({
     requiresFlag: 'MESH_ACCEPT_ENROLLMENT',
   },
   'redistributes-content': {
-    summary: 'Caches and serves media to its subtree',
-    // ⚠️ PHASE 5 ONLY. Named here so the vocabulary is stable, and REFUSED by validation until then.
-    // This is the one that inverts I2's direction, so it gets its own security review.
+    summary: 'Keeps media it was sent, so it can pass it on to servers below it',
+    /*
+     * ⚠️ THIS IS A RESOURCE DECLARATION, NOT AN AUTHORITY. It says this node is willing to spend
+     * its disk holding media it was sent so that it can pass it on — nothing more. Whether any
+     * particular file may travel further is the CONTENT OWNER's decision, carried per push (see
+     * `rl` in the manifest and mesh_content_provenance.relayable), and whether a given server below
+     * accepts it is that server's own grant, checked on arrival exactly as any other push is.
+     *
+     * Two settings held by two parties, and both required. A single flag would put the decision
+     * with the operator who BENEFITS from caching rather than the one giving something up, which
+     * is the defect the write grant already had once — the parent authored the grant the child
+     * enforced, and it took an amendment to I2 to fix. See docs/mesh-relay-design.md.
+     */
     requiresFlag: 'MESH_ACCEPT_ENROLLMENT',
-    phase5: true,
   },
 });
 

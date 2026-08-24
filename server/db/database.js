@@ -908,9 +908,18 @@ const migrations = [
      edge_id           TEXT,
      bytes             INTEGER NOT NULL DEFAULT 0,
      first_seen_at     INTEGER NOT NULL,
+     -- Whether the node that SENT this content agreed it may be passed on to servers below.
+     -- ⚠️ Defaults to 0: absent means no, as everywhere else in this design. Content received
+     -- before relaying existed therefore stays put, which is the correct reading of a consent
+     -- nobody was ever asked for. Set from the manifest rl field, by the owner, per push.
+     relayable         INTEGER NOT NULL DEFAULT 0,
      last_seen_at      INTEGER NOT NULL,
      PRIMARY KEY (origin_node_id, origin_content_id)
    )`,
+  /* ⚠️ AFTER the CREATE above, not with the mesh_edges alters. Placed there first, it ran before
+   * the table existed, failed as a benign "no such table", and the column silently never arrived —
+   * so every content commit threw "no column named relayable" on a fresh database. */
+  'ALTER TABLE mesh_content_provenance ADD COLUMN relayable INTEGER NOT NULL DEFAULT 0',
   'CREATE INDEX IF NOT EXISTS idx_mesh_prov_local ON mesh_content_provenance(local_content_id)',
   'CREATE INDEX IF NOT EXISTS idx_mesh_prov_edge ON mesh_content_provenance(edge_id)',
 

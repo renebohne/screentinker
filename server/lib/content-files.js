@@ -90,3 +90,30 @@ function releaseMeshProvenance(contentId) {
 }
 
 module.exports.releaseMeshProvenance = releaseMeshProvenance;
+
+/*
+ * Remove a content row that NOTHING references, and everything that goes with it.
+ *
+ * ⚠️ ONLY VALID FOR UNREFERENCED CONTENT, and the caller must have established that. The general
+ * deletion path is purgeContentRow in routes/content.js, which additionally rewrites published
+ * snapshots and tells the affected panels — work that is precisely what is unnecessary here,
+ * because "unreferenced" already means no playlist item and no snapshot mentions it. Calling this
+ * on referenced content would leave a playlist pointing at a row that no longer exists.
+ *
+ * It exists so the mesh purge verb does not hand-roll a fourth deletion. Refcounted unlink, the
+ * provenance row, and the storage allowance all belong together — that is the whole reason they are
+ * in one place.
+ */
+function removeUnreferencedContent(contentId) {
+  const row = db.prepare('SELECT * FROM content WHERE id = ?').get(contentId);
+  if (!row) return { removed: false, reason: 'already gone' };
+
+  unlinkIfUnreferenced(row.filepath, row.id, 'filepath');
+  unlinkIfUnreferenced(row.thumbnail_path, row.id, 'thumbnail_path');
+  unlinkIfUnreferenced(row.subtitle_url, row.id, 'subtitle_url');
+  releaseMeshProvenance(row.id);
+  db.prepare('DELETE FROM content WHERE id = ?').run(row.id);
+  return { removed: true, bytes: row.file_size || 0 };
+}
+
+module.exports.removeUnreferencedContent = removeUnreferencedContent;

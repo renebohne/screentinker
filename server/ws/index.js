@@ -91,6 +91,7 @@ module.exports = function setupWebSockets(io) {
           // Same publication, same reason. Content moves over HTTP; this is how the OFFER reaches a
           // child that dialled out and may have no inbound route of its own.
           global.__meshContentOfferTo = meshNs.contentOfferTo;
+          global.__meshContentPurgeTo = meshNs.contentPurgeTo;
         }
         console.log(`[mesh] listening for child nodes as ${thisNodeId}`);
       }

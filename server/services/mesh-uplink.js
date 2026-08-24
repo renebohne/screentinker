@@ -21,6 +21,9 @@ const {
 const { createReadRunner } = require('../lib/mesh/read-runner');
 const nodeWrite = require('../lib/mesh/node-write');
 const contentReceive = require('../lib/mesh/content-receive');
+const relay = require('../lib/mesh/relay');
+const contentFiles = require('../lib/content-files');
+const meshAudit = require('../lib/mesh/audit');
 const { createLocalApply } = require('../lib/mesh/local-apply');
 const envelope = require('../lib/mesh/envelope');
 const mirror = require('../lib/mesh/mirror');
@@ -236,6 +239,40 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
            * The edge is re-read here for the same reason as onWrite: a grant revoked a moment ago
            * must bite the very next request, not at the next restart.
            */
+          /*
+           * ⚠️ THE OWNER WITHDRAWING WHAT THEY SENT. Scoped by the edge to what THIS peer
+           * originated, and refused for anything a playlist here still uses — see lib/mesh/relay.js
+           * for why that refusal is not negotiable.
+           */
+          onContentPurge: (req) => {
+            const fresh = db.prepare('SELECT * FROM mesh_edges WHERE id = ?').get(edge.id);
+            if (!fresh || fresh.revoked_at) {
+              return { ok: false, reason: 'This connection is no longer authorised.' };
+            }
+            const result = relay.applyPurge(db, fresh, req && req.oids, {
+              /*
+               * ⚠️ BOTH, and the snapshot half is the one that matters. A published snapshot
+               * outlives the playlist items it was built from, so checking items alone would call a
+               * file unused while a screen is still playing it from its published copy.
+               */
+              isReferenced: (contentId) => {
+                const item = db.prepare('SELECT 1 FROM playlist_items WHERE content_id = ? LIMIT 1').get(contentId);
+                if (item) return true;
+                return !!db.prepare("SELECT 1 FROM playlists WHERE published_snapshot LIKE ? LIMIT 1")
+                  .get(`%${contentId}%`);
+              },
+              removeLocal: (row) => contentFiles.removeUnreferencedContent(row.local_content_id),
+            });
+            meshAudit.recordPeerAction(db, fresh, {
+              action: 'mesh:content-push',
+              ok: !!result.ok,
+              reason: result.reason,
+              actor: req && req.actor,
+              path: result.ok ? `withdrew ${result.removed.length} file(s), kept ${result.kept.length} still in use` : null,
+            });
+            return result;
+          },
+
           onContentOffer: (req) => {
             const fresh = db.prepare('SELECT * FROM mesh_edges WHERE id = ?').get(edge.id);
             if (!fresh || fresh.revoked_at) {

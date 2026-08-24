@@ -281,7 +281,7 @@ test('⚠️ THE HUB API HAS EXACTLY ONE WRITE ROUTE, AND IT ONLY ASKS (I2)', ()
    * once for the batch — a convenience must never become a way to reach a client you could not
    * reach one at a time. Each child still fetches from this node; nothing is cached in between.
    */
-  const ASKS_THE_CHILD = ['POST /write/:nodeId', 'POST /content/:nodeId', 'POST /content'];
+  const ASKS_THE_CHILD = ['POST /write/:nodeId', 'POST /content/:nodeId', 'POST /content', 'POST /content/:nodeId/purge'];
   assert.deepEqual(mutating, [...HUB_LOCAL_ADMIN, ...ASKS_THE_CHILD],
     'the hub API grew a mutating route. Only the ones that ask a child may leave this node, the ' +
     'child decides, and the rest may touch nothing but this hub\'s own records.');

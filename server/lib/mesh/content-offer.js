@@ -30,6 +30,11 @@ const MAX_OFFER_ENTRIES = 500;
  * @param {string[]} contentIds   rows in THIS node's library
  * @param {object}   deps         { contentDir }
  */
+/**
+ * @param {boolean} [deps.relayable]  whether THIS operator agrees the files may be passed on by the
+ *   receiving server to servers below it. Their content, their call — and the receiving node still
+ *   has to be willing to hold it, and the node below still has to accept it.
+ */
 function buildOffer(db, edge, contentIds, deps = {}) {
   const contentDir = deps.contentDir;
   if (!contentDir) return { ok: false, reason: 'This server has no content directory configured.' };
@@ -79,6 +84,8 @@ function buildOffer(db, edge, contentIds, deps = {}) {
     content.push({
       oid: row.id,
       kind: 'local',
+      // ⚠️ Sent explicitly rather than omitted-means-yes. A receiver treats absent as NO.
+      rl: !!deps.relayable,
       fn: row.filename,
       mt: row.mime_type,
       sz: stat.size,                       // ⚠️ from the DISK, not the row: file_size can be stale

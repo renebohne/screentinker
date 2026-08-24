@@ -390,6 +390,36 @@ function setupMeshSocket(io, deps) {
    * It still decides nothing. The child evaluates what it needs, whether it may accept it, and
    * whether there is room, then pulls the bytes itself using the address IT already had.
    */
+  /*
+   * ⚠️ THE OWNER WITHDRAWING A COPY — the only downward verb that DELETES anything, and the
+   * narrowest one here by some distance.
+   *
+   * It names origin content ids, and the child matches them against what THIS peer sent it. A
+   * parent can ask a child to forget what it sent and can reach nothing else: not what the child
+   * uploaded, not what another parent sent. And the child refuses anything a playlist still uses,
+   * because a file yanked out from under a published playlist is a blank slot on a wall, decided by
+   * a server nobody at that site controls.
+   */
+  async function contentPurgeTo(childNodeId, request, timeoutMs = 30_000) {
+    for (const sock of meshNs.sockets.values()) {
+      if (sock.data && sock.data.childNodeId === childNodeId) {
+        return new Promise((resolve) => {
+          sock.timeout(timeoutMs).emit('mesh:content-purge', request, (err, res) => {
+            if (err) {
+              return resolve({
+                ok: false, indeterminate: true,
+                reason: 'That server did not answer. Some copies may already have been removed — ' +
+                        'asking again is safe.',
+              });
+            }
+            resolve(res || { ok: false, reason: 'That server returned nothing.' });
+          });
+        });
+      }
+    }
+    return { ok: false, offline: true, reason: 'That server is not connected right now.' };
+  }
+
   async function contentOfferTo(childNodeId, request, timeoutMs = 30 * 60 * 1000) {
     for (const sock of meshNs.sockets.values()) {
       if (sock.data && sock.data.childNodeId === childNodeId) {
@@ -415,7 +445,7 @@ function setupMeshSocket(io, deps) {
     };
   }
 
-  return { meshNs, backpressure, readFrom, writeTo, contentOfferTo };
+  return { meshNs, backpressure, readFrom, writeTo, contentOfferTo, contentPurgeTo };
 }
 
 module.exports = setupMeshSocket;

@@ -86,8 +86,17 @@ test('test_downward_handlers_are_an_allowlist (I2)', () => {
    *                 ⚠️ Every arrived file is verified before it is visible: size from statSync, the
    *                 digest, and a re-sniff of the type — a parent is an authenticated remote writer
    *                 running a version we do not control.
+   *
+   *   mesh:content-purge — "please forget what I sent you." The ONLY downward message that removes
+   *                 anything, and the narrowest one here. Answered by lib/mesh/relay.js: the ids
+   *                 are matched against provenance rows for THIS edge's peer, so a parent can reach
+   *                 what it sent and nothing else — not what the child uploaded, not what another
+   *                 parent sent. Anything a playlist here still uses is REFUSED and reported,
+   *                 because a file pulled out from under a published playlist is a blank slot on a
+   *                 wall decided by a server nobody at that site controls.
    */
-  const ALLOWED_DOWNWARD = ['mesh:read', 'mesh:write', 'mesh:hello', 'mesh:content-offer'];
+  const ALLOWED_DOWNWARD = ['mesh:read', 'mesh:write', 'mesh:hello', 'mesh:content-offer',
+                            'mesh:content-purge'];
 
   /*
    * Direction matters, and scanning both files for handlers gets it wrong: `mesh:envelope` is
@@ -177,11 +186,37 @@ test('a write is denied unless BOTH the category and the workspace were granted 
   assert.equal(grants.writeAllows(null, ['w1'], 'content-push', 'w1'), false);
 });
 
-test('content redistribution is refused until Phase 5 (I2)', () => {
+/*
+ * ⚠️ REPLACES "content redistribution is refused until Phase 5". That test asserted a PLACEHOLDER —
+ * that the capability could not be declared at all — and deleting it when relaying landed would
+ * have removed the only thing watching this. What replaces it is the property that has to survive:
+ * declaring the capability is a RESOURCE decision and never an authority.
+ *
+ * Three parties must agree before a byte travels a second hop, and no one of them can substitute
+ * for another:
+ *   the content's owner  — `relayable` on the provenance row, set from the manifest when they
+ *                          pushed it. Their file, their call.
+ *   the relay's operator — this capability. "I am willing to spend disk holding things for onward
+ *                          use", which says what the node CAN do and never what it MAY.
+ *   each server below    — its own write grant, checked on arrival like any other push.
+ *
+ * A single flag would have collapsed those into whoever runs the middle node — the party that
+ * benefits from caching rather than the one giving something up.
+ */
+test('declaring redistributes-content grants no authority over anyone (I2/I10)', () => {
   const v = capabilities.validateCapabilities(['redistributes-content'], { acceptEnrollment: true });
-  assert.equal(v.ok, false);
-  assert.match(v.reason, /not available in this version/i);
-  assert.ok(!capabilities.AVAILABLE_NOW.includes('redistributes-content'));
+  assert.equal(v.ok, true, 'a node may now declare it is willing to hold content for onward use');
+  assert.ok(capabilities.AVAILABLE_NOW.includes('redistributes-content'));
+
+  // ⚠️ And it must remain a capability, not a grant: it appears in neither grant vocabulary, so it
+  // can never be mistaken for permission to do anything to anybody.
+  assert.ok(!grants.ALL_READ.includes('redistributes-content'));
+  assert.ok(!grants.ALL_WRITE.includes('redistributes-content'));
+  assert.equal(grants.validateGrant(['redistributes-content']).ok, false);
+  assert.equal(grants.validateWriteConsent(['redistributes-content']).ok, false);
+
+  // Still gated on the node accepting enrollment at all — a node that hosts nobody relays nothing.
+  assert.equal(capabilities.validateCapabilities(['redistributes-content'], { acceptEnrollment: false }).ok, false);
 });
 
 // ===== I3 — no cycles =====

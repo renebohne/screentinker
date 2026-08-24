@@ -882,6 +882,41 @@ module.exports = function meshRoutes(db, { requireAuth }) {
   });
 
   /*
+   * ⚠️ WITHDRAW CONTENT THIS SERVER SENT. The only route here that removes anything anywhere, and
+   * it can only reach what this node itself sent to that client — the child matches every id
+   * against its own record of what came from us.
+   *
+   * A child refuses anything one of its playlists still uses, and reports which. That is not a
+   * failure to work around: a file pulled out from under a published playlist is a blank slot on a
+   * wall, and the decision to accept that belongs to whoever is standing in front of it.
+   */
+  router.post('/content/:nodeId/purge', requireAuth, async (req, res) => {
+    const ids = visibleNodeIds(req.user);
+    if (!ids.includes(req.params.nodeId)) return res.status(404).json({ error: 'No such server.' });
+    if (!canWriteToNode(req.user, req.params.nodeId, 'push-content')) {
+      return res.status(403).json({ error: 'You do not have permission to change content on this client.' });
+    }
+    const purgeTo = global.__meshContentPurgeTo;
+    if (!purgeTo) return res.status(503).json({ error: 'This server is not accepting connections from others.' });
+
+    const oids = (req.body && req.body.content_ids) || [];
+    if (!Array.isArray(oids) || !oids.length) {
+      return res.status(400).json({ error: 'Choose what to withdraw.' });
+    }
+
+    const answer = await purgeTo(req.params.nodeId, {
+      oids,
+      actor: req.user ? { name: req.user.name || null, email: req.user.email || null } : null,
+    });
+    if (!answer || !answer.ok) {
+      if (answer && answer.offline) return res.status(503).json({ error: answer.reason });
+      if (answer && answer.indeterminate) return res.status(504).json({ error: answer.reason, resendIsSafe: true });
+      return res.status(403).json({ error: (answer && answer.reason) || 'That server refused.' });
+    }
+    res.json({ ok: true, ...answer });
+  });
+
+  /*
    * ⚠️ WHERE THE BYTES ACTUALLY COME FROM, and the only unauthenticated-by-JWT route in this file.
    *
    * The caller is a CHILD SERVER, not a person — it holds a ticket rather than a session, so
