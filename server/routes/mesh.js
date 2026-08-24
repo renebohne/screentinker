@@ -671,7 +671,19 @@ module.exports = function meshRoutes(db, { requireAuth }) {
     }
 
     const opId = String((req.body && req.body.opId) || require('crypto').randomUUID());
+    /*
+     * ⚠️ WHO ASKED, SENT AS A CLAIM AND NOTHING MORE.
+     *
+     * The child cannot verify this and must never act on it — its own grant is the only thing that
+     * decides anything. It travels because "your MSP changed this playlist" is far less useful to
+     * a customer working out what happened than "Priya at your MSP changed it", and the child
+     * records it labelled as unverified. Name and email only: no id, because an id from another
+     * server means nothing on the child and would invite somebody to try joining on it.
+     */
+    const actor = req.user ? { name: req.user.name || null, email: req.user.email || null } : null;
+
     const answer = await writeTo(req.params.nodeId, {
+      actor,
       path,
       method,
       body: req.body && req.body.body,
@@ -745,6 +757,8 @@ module.exports = function meshRoutes(db, { requireAuth }) {
 
     const answer = await offerTo(req.params.nodeId, {
       manifest: built.manifest, tickets: built.tickets, workspaceId,
+      // Same claim, same caveat as the write path — see POST /write/:nodeId.
+      actor: req.user ? { name: req.user.name || null, email: req.user.email || null } : null,
     });
 
     if (!answer || !answer.ok) {

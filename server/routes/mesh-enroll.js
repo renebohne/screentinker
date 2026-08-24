@@ -693,6 +693,59 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
     });
   });
 
+  /*
+   * ⚠️ WHAT THIS OTHER SERVER HAS ACTUALLY DONE HERE — the question a customer asks first and could
+   * not ask at all.
+   *
+   * mesh_write_ops looks like it should answer it and cannot: it is an idempotency ledger, with no
+   * path, no method, no actor, and nothing that reads it. So an operator could grant write access
+   * and then have no way to find out what was done with it — on the very page where they granted it.
+   *
+   * ⚠️ REFUSALS ARE INCLUDED, and they are the more useful half. After narrowing a grant, the thing
+   * an operator wants to see is what has been TRIED and stopped; a list of successes describes the
+   * relationship as it was permitted rather than as it was attempted.
+   *
+   * Scoped to this edge's peer by matching the audit line's own description of it, because
+   * activity_log has no column for "which peer" — the alternative was a schema change to answer a
+   * question the text already answers. Bounded and read-only.
+   */
+  router.get('/uplink/:id/activity', requireAuth, requireCanShareSomething(db), (req, res) => {
+    const edge = db.prepare("SELECT * FROM mesh_edges WHERE id = ? AND direction = 'up'").get(req.params.id);
+    if (!edge) return res.status(404).json({ error: 'No such connection.' });
+
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const peerId = String(edge.peer_node_id || '').slice(0, 8);
+    const rows = db.prepare(`
+      SELECT id, action, details, created_at, workspace_id, was_acting_as
+        FROM activity_log
+       WHERE action IN ('mesh:write', 'mesh:content-push')
+         AND details LIKE ?
+       ORDER BY created_at DESC
+       LIMIT ?`).all(`%${peerId}%`, limit);
+
+    res.json({
+      peerNodeId: edge.peer_node_id,
+      peerName: edge.peer_name || null,
+      entries: rows.map((r) => ({
+        id: r.id,
+        at: r.created_at ? r.created_at * 1000 : null,
+        kind: r.action === 'mesh:content-push' ? 'content' : 'change',
+        // The full sentence as it was recorded, including whether it applied or was refused and
+        // who that server said asked for it.
+        what: r.details || '',
+        applied: /— applied/.test(r.details || ''),
+        workspaceId: r.workspace_id || null,
+      })),
+      /*
+       * ⚠️ Says out loud what this list is NOT. Changes made by this server's own operators are in
+       * the ordinary activity view; a customer reading a short list here should not conclude the
+       * hub has been quiet if they were looking for something else entirely.
+       */
+      note: 'Only changes requested by that server appear here. Anything done on this server by ' +
+            'your own team is in the main activity log.',
+    });
+  });
+
   router.delete('/uplink/:id', requireAuth, requireCanShareSomething(db), (req, res) => {
     const edge = db.prepare("SELECT * FROM mesh_edges WHERE id = ? AND direction = 'up'").get(req.params.id);
     if (!edge) return res.status(404).json({ error: 'No such connection.' });

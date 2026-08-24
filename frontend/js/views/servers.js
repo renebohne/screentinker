@@ -826,6 +826,14 @@ function writeGrantBlock(u, caps) {
         </div>
         <div data-wout style="margin-top:8px"></div>
       </div>
+
+      <!-- ⚠️ ON THE SAME PANEL AS THE GRANT, because "what did they do with it" is the second
+           question every operator asks and there was nowhere to ask it. Collapsed by default: it
+           is a record to consult, not a thing to read every visit. -->
+      <details class="mesh-write-log" data-log-edge="${esc(u.edgeId)}" style="margin-top:8px">
+        <summary style="cursor:pointer;font-size:13px">What this server has changed here</summary>
+        <div data-log-body style="margin-top:8px;font-size:12px;color:var(--text-muted)">Loading…</div>
+      </details>
     </details>`;
 }
 
@@ -985,6 +993,36 @@ async function renderConnect(panel, caps) {
       out.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
     }
   };
+
+  /*
+   * Loaded on first open rather than with the page: most visits never open it, and a customer with
+   * a busy hub should not pay for a query they did not ask for on every render.
+   */
+  panel.querySelectorAll('.mesh-write-log').forEach((box) => {
+    box.addEventListener('toggle', async () => {
+      if (!box.open || box.dataset.loaded) return;
+      box.dataset.loaded = '1';
+      const body = box.querySelector('[data-log-body]');
+      try {
+        const r = await api.get(`/mesh/uplink/${encodeURIComponent(box.dataset.logEdge)}/activity`);
+        const rows = r.entries || [];
+        body.innerHTML = rows.length
+          ? `<div style="max-height:240px;overflow:auto">${rows.map((e) => `
+              <div style="padding:4px 0;border-bottom:1px solid var(--border)">
+                <span class="badge">${e.applied ? 'applied' : 'refused'}</span>
+                ${esc(e.what)}
+                <div style="font-size:11px">${e.at ? esc(new Date(e.at).toLocaleString()) : ''}</div>
+              </div>`).join('')}</div>
+             <div style="margin-top:6px">${esc(r.note || '')}</div>`
+          /* ⚠️ "Nothing yet" rather than an empty box — an empty panel reads as broken, and the
+             answer "they have not changed anything" is a real and reassuring one. */
+          : `<div>That server has not changed anything here.</div>
+             <div style="margin-top:6px">${esc(r.note || '')}</div>`;
+      } catch (e) {
+        body.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+      }
+    });
+  });
 
   panel.querySelectorAll('[data-wsave]').forEach((btn) => {
     btn.addEventListener('click', () => {

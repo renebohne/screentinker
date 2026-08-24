@@ -1,6 +1,7 @@
 'use strict';
 
 const writeProxy = require('./write-proxy');
+const meshAudit = require('./audit');
 
 /*
  * Applying a write a parent asked for — on the child, by the child, or not at all.
@@ -63,7 +64,36 @@ function resolveTargetWorkspace(db, path) {
  */
 const IN_FLIGHT = -1;
 
+/*
+ * ⚠️ ONE AUDIT WRITE PER REQUEST, WRAPPED AROUND THE WHOLE DECISION.
+ *
+ * applyWrite returns from a dozen places — a bad deadline, no grant, an unwritable path, a target
+ * that does not resolve, a stale intent, a replay, a refusal from the local API. Auditing at each
+ * one means auditing at eleven of them and forgetting the twelfth, and the forgotten one is always
+ * the interesting refusal. So the real function is wrapped and its single return value is what gets
+ * recorded.
+ *
+ * ⚠️ A REPLAY IS NOT AUDITED AGAIN. The uplink re-queues on ack timeout, so the same intent arrives
+ * repeatedly as a matter of course; recording each arrival would turn one operator action into a
+ * page of identical lines and bury the events that matter.
+ */
 async function applyWrite(db, edge, req, deps = {}) {
+  const outcome = await applyWriteInner(db, edge, req, deps);
+  if (!outcome || !outcome.replayed) {
+    meshAudit.recordPeerAction(db, edge, {
+      action: 'mesh:write',
+      path: (req && req.path) || null,
+      method: (req && req.method) || null,
+      ok: !!(outcome && outcome.ok),
+      reason: outcome && outcome.reason,
+      actor: req && req.actor,
+      workspaceId: outcome && outcome.workspaceId,
+    });
+  }
+  return outcome;
+}
+
+async function applyWriteInner(db, edge, req, deps = {}) {
   const now = typeof deps.now === 'function' ? deps.now() : Date.now();
   const method = req && req.method;
   /*
@@ -312,7 +342,7 @@ async function applyWrite(db, edge, req, deps = {}) {
   }
 
   finish(1, result || null);
-  return { ok: true, outcome: result || null };
+  return { ok: true, outcome: result || null, workspaceId };
 }
 
 module.exports = { applyWrite, resolveTargetWorkspace };

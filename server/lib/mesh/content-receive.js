@@ -5,6 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const contentSync = require('./content-sync');
+const meshAudit = require('./audit');
 const { downloadResumable } = require('./pull-download');
 
 /*
@@ -25,8 +26,32 @@ const { downloadResumable } = require('./pull-download');
  * link up; it is the only address that has ever been consented to (I7).
  */
 
-/** One asset at a time. See the note at the transfer loop. */
+/*
+ * ⚠️ Wrapped for the same reason as applyWrite: this returns from several places — a missing
+ * workspace, a grant that does not cover it, a manifest that cannot be read, an allowance or a disk
+ * that will not take it, and the per-file results — and the refusals are the ones an operator most
+ * wants to see. One record, from one return value.
+ */
 async function receiveContentOffer(db, edge, req, deps = {}) {
+  const outcome = await receiveContentOfferInner(db, edge, req, deps);
+  meshAudit.recordPeerAction(db, edge, {
+    action: 'mesh:content-push',
+    ok: !!(outcome && outcome.ok),
+    reason: outcome && outcome.reason,
+    actor: req && req.actor,
+    workspaceId: req && req.workspaceId,
+    userId: deps && deps.userId,
+    // A count is what an operator reads first: "12 files" answers the question that "ok" does not.
+    path: outcome && Array.isArray(outcome.stored)
+      ? `${outcome.stored.length} file(s) stored, ${(outcome.alreadyHeld || []).length} already here`
+      : null,
+    method: null,
+  });
+  return outcome;
+}
+
+/** One asset at a time. See the note at the transfer loop. */
+async function receiveContentOfferInner(db, edge, req, deps = {}) {
   const contentDir = deps.contentDir;
   if (!contentDir) return { ok: false, reason: 'This server is not configured to receive content.' };
 

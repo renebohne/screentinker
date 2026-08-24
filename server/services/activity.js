@@ -70,13 +70,23 @@ let auditDrops = 0;
 function auditDropCount() { return auditDrops; }
 
 function getActivity(options = {}) {
-  const { userId, deviceId, limit = 50, offset = 0 } = options;
+  const { userId, deviceId, workspaceId, action, limit = 50, offset = 0 } = options;
   let sql = `SELECT al.*, u.name as user_name, u.email as user_email
     FROM activity_log al LEFT JOIN users u ON al.user_id = u.id WHERE 1=1`;
   const params = [];
 
   if (userId) { sql += ' AND al.user_id = ?'; params.push(userId); }
   if (deviceId) { sql += ' AND al.device_id = ?'; params.push(deviceId); }
+  /*
+   * ⚠️ WORKSPACE FILTERING, which this could not do — rows have carried workspace_id since the
+   * Phase 2.2 writer-leak fix and nothing could query on it. On a multi-tenant install that made
+   * the audit trail readable only in full or not at all: an operator who administers one workspace
+   * could not ask what happened in it, and any caller wanting to show them a scoped view had to
+   * fetch everything and filter in the process, which is the shape that leaks the moment somebody
+   * adds a count or a total.
+   */
+  if (workspaceId) { sql += ' AND al.workspace_id = ?'; params.push(workspaceId); }
+  if (action) { sql += ' AND al.action = ?'; params.push(action); }
 
   sql += ' ORDER BY al.created_at DESC LIMIT ? OFFSET ?';
   params.push(limit, offset);
@@ -84,9 +94,22 @@ function getActivity(options = {}) {
   return db.prepare(sql).all(...params);
 }
 
-// Prune old activity logs (keep 90 days)
-function pruneActivityLog() {
-  db.prepare("DELETE FROM activity_log WHERE created_at < strftime('%s','now') - (90 * 86400)").run();
+/*
+ * Prune old activity logs.
+ *
+ * ⚠️ This existed and was NEVER CALLED — not by a route, not by a scheduler, not by anything. So
+ * activity_log grew for the life of the install while a comment described a 90-day retention that
+ * was never applied. It is scheduled now (services/scheduler.js); see the note there about why it
+ * does not run at boot.
+ *
+ * The horizon is a parameter rather than a literal so a caller can be explicit, but the default is
+ * unchanged — silently shortening anyone's retention on upgrade would be its own kind of bug.
+ */
+function pruneActivityLog(days = 90) {
+  const keep = Number.isFinite(days) && days > 0 ? Math.floor(days) : 90;
+  return db.prepare(
+    "DELETE FROM activity_log WHERE created_at < strftime('%s','now') - (? * 86400)",
+  ).run(keep).changes;
 }
 
 // Express middleware to auto-log API mutations

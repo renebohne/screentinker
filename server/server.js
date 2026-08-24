@@ -1398,6 +1398,34 @@ try {
   console.warn(`[mesh] housekeeping not started: ${e && e.message}`);
 }
 
+/*
+ * ⚠️ ACTIVITY RETENTION, WHICH WAS WRITTEN AND NEVER SCHEDULED.
+ *
+ * pruneActivityLog() has existed for a long time with a comment saying "keep 90 days", and nothing
+ * anywhere called it — no route, no timer, no startup path. So the table grew for the life of every
+ * install while the code described a retention policy it never applied. On a busy estate that is
+ * the single fastest-growing table there is: every mutation writes a row.
+ *
+ * Daily rather than hourly, because a 90-day horizon does not need finer resolution and a delete
+ * across the largest table on the box is not something to do more often than it earns. Not at boot,
+ * for the same reason the mesh sweep is not: startup is the busiest moment a signage server has.
+ * unref'd so it can never hold the process open.
+ */
+try {
+  const { pruneActivityLog } = require('./services/activity');
+  const activityPrune = setInterval(() => {
+    try {
+      const removed = pruneActivityLog();
+      if (removed > 0) console.log(`[audit] pruned ${removed} activity row(s) past retention`);
+    } catch (e) {
+      console.warn(`[audit] retention sweep failed: ${e && e.message}`);
+    }
+  }, 24 * 60 * 60 * 1000);
+  if (typeof activityPrune.unref === 'function') activityPrune.unref();
+} catch (e) {
+  console.warn(`[audit] retention not scheduled: ${e && e.message}`);
+}
+
 const { startThresholdAlerts } = require('./services/threshold-alerts');
 // ⚠️ Required HERE rather than using a `db` from an outer scope — there isn't one at this point in
 // the file. A free reference would have thrown at boot, which is the same shape as the TDZ crash
