@@ -381,9 +381,16 @@ test('a disk that cannot be measured does not block every transfer', () => {
 });
 
 test('⚠️ with no freeBytes supplied it measures the real disk rather than skipping the check', () => {
-  // ⚠️ The budget must be BIGGER than the ask, or the budget refuses first and this test passes
-  // while proving nothing about the disk. (It did, on the first attempt.)
-  const edge = mkEdge({ budget: 1e18 });
+  /*
+   * ⚠️ The budget must be BIGGER than the ask, or the budget refuses first and this test passes
+   * while proving nothing about the disk. (It did, on the first attempt.)
+   *
+   * ⚠️ And it must stay within Number.MAX_SAFE_INTEGER. 1e18 is a valid SQLite integer but not a
+   * safe JavaScript one — better-sqlite3 accepted it and node:sqlite threw
+   * "Value is too large to be represented as a JavaScript number", so this passed locally and
+   * failed the Node 24 fallback-driver job. Both drivers, every time.
+   */
+  const edge = mkEdge({ budget: 9e15 });     // ~9 PB: larger than the ask, smaller than 2^53
   const r = admitTransfer(edge, 900 * 1024 * GB, { contentDir });
   assert.equal(r.ok, false, 'the default free-space measurement must actually run');
   assert.match(r.reason, /does not have room/i);
