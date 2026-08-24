@@ -33,6 +33,20 @@ let refreshInterval = null;
 let playbackHandler = null;
 let progressTickInterval = null;
 let wallChangedHandler = null;
+/*
+ * ⚠️ DELEGATED DOM LISTENERS ARE TRACKED LIKE THE SOCKET ONES, AND FOR THE SAME REASON.
+ *
+ * render() is handed `#app`, which is the SAME element on every navigation — only its innerHTML is
+ * replaced. A listener attached to a child is discarded with that innerHTML; one attached to the
+ * container itself survives, so every visit to the dashboard added another copy.
+ *
+ * That is not a leak in the abstract. With two copies, "Create group and add" prompts twice and
+ * calls api.createGroup twice — two identically named groups, the devices in the second — and
+ * "Create Video Wall" builds two walls. Three visits, three of each.
+ */
+let selectChangeHandler = null;
+let selectionActionHandler = null;
+let selectionGroupHandler = null;
 // device_id -> { content_name, duration_sec, started_at }
 const playbackByDevice = new Map();
 // Multi-select state for actions on the dashboard cards.
@@ -294,6 +308,43 @@ function renderGroupSection(group, devices, playlists) {
   `;
 }
 
+
+/*
+ * ⚠️ A BULK ACTION THAT PART-SUCCEEDS MUST SAY SO.
+ *
+ * These were `Promise.all`, which rejects on the FIRST failure — so one screen refusing left the
+ * others already moved, showed a single error toast, and told the operator nothing about which had
+ * gone through. They then either repeat the whole action or assume none of it worked; both are
+ * wrong, and "mostly worked" reported as "failed" is the version that gets a wall rebuilt from a
+ * half-changed estate.
+ *
+ * ⚠️ Also serialised in small batches rather than fired all at once. "Select all" on a large site
+ * is several hundred devices, and several hundred simultaneous requests is a burst this product has
+ * been bitten by before (#142, #146) — from its own reconnect storms rather than from the UI, but
+ * the server on the receiving end does not care which end it came from.
+ */
+async function runBulk(ids, fn, { batchSize = 8 } = {}) {
+  const done = []; const failed = [];
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const slice = ids.slice(i, i + batchSize);
+    const results = await Promise.allSettled(slice.map((id) => fn(id)));
+    results.forEach((r, n) => {
+      if (r.status === 'fulfilled') done.push(slice[n]);
+      else failed.push({ id: slice[n], reason: (r.reason && r.reason.message) || 'failed' });
+    });
+  }
+  return { done, failed };
+}
+
+/** One sentence covering both outcomes, so a partial result is never reported as a total one. */
+function reportBulk(done, failed, successKey) {
+  if (!failed.length) { showToast(tn(successKey, done.length), 'success'); return; }
+  const first = failed[0].reason;
+  showToast(done.length
+    ? `${done.length} done, ${failed.length} could not be changed — ${first}`
+    : first, done.length ? 'warning' : 'error');
+}
+
 function renderSelectionBar(scope, groupId = null) {
   return `
     <div class="selection-bar" data-selection-scope="${esc(scope)}"${groupId ? ` data-group-id="${esc(groupId)}"` : ''} style="display:none;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 12px;margin:0 0 10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px">
@@ -458,14 +509,23 @@ export function render(container) {
   // The selection bar shows when 1+ are selected; "Create Video Wall" is the
   // primary action — it creates the wall, removes devices from any group,
   // assigns them, and navigates to the editor.
-  container.addEventListener('change', (ev) => {
+  /*
+   * Detach whatever a previous mount attached, before attaching again. Idempotent:
+   * removeEventListener with a handler that was never added is a no-op.
+   */
+  if (selectChangeHandler) container.removeEventListener('change', selectChangeHandler);
+  if (selectionActionHandler) container.removeEventListener('click', selectionActionHandler);
+  if (selectionGroupHandler) container.removeEventListener('click', selectionGroupHandler);
+
+  selectChangeHandler = (ev) => {
     const cb = ev.target.closest?.('.device-select-cb');
     if (!cb) return;
     const id = cb.dataset.deviceId;
     if (cb.checked) selectedDeviceIds.add(id); else selectedDeviceIds.delete(id);
     cb.closest('.device-card')?.classList.toggle('selected', cb.checked);
     refreshSelectionBar();
-  });
+  };
+  container.addEventListener('change', selectChangeHandler);
 
   const visibleDeviceCards = (bar) => [...bar.parentElement.querySelectorAll('.device-card[data-device-id]')]
     .filter(card => card.style.display !== 'none');
@@ -477,7 +537,7 @@ export function render(container) {
     });
     refreshSelectionBar();
   };
-  container.addEventListener('click', async (e) => {
+  selectionActionHandler = async (e) => {
     const action = e.target.closest('[data-selection-action]');
     if (!action) return;
     const bar = action.closest('.selection-bar');
@@ -496,16 +556,17 @@ export function render(container) {
       syncVisibleSelection();
     } else if (action.dataset.selectionAction === 'remove') {
       const ids = visible.map(card => card.dataset.deviceId).filter(id => selectedDeviceIds.has(id));
-      try {
-        await Promise.all(ids.map(deviceId => api.removeDeviceFromGroup(bar.dataset.groupId, deviceId)));
-        showToast(tn('dashboard.toast.removed_from_group', ids.length), 'success');
-        loadDashboard();
-      } catch (err) { showToast(err.message, 'error'); }
+      const { done, failed } = await runBulk(ids, (deviceId) =>
+        api.removeDeviceFromGroup(bar.dataset.groupId, deviceId));
+      reportBulk(done, failed, 'dashboard.toast.removed_from_group');
+      loadDashboard();
     } else if (action.dataset.selectionAction === 'wall') {
       createWallFromSelection();
     }
-  });
-  container.addEventListener('click', async (e) => {
+  };
+  container.addEventListener('click', selectionActionHandler);
+
+  selectionGroupHandler = async (e) => {
     const groupItem = e.target.closest('[data-selection-group-id], [data-selection-create-group]');
     if (!groupItem) return;
     const menu = groupItem.closest('.selection-group-menu');
@@ -520,12 +581,16 @@ export function render(container) {
         const group = await api.createGroup(name);
         groupId = group.id;
       }
-      await Promise.all(ids.map(deviceId => api.addDeviceToGroup(groupId, deviceId)));
-      showToast(tn('dashboard.toast.added_to_group', ids.length), 'success');
+      const { done, failed } = await runBulk(ids, (deviceId) => api.addDeviceToGroup(groupId, deviceId));
+      reportBulk(done, failed, 'dashboard.toast.added_to_group');
       loadDashboard();
-    } catch (err) { showToast(err.message, 'error'); }
+    } catch (err) {
+      // Only reaches here if creating the GROUP failed — the per-device results are handled above.
+      showToast(err.message, 'error');
+    }
     menu.removeAttribute('open');
-  });
+  };
+  container.addEventListener('click', selectionGroupHandler);
 
   // Load everything
   loadDashboard();
@@ -1215,6 +1280,21 @@ function attachGroupHandlers(groupsWithDevices) {
 }
 
 export function cleanup() {
+  /*
+   * ⚠️ The delegated DOM listeners go too. They live on #app, which outlives this view — so
+   * "the view was torn down" is only true if they are removed here. render() also detaches before
+   * re-attaching, which covers the case where cleanup was never called at all.
+   */
+  const host = document.getElementById('app');
+  if (host) {
+    if (selectChangeHandler) host.removeEventListener('change', selectChangeHandler);
+    if (selectionActionHandler) host.removeEventListener('click', selectionActionHandler);
+    if (selectionGroupHandler) host.removeEventListener('click', selectionGroupHandler);
+  }
+  selectChangeHandler = null;
+  selectionActionHandler = null;
+  selectionGroupHandler = null;
+
   if (statusHandler) off('device-status', statusHandler);
   if (screenshotHandler) off('screenshot-ready', screenshotHandler);
   if (playbackHandler) off('playback-progress', playbackHandler);
