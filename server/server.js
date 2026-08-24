@@ -1386,6 +1386,18 @@ try {
   console.warn(`[mesh] uplinks not started: ${e && e.message}`);
 }
 
+/*
+ * Housekeeping for the mesh tables. Separate from the uplink service and started unconditionally on
+ * any node with mesh tables, because a node that has STOPPED reporting still holds everything it
+ * mirrored — and that is exactly the node whose retention nobody is watching.
+ */
+try {
+  const { startMeshMaintenance } = require('./services/mesh-maintenance');
+  startMeshMaintenance(require('./db/database').db);
+} catch (e) {
+  console.warn(`[mesh] housekeeping not started: ${e && e.message}`);
+}
+
 const { startThresholdAlerts } = require('./services/threshold-alerts');
 // ⚠️ Required HERE rather than using a `db` from an outer scope — there isn't one at this point in
 // the file. A free reference would have thrown at boot, which is the same shape as the TDZ crash
