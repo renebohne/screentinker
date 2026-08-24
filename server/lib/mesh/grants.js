@@ -89,13 +89,18 @@ const READ_CATEGORIES = Object.freeze({
 });
 
 /**
- * WRITE categories — modelled now, REJECTED until Phase 5.
+ * WRITE categories — grantable ONLY by the node being written to.
  *
- * ⚠️ These exist in the vocabulary and are refused by validation, deliberately. The directive forbids
- * stubs and dormant paths for downward control (invariant I2), and this is not one: nothing here can
- * be granted, so no code path can consult it. What it buys is that the *shape* of a grant does not
- * change when Phase 5 lands — an edge stored in 2.0 is still a valid edge afterwards, and an operator
- * who reads the model today is not surprised later by a permission that did not appear to exist.
+ * ⚠️ THE ASYMMETRY WITH READS IS THE WHOLE DESIGN. A read grant is authored by the parent when it
+ * mints a pairing code, and the child stores that answer verbatim; every read category is read-only
+ * by construction, so the worst case is that the child gave away more visibility than it meant to
+ * and can see exactly what. A write grant authored by the parent would be the parent writing its own
+ * permission into the child's database — and the child would then enforce it faithfully, which is
+ * worse than not enforcing at all, because it looks correct.
+ *
+ * So these are refused by `validateGrant()` — the function every wire path uses — and accepted only
+ * by `validateWriteConsent()`, which is reachable solely from an authenticated operator request on
+ * the granting node. There is no path from a peer's message to a stored write category.
  */
 const WRITE_CATEGORIES = Object.freeze({
   'content-push': {
@@ -153,9 +158,10 @@ function validateGrant(requested) {
     return {
       ok: false,
       rejected: writes,
-      reason: `Write access (${writes.join(', ')}) is not available in this version. This node accepts ` +
-              `observation only: data flows upward, and no parent can change what plays on this ` +
-              `node's screens.`,
+      reason: `Write access (${writes.join(', ')}) cannot be granted this way. A write permission is ` +
+              `chosen by the node being written to, by an operator on that node, after reading what ` +
+              `it allows — never by the node requesting it, and never over the wire. Ask this ` +
+              `node's operator to grant it from their own Servers page.`,
     };
   }
 
@@ -176,6 +182,55 @@ function grantAllows(grantedCategories, category) {
   return grantedCategories.includes(category);
 }
 
+/**
+ * Validate write categories offered by an operator ON THE GRANTING NODE.
+ *
+ * ⚠️ The only function in this file that may return write categories as `ok`. Its caller must be an
+ * authenticated request on the node that owns the screens — never anything derived from a peer
+ * message. Read categories are refused here for the mirror-image reason writes are refused on the
+ * wire: mixing them would make one route able to widen the other's column.
+ *
+ * @returns {{ok: true, categories: string[]} | {ok: false, reason: string, rejected: string[]}}
+ */
+function validateWriteConsent(requested) {
+  if (!Array.isArray(requested)) {
+    return { ok: false, reason: 'A write grant must be a list of categories.', rejected: [] };
+  }
+  const unknown = requested.filter((c) => !isKnownCategory(c));
+  if (unknown.length) {
+    return {
+      ok: false,
+      rejected: unknown,
+      reason: `Unrecognised ${unknown.length === 1 ? 'category' : 'categories'} ` +
+              `${unknown.map((c) => `"${c}"`).join(', ')}. Write categories are: ${ALL_WRITE.join(', ')}.`,
+    };
+  }
+  const reads = requested.filter((c) => !isWriteCategory(c));
+  if (reads.length) {
+    return {
+      ok: false,
+      rejected: reads,
+      reason: `${reads.join(', ')} ${reads.length === 1 ? 'is a read category' : 'are read categories'} ` +
+              `and is set when the connection is made, not here.`,
+    };
+  }
+  return { ok: true, categories: [...new Set(requested)] };
+}
+
+/**
+ * May this edge perform this write, on this workspace?
+ *
+ * ⚠️ Both halves are required and both come from the CHILD's own stored row — never from the
+ * request. A scope of NULL or [] denies everything: absent means nothing here, deliberately the
+ * opposite of `shared_workspaces`, so that a write grant cannot become total by being unset.
+ */
+function writeAllows(writeGrant, writeScope, category, workspaceId) {
+  if (!Array.isArray(writeGrant) || !writeGrant.includes(category)) return false;
+  if (!Array.isArray(writeScope) || writeScope.length === 0) return false;
+  if (!workspaceId) return false;
+  return writeScope.includes(workspaceId);
+}
+
 /** Plain-language consequences, for the confirmation UI on the GRANTING node. */
 function describeGrant(categories) {
   if (!Array.isArray(categories) || categories.length === 0) {
@@ -194,6 +249,8 @@ module.exports = {
   isKnownCategory,
   isWriteCategory,
   validateGrant,
+  validateWriteConsent,
   grantAllows,
+  writeAllows,
   describeGrant,
 };

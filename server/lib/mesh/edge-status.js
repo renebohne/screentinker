@@ -30,6 +30,21 @@ function consentView(edge, now) {
   if (!edge || edge.direction !== 'up') return null;
 
   const categories = Array.isArray(edge.grant_categories) ? edge.grant_categories : [];
+
+  /*
+   * ⚠️ Fails CLOSED. write_grant/write_scope arrive either already parsed or as the raw JSON column,
+   * and a malformed value must read as NO write — never as unrestricted. Absent means nothing here,
+   * which is deliberately the opposite of shared_workspaces: a write permission that becomes total
+   * by being unset is the failure this whole design exists to prevent.
+   */
+  const asList = (v) => {
+    if (Array.isArray(v)) return v.filter((x) => typeof x === 'string');
+    if (typeof v !== 'string' || !v) return [];
+    try { const p = JSON.parse(v); return Array.isArray(p) ? p.filter((x) => typeof x === 'string') : []; }
+    catch (e) { return []; }
+  };
+  const writeCategories = asList(edge.write_grant);
+  const writeWorkspaces = asList(edge.write_scope);
   const lastSync = typeof edge.last_sync_at === 'number' ? edge.last_sync_at : null;
   const revoked = !!edge.revoked_at;
 
@@ -50,9 +65,19 @@ function consentView(edge, now) {
     // The child can always sever. This is not a permission the parent grants.
     canRevoke: !revoked,
 
-    // ⚠️ Stated explicitly because it is the question a client actually asks, and the answer is
-    // reassuring only if it is written down somewhere they can read it.
-    parentCanControlThisNode: false,
+    /*
+     * ⚠️ Stated explicitly because it is the question a client actually asks — and COMPUTED, because
+     * the reassuring answer is only worth anything if it is true.
+     *
+     * This was the literal `false`. Once write consent exists, a hardcoded false would assure an
+     * operator that nobody can touch their screens on the very screen where they granted exactly
+     * that. A consent view that cannot report the thing it exists to report is worse than no
+     * consent view, because it is believed.
+     */
+    parentCanControlThisNode: writeCategories.length > 0,
+    writeGrant: writeCategories,
+    writeGrantExplained: grants.describeGrant(writeCategories),
+    writeWorkspaces: writeWorkspaces,
   };
 }
 

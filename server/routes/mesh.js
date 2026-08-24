@@ -215,7 +215,16 @@ module.exports = function meshRoutes(db, { requireAuth }) {
          */
         serverName,
         stale: fresh === 'stale',
-        // Honest state of the feature, sent rather than assumed: readable, not yet writable.
+        /*
+         * ⚠️ Still false, and it must stay false until the child TELLS us otherwise.
+         *
+         * A write permission is stored on the child, by the child's operator (see
+         * routes/mesh-enroll.js PUT /uplink/:id/write-grant). This hub has no copy of it and must
+         * never infer one: a hub that decided for itself whether it may write would be exactly the
+         * self-granting this design exists to prevent, and the UI would show a capability the other
+         * end never agreed to. When writes are negotiated, this becomes what the child announced —
+         * never what we assumed.
+         */
         writable: false,
       };
 

@@ -21,7 +21,7 @@ types — they are one node declaring different **capabilities**, connected by *
 | # | Invariant | Guarded by |
 |---|---|---|
 | **I1** | **Autonomy.** A node is fully functional with no parent. A parent is an observer, never a dependency. Mesh is off by default and invisible. | `test_mesh_off_by_default` |
-| **I2** | **Upward-only in 2.0.** Telemetry flows up. The child implements **no downward command handler at all** — a parent emitting one hits the floor. | `test_no_downward_command_handler` |
+| **I2** | **The child is the last word.** Downward traffic is request/response only, and every downward message is answered by an allowlist on the child keyed to a grant **the child's own operator chose**. A parent may ASK; it may never TELL. Write categories are refused over the wire and settable only on the granting node. | `test_downward_handlers_are_an_allowlist`, `a write grant can never arrive over the wire` |
 | **I3** | **No cycles.** Edges form a DAG (multi-parent is permitted). Refusal is a reachability check at enroll time, not a path-prefix check. | `test_cycle_refused_by_reachability_not_prefix` |
 | **I4** | **Identity is position-independent.** Node UUID generated locally at first boot. Re-parenting changes display paths only. | `test_node_id_encodes_no_position` |
 | **I5** | **Opaque relay.** An intermediate node forwards payloads it cannot parse, unmodified. It may read the envelope only. | `test_unknown_payload_is_relayed_not_dropped` |
@@ -30,6 +30,20 @@ types — they are one node declaring different **capabilities**, connected by *
 | **I8** | **Cloud is a peer.** screentinker.com is a node with no special privileges. | ⏳ Phase 1 (topology harness) |
 | **I9** | **No built-in relay address, no automatic relay fallback.** Relay is a capability at an operator-supplied address. A failed direct connection never silently reroutes. | `test_no_builtin_relay_address`, `test_no_automatic_relay_fallback` |
 | **I10** | **Enforcement lives with the data owner.** The node that owns data enforces its grant — never the requesting node. Connection direction is irrelevant. | `test_grant_defaults_to_denied` |
+
+
+⚠️ **I2 has changed twice, and the wording above is the current one.** It began as *"upward-only:
+telemetry flows up, the child implements no downward command handler at all"*, enforced by the
+absence of a mechanism. That stopped being true when the read proxy landed — the parent can now ask
+(`server/lib/mesh/read-proxy.js`) — and it stops being true again with write consent, where the
+parent can ask for a change. What survives both, and what the guards now protect, is the property
+that was always the point: **nothing happens on a node that the node's own operator did not agree
+to.**
+
+The guard changed shape with it. It was a blocklist of six verb names, which did not match
+`mesh:write` and never read `ws/meshSocket.js` — the file where the parent actually speaks downward.
+It is now an allowlist: every downward message must be named in the reviewed list, so adding one is
+a deliberate edit with a reason rather than a regex that happens not to fire.
 
 All in `server/test/mesh-invariants.test.js`.
 

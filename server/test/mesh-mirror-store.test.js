@@ -37,7 +37,11 @@ function freshDb() {
       tls_verify INTEGER NOT NULL DEFAULT 1, peer_version TEXT, peer_min_version TEXT,
       token_hash TEXT, token_expires_at INTEGER, client_id TEXT, created_at INTEGER,
       last_sync_at INTEGER, revoked_at INTEGER, peer_url TEXT, up_token TEXT, peer_name TEXT,
-      shared_workspaces TEXT);
+      shared_workspaces TEXT,
+      -- Phase 5 write consent. ⚠️ Set ONLY by the child's own operator; the wire may never write
+      -- these, which is why they are absent from the enrollment INSERT and its ON CONFLICT clause.
+      write_grant TEXT,
+      write_scope TEXT);
     CREATE TABLE mesh_mirror_nodes (
       origin_node_id TEXT PRIMARY KEY, via_edge_id TEXT NOT NULL, node_version TEXT,
       device_count INTEGER, devices_online INTEGER, origin_ts INTEGER,

@@ -36,31 +36,98 @@ const meshSources = () =>
 
 // ===== I2 — upward only =====
 
-test('test_no_downward_command_handler (I2)', () => {
+test('test_downward_handlers_are_an_allowlist (I2)', () => {
   /*
-   * The child implements NO downward command handler at all. Tolerance — "ignore what you don't
-   * understand" — is forward-compatibility and does not enforce this: a handler that ignores unknown
-   * commands still executes the ones it knows. The absence of the handler is the enforcement, so the
-   * absence is what is tested.
+   * ⚠️ THIS WAS A NAME BLOCKLIST AND IT DID NOT GUARD WHAT IT CLAIMED.
+   *
+   * The old regex forbade mesh:(command|exec|reboot|push|apply|set). It did NOT match `mesh:write`,
+   * `mesh:content` or `mesh:mutate` — so the invariant named in ARCHITECTURE.md could have been
+   * removed by anyone who picked a different verb, and the guard would have stayed green. It also
+   * read only lib/mesh/, never ws/meshSocket.js, which is the file that actually emits downward.
+   *
+   * A blocklist of names cannot express "no downward control": it expresses "not these six words".
+   * So it is now an ALLOWLIST. Every downward handler must be named here, and adding one is a
+   * deliberate edit to this list with a reason — which is exactly the review the invariant wants.
+   *
+   * I2 itself has moved twice and the honest statement is no longer "upward only":
+   *   - reads (Phase 3) made the parent able to ASK. See lib/mesh/read-proxy.js.
+   *   - writes (Phase 5) make it able to ASK for a change.
+   * What must remain true, and what this test now protects, is that EVERY downward message is
+   * answered by an allowlist on the child, keyed to a grant the child's own operator chose. The
+   * parent may ask; it may never tell.
    */
-  const forbidden = /on\s*\(\s*['"]mesh:(command|exec|reboot|push|apply|set)/i;
+  const ALLOWED_DOWNWARD = ['mesh:read', 'mesh:hello'];
+
+  /*
+   * Direction matters, and scanning both files for handlers gets it wrong: `mesh:envelope` is
+   * handled ON THE PARENT and carries telemetry UPWARD, which is the direction the mesh is built
+   * for. So the two halves of "downward" are checked where each actually lives:
+   *   - a handler in lib/mesh/  -> something a PARENT can cause to run on a CHILD
+   *   - an emit in ws/meshSocket.js -> something the PARENT says DOWN the socket
+   */
+  const childHandlerRe = /\.on\s*\(\s*['"](mesh:[a-z0-9:_-]+)['"]/gi;
   for (const { file, src } of meshSources()) {
-    assert.doesNotMatch(src, forbidden,
-      `${file} registers a handler for a parent-issued command — 2.0 is observation only (I2)`);
+    for (const m of src.matchAll(childHandlerRe)) {
+      assert.ok(ALLOWED_DOWNWARD.includes(m[1]),
+        `lib/mesh/${file} handles "${m[1]}" — a message a parent can make this node act on — and it ` +
+        `is not in the reviewed downward allowlist [${ALLOWED_DOWNWARD.join(', ')}]. Adding one means ` +
+        'editing that list and saying why: every downward message must be answered by a grant check ' +
+        'on the child (I2).');
+    }
+  }
+
+  const socketSrc = fs.readFileSync(path.join(__dirname, '..', 'ws', 'meshSocket.js'), 'utf8');
+  const emitRe = /\.emit\s*\(\s*['"](mesh:[a-z0-9:_-]+)['"]/gi;
+  for (const m of socketSrc.matchAll(emitRe)) {
+    assert.ok(ALLOWED_DOWNWARD.includes(m[1]),
+      `ws/meshSocket.js emits "${m[1]}" downward, which is not in the reviewed allowlist ` +
+      `[${ALLOWED_DOWNWARD.join(', ')}]. This file is where the parent speaks to the child, and it ` +
+      'was outside the old guard entirely — a downward verb added here used to pass unnoticed.');
   }
 });
 
-test('write grants are modelled but refused (I2)', () => {
-  // They exist in the vocabulary so an edge stored today stays valid when Phase 5 lands, and so an
-  // operator reading the model is not surprised later by a permission that appeared from nowhere.
+test('a write grant can never arrive over the wire (I2/I10)', () => {
+  /*
+   * ⚠️ REPLACES "write grants are modelled but refused". That test asserted a PLACEHOLDER — that
+   * nothing could grant write at all — and deleting it when write landed would have removed the
+   * only thing standing between a parent and its own permissions. What it is replaced with is the
+   * PROPERTY that has to survive: a write category may be chosen by the node being written to, and
+   * by nothing else.
+   *
+   * validateGrant is the function every wire path uses. It must refuse write, forever.
+   */
   assert.ok(grants.ALL_WRITE.length > 0, 'write categories should exist in the model');
   for (const w of grants.ALL_WRITE) {
     const v = grants.validateGrant([w]);
-    assert.equal(v.ok, false, `${w} must be refused in 2.0`);
-    assert.match(v.reason, /not available in this version/i);
-    assert.match(v.reason, /observation only|flows upward/i,
-      'the refusal must explain the direction rule, not just say no');
+    assert.equal(v.ok, false, `${w} must never be grantable over the wire`);
+    assert.match(v.reason, /chosen by the node being written to|never over the wire/i,
+      'the refusal must say WHERE a write grant comes from, not merely that this one is refused');
   }
+
+  // ...and the consent-side door accepts exactly those, and no read category.
+  for (const w of grants.ALL_WRITE) {
+    assert.equal(grants.validateWriteConsent([w]).ok, true, `${w} must be grantable by the owner`);
+  }
+  for (const r of grants.ALL_READ) {
+    assert.equal(grants.validateWriteConsent([r]).ok, false,
+      `${r} is a read category and must not be settable through the write-consent door`);
+  }
+});
+
+test('a write is denied unless BOTH the category and the workspace were granted (I10)', () => {
+  // Scope is not decoration. A grant that named categories but no workspaces would be a grant over
+  // the whole node, which is precisely the "grants must be scopeable below the top" gap that the
+  // industry survey found in the closest prior art.
+  assert.equal(grants.writeAllows(['content-push'], ['w1'], 'content-push', 'w1'), true);
+  assert.equal(grants.writeAllows(['content-push'], ['w1'], 'content-push', 'w2'), false,
+    'a workspace outside the scope must be refused');
+  assert.equal(grants.writeAllows(['content-push'], [], 'content-push', 'w1'), false,
+    'an EMPTY scope means nothing, never everything');
+  assert.equal(grants.writeAllows(['content-push'], null, 'content-push', 'w1'), false,
+    'an ABSENT scope means nothing, never everything');
+  assert.equal(grants.writeAllows(['device-command'], ['w1'], 'content-push', 'w1'), false,
+    'holding one write category must not confer another');
+  assert.equal(grants.writeAllows(null, ['w1'], 'content-push', 'w1'), false);
 });
 
 test('content redistribution is refused until Phase 5 (I2)', () => {

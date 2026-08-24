@@ -813,6 +813,34 @@ const migrations = [
    * outcomes behind the same truthiness test is how a grant becomes accidentally total. */
   'ALTER TABLE mesh_edges ADD COLUMN shared_workspaces TEXT',
 
+  /* ─── Mesh WRITE consent (Phase 5) ────────────────────────────────────────────────────────────
+   *
+   * ⚠️ THESE TWO COLUMNS ARE THE ONLY PLACE A WRITE PERMISSION MAY LIVE, AND THE WIRE MAY NEVER
+   * WRITE THEM.
+   *
+   * `grant_categories` above is authored by the PARENT: it mints a pairing code naming what the
+   * code will grant, and the child stores the parent's answer verbatim (routes/mesh-enroll.js).
+   * That is defensible for reads — every read category is read-only by construction and the child
+   * can see what it gave away. Applied to writes it inverts the entire model: the parent would be
+   * writing its own permission into the child's database, and the child would dutifully enforce it.
+   *
+   * So write lives in its own columns, set ONLY by an authenticated operator on this node through
+   * the child-side consent route. Enrollment strips write categories out of whatever the peer sent;
+   * re-pairing does not touch these columns, so re-pairing cannot widen a write grant.
+   *
+   * ⚠️ NULL/absent means NO WRITE, and that is what every edge that already exists gets. An
+   * installation that upgrades into this keeps behaving exactly as it did the day before: read
+   * only, everywhere. Write is never acquired by migration — only by somebody on THIS node saying
+   * yes, after reading what it means.
+   *
+   * write_grant  — JSON array of write categories (see lib/mesh/grants.js WRITE_CATEGORIES).
+   * write_scope  — JSON array of workspace ids this edge may write to. ⚠️ Unlike
+   *                shared_workspaces above, NULL here means NOTHING, never "all". A column that
+   *                means "everything" when absent is exactly how a write grant becomes total by
+   *                accident, and the two columns are deliberately opposite for that reason. */
+  'ALTER TABLE mesh_edges ADD COLUMN write_grant TEXT',
+  'ALTER TABLE mesh_edges ADD COLUMN write_scope TEXT',
+
   /* This server's OWN friendly name, which is what it declares when pairing. Defaults to the host
    * name because that is the thing an operator already recognises; editable, because hostnames are
    * frequently neither stable nor meaningful. */

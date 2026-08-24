@@ -464,6 +464,21 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
         return res.status(400).json({ error: 'The other server did not return a token.' });
       }
 
+      /*
+       * ⚠️ STRIP ANY WRITE CATEGORY THE PEER SENT. This row is the parent's own answer, and it is
+       * about to become the permission this node enforces against itself. For reads that is
+       * defensible — every read category is read-only by construction. A write category arriving
+       * this way would be the parent granting itself the ability to change our screens, which we
+       * would then enforce faithfully. So the wire cannot put one here, ever: write lives in
+       * write_grant, set only by an operator on this node.
+       *
+       * Silent stripping would be its own failure ("never accept-and-silently-degrade"), so the
+       * response says plainly that it was refused and how a write grant is actually obtained.
+       */
+      const offered = Array.isArray(answer.grant) ? answer.grant : [];
+      const readOnlyGrant = offered.filter((c) => !grants.isWriteCategory(c));
+      const refusedWrites = offered.filter((c) => grants.isWriteCategory(c));
+
       db.prepare(`INSERT INTO mesh_edges
           (id, peer_node_id, direction, role_capabilities, grant_categories, transport_direction,
            tls_verify, peer_version, up_token, client_id, created_at, peer_url, peer_name,
@@ -477,8 +492,14 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
             peer_url         = excluded.peer_url,
             tls_verify       = excluded.tls_verify,
             revoked_at       = NULL`).run(
+        /*
+         * ⚠️ write_grant and write_scope are absent from BOTH the column list and the DO UPDATE
+         * clause, on purpose. Re-pairing therefore cannot widen — or narrow — a write grant, and an
+         * operator who re-pairs to fix a stale token does not silently hand over more than they did
+         * the first time. Only the consent route touches those two columns.
+         */
         uid(), answer.parentNodeId,
-        JSON.stringify(answer.capabilities || []), JSON.stringify(answer.grant || []),
+        JSON.stringify(answer.capabilities || []), JSON.stringify(readOnlyGrant),
         tlsVerify ? 1 : 0, null, answer.edgeToken, nowSec(), parsed.url, answer.parentName || null,
         sharedWorkspaces ? JSON.stringify(sharedWorkspaces) : null);
 
@@ -486,9 +507,18 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
       res.json({
         ok: true,
         parentNodeId: answer.parentNodeId,
-        grant: answer.grant,
+        grant: readOnlyGrant,
         // Shown back to the operator: what they just agreed to share, in words.
-        grantDescription: grants.describeGrant(answer.grant || []),
+        grantDescription: grants.describeGrant(readOnlyGrant),
+        // Nothing on this node can write until its operator says so, separately and explicitly.
+        writeGrant: [],
+        ...(refusedWrites.length ? {
+          refusedWrites,
+          refusedWritesReason:
+            `This server refused ${refusedWrites.join(', ')}: a write permission is chosen here, by ` +
+            'you, not by the server asking for it. The connection was made read-only. You can grant ' +
+            'write access afterwards from this page if you decide to.',
+        } : {}),
       });
     });
   }
@@ -501,6 +531,81 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
    * ⚠️ Severing is deliberately available to anyone who could have created one. A link you can make
    * but cannot cut is the shape of the problem consent-from-below exists to prevent.
    */
+  /*
+   * ─── WRITE CONSENT, and the only route that may set it ────────────────────────────────────────
+   *
+   * ⚠️ THE ENTIRE POINT OF THIS ROUTE IS WHERE IT LIVES. It is on the node whose screens would
+   * change, authenticated as an operator of that node, and it takes nothing from any peer message.
+   * `grant_categories` is authored by the parent when it mints a pairing code; if writes were
+   * carried there, a parent would be writing its own permission into this database — and this node
+   * would then enforce it faithfully, which is worse than not enforcing it at all, because the
+   * consent view would look correct while being a lie.
+   *
+   * PUT sets the whole grant, rather than adding to it, so revocation and narrowing are the same
+   * operation as granting: send the categories you want to hold now. Sending `[]` revokes write
+   * while leaving the connection — and the reporting it carries — completely intact. Severing the
+   * edge must never be the only way to stop writes, or an operator under pressure has to choose
+   * between being written to and being monitored at all.
+   *
+   * SCOPE IS REQUIRED. A write grant with no workspaces is refused rather than stored as "all":
+   * the column means nothing when empty, deliberately the opposite of shared_workspaces, because a
+   * permission that becomes total by being unset is how this goes wrong quietly.
+   */
+  router.put('/uplink/:id/write-grant', requireAuth, requireCanShareSomething(db), (req, res) => {
+    const edge = db.prepare("SELECT * FROM mesh_edges WHERE id = ? AND direction = 'up'").get(req.params.id);
+    if (!edge) return res.status(404).json({ error: 'No such connection.' });
+    if (edge.revoked_at) return res.status(409).json({ error: 'This connection has been severed.' });
+
+    const categories = req.body && req.body.categories;
+    const check = grants.validateWriteConsent(Array.isArray(categories) ? categories : []);
+    if (!check.ok) return res.status(400).json({ error: check.reason, rejected: check.rejected });
+
+    // Revoking: no scope needed, and the scope is cleared with it so a later re-grant cannot
+    // silently inherit workspaces the operator picked months ago for a different arrangement.
+    if (check.categories.length === 0) {
+      db.prepare('UPDATE mesh_edges SET write_grant = NULL, write_scope = NULL WHERE id = ?').run(edge.id);
+      if (typeof onUplinkChanged === 'function') onUplinkChanged();
+      return res.json({
+        ok: true, categories: [], workspaces: [],
+        note: 'Write access revoked. This server keeps reporting upward exactly as before; anything ' +
+              'already pushed here stays until you remove it.',
+      });
+    }
+
+    const wanted = Array.isArray(req.body.workspaces) ? req.body.workspaces : [];
+    if (!wanted.length) {
+      return res.status(400).json({
+        error: 'Choose which workspaces this server may write to. A write grant with no workspaces ' +
+               'is not granted — it is refused.',
+      });
+    }
+    /*
+     * ⚠️ Membership is checked against OUR OWN rows, not against anything the caller sent about
+     * itself. An id in the body is a request; whether it names a workspace on this node is a
+     * question only this node can answer.
+     */
+    const mine = new Set(db.prepare('SELECT id FROM workspaces').all().map((w) => w.id));
+    const foreign = wanted.filter((w) => !mine.has(w));
+    if (foreign.length) {
+      return res.status(400).json({
+        error: `${foreign.length === 1 ? 'That workspace is' : 'Those workspaces are'} not on this ` +
+               'server.', rejected: foreign,
+      });
+    }
+
+    db.prepare('UPDATE mesh_edges SET write_grant = ?, write_scope = ? WHERE id = ?')
+      .run(JSON.stringify(check.categories), JSON.stringify([...new Set(wanted)]), edge.id);
+    if (typeof onUplinkChanged === 'function') onUplinkChanged();
+    res.json({
+      ok: true,
+      categories: check.categories,
+      workspaces: [...new Set(wanted)],
+      // The consequence text belongs to whoever is giving something up, which is this operator.
+      consequences: grants.describeGrant(check.categories),
+      note: 'You can narrow or revoke this at any time without disconnecting.',
+    });
+  });
+
   router.delete('/uplink/:id', requireAuth, requireCanShareSomething(db), (req, res) => {
     const edge = db.prepare("SELECT * FROM mesh_edges WHERE id = ? AND direction = 'up'").get(req.params.id);
     if (!edge) return res.status(404).json({ error: 'No such connection.' });
