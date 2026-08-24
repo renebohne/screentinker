@@ -781,6 +781,107 @@ module.exports = function meshRoutes(db, { requireAuth }) {
   });
 
   /*
+   * ⚠️ SEND THE SAME CONTENT TO SEVERAL CLIENTS AT ONCE.
+   *
+   * The real shape of this job: an MSP has one campaign and forty sites, and doing that one node at
+   * a time is forty trips through a UI plus keeping track of which ones took it. Nothing about it
+   * needs new permission — the content belongs to this operator, and every client on the list has
+   * already granted them content-push individually. This is a loop over a decision each customer
+   * already made, not a new power.
+   *
+   * ⚠️ IT IS NOT A RELAY, and the distinction is worth keeping straight. Each child still fetches
+   * from THIS node; nothing is cached in between, no third party holds anybody's bytes, and each
+   * child's own grant is checked on arrival exactly as it is for a single push. The relay tier —
+   * where an intermediate node stores and serves a subtree — is a different feature with an
+   * unresolved consent question, and is documented in docs/mesh-relay-design.md rather than built.
+   *
+   * ⚠️ Bounded concurrency, not one big Promise.all. A push holds its acknowledgement open until
+   * the child has finished fetching, so forty at once is forty long-lived sockets and forty
+   * simultaneous transfers out of one uplink — which is how a hub saturates its own connection and
+   * makes every one of them slower. Four at a time keeps the link usable and the wall-clock sane.
+   */
+  router.post('/content', requireAuth, async (req, res) => {
+    const wanted = Array.isArray(req.body && req.body.targets) ? req.body.targets : [];
+    if (!wanted.length) return res.status(400).json({ error: 'Choose which servers to send to.' });
+    if (wanted.length > 100) {
+      return res.status(400).json({ error: `That is ${wanted.length} servers; 100 at a time.` });
+    }
+    const contentIds = (req.body && req.body.content_ids) || [];
+    if (!contentIds.length) return res.status(400).json({ error: 'Choose some content to send.' });
+
+    const offerTo = global.__meshContentOfferTo;
+    if (!offerTo) {
+      return res.status(503).json({ error: 'This server is not accepting connections from others.' });
+    }
+
+    const visible = visibleNodeIds(req.user);
+    const actor = req.user ? { name: req.user.name || null, email: req.user.email || null } : null;
+
+    /*
+     * ⚠️ EVERY TARGET IS AUTHORISED INDIVIDUALLY. A batch is a convenience for the operator and
+     * must never become a way to reach a client they could not reach one at a time — so visibility
+     * and the publisher role are re-checked per node, not once for the request.
+     */
+    const results = [];
+    const queue = wanted.slice();
+    const runOne = async (t) => {
+      const nodeId = t && t.node_id;
+      const workspaceId = t && t.workspace_id;
+      const label = { nodeId, workspaceId };
+      if (!nodeId || !workspaceId) return { ...label, ok: false, reason: 'Missing server or workspace.' };
+      if (!visible.includes(nodeId)) return { ...label, ok: false, reason: 'No such server.' };
+      if (!canWriteToNode(req.user, nodeId, 'push-content')) {
+        return { ...label, ok: false, reason: 'You may not send content to that client.' };
+      }
+      const edge = db.prepare("SELECT * FROM mesh_edges WHERE peer_node_id = ? AND direction = 'down'")
+        .get(nodeId);
+      if (!edge) return { ...label, ok: false, reason: 'No such server.' };
+
+      /*
+       * ⚠️ A FRESH OFFER PER TARGET, tickets included. A ticket names one file on one EDGE, so
+       * reusing one batch's tickets across children would hand every child a credential minted for
+       * a different relationship — and make revoking one edge stop transfers on another.
+       */
+      const built = contentOffer.buildOffer(db, edge, contentIds, { contentDir: config.contentDir });
+      if (!built.ok) return { ...label, ok: false, reason: built.reason };
+
+      const answer = await offerTo(nodeId, {
+        manifest: built.manifest, tickets: built.tickets, workspaceId, actor,
+      });
+      return {
+        ...label,
+        ok: !!(answer && answer.ok),
+        reason: answer && answer.reason,
+        stored: (answer && answer.stored ? answer.stored.length : 0),
+        alreadyHeld: (answer && answer.alreadyHeld ? answer.alreadyHeld.length : 0),
+      };
+    };
+
+    const CONCURRENCY = 4;
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+      for (;;) {
+        const next = queue.shift();
+        if (!next) return;
+        try { results.push(await runOne(next)); }
+        catch (e) { results.push({ nodeId: next && next.node_id, ok: false, reason: (e && e.message) || 'failed' }); }
+      }
+    }));
+
+    /*
+     * ⚠️ 200 with per-target results, even when some failed. A batch across forty sites will have a
+     * few offline, and collapsing that into one status code loses the only thing the operator needs
+     * — WHICH ones, so they can send to those again later without re-sending to the thirty-seven
+     * that took it.
+     */
+    res.json({
+      ok: results.every((r) => r.ok),
+      sent: results.filter((r) => r.ok).length,
+      failed: results.filter((r) => !r.ok).length,
+      results,
+    });
+  });
+
+  /*
    * ⚠️ WHERE THE BYTES ACTUALLY COME FROM, and the only unauthenticated-by-JWT route in this file.
    *
    * The caller is a CHILD SERVER, not a person — it holds a ticket rather than a session, so

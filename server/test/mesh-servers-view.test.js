@@ -204,7 +204,10 @@ test('⚠️ mesh writes address LOCAL administration only (I2)', () => {
    * because "this write stays here" and "this write goes to a customer" are different claims and
    * collapsing them would let a future route inherit the wrong one silently.
    */
-  const ASKS_A_CUSTOMER = ['/mesh/content/'];
+  // '/mesh/content' (no node id) is the same act aimed at several customers at once — the route
+  // re-checks visibility and role PER NODE, so a batch cannot reach a client a single send could
+  // not. Listed as a prefix so both forms are covered by one entry.
+  const ASKS_A_CUSTOMER = ['/mesh/content'];
   const writes = [...VIEW.matchAll(/api\.(post|put|patch|delete)\(\s*[`'"]([^`'"$]*)/g)]
     .map((m) => ({ verb: m[1], path: m[2] }));
   assert.ok(writes.length > 0, 'the Connect tab does write something');

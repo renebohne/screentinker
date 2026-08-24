@@ -263,6 +263,32 @@ async function renderClients(panel) {
   const unassigned = nodes.filter((n) => !n.clientId);
 
   panel.innerHTML = `
+    ${(orgs || []).filter((o) => o.writable).length > 1 ? `
+    <div class="settings-section">
+      <h3 style="margin-top:0">Send content to several customers</h3>
+      <!-- ⚠️ Only offered when more than one customer has actually granted it. Showing a
+           multi-send with one eligible target is a control that cannot do anything the single
+           send does not, and the single send is where an operator already is. -->
+      <p style="color:var(--text-muted);font-size:12px;margin:0 0 10px">
+        One campaign, several sites. Each server fetches it itself and checks its own permission —
+        this is a shortcut for you, not extra access.
+      </p>
+      <div id="batchTargets" style="max-height:160px;overflow:auto;border:1px solid var(--border);border-radius:4px;padding:6px">
+        ${(orgs || []).filter((o) => o.writable).map((o) => `
+          <label style="display:block;font-size:13px;margin:2px 0">
+            <input type="checkbox" data-batch-target="${esc(o.nodeId)}" data-ws="${esc(o.workspaceId || '')}">
+            ${esc(o.name)} <span style="color:var(--text-muted)">${esc(o.serverName || '')}</span>
+          </label>`).join('')}
+      </div>
+      <div id="batchContent" style="margin-top:8px"></div>
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+        <button class="btn btn-secondary btn-sm" id="batchPick">Choose content…</button>
+        <button class="btn btn-secondary btn-sm" id="batchSend">Send to selected</button>
+        <span id="batchOut" style="font-size:12px"></span>
+      </div>
+      <div id="batchResults" style="margin-top:8px;font-size:12px"></div>
+    </div>` : ''}
+
     <div class="settings-section">
       <h3 style="margin-top:0">Customers</h3>
       <p style="color:var(--text-muted);font-size:12px;margin:0 0 10px">
@@ -357,6 +383,55 @@ async function renderClients(panel) {
       </div>`).join('')}`;
 
   const reload = () => renderClients(panel);
+
+  panel.querySelector('#batchPick')?.addEventListener('click', async () => {
+    const host = panel.querySelector('#batchContent');
+    if (host.innerHTML) { host.innerHTML = ''; return; }
+    host.innerHTML = '<div style="color:var(--text-muted);font-size:12px">Loading your content…</div>';
+    let mine = [];
+    try { mine = await api.get('/content'); } catch (e) { mine = []; }
+    host.innerHTML = mine.length
+      ? `<div style="max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:4px;padding:6px">
+           ${mine.map((c) => `
+             <label style="display:block;font-size:13px;margin:2px 0">
+               <input type="checkbox" data-batch-item="${esc(c.id)}"> ${esc(c.filename)}
+               <span style="color:var(--text-muted)">${esc(fmtBytes(c.file_size || 0))}</span>
+             </label>`).join('')}
+         </div>`
+      : '<div style="color:var(--text-muted);font-size:12px">Your library is empty.</div>';
+  });
+
+  panel.querySelector('#batchSend')?.addEventListener('click', async () => {
+    const out = panel.querySelector('#batchOut');
+    const results = panel.querySelector('#batchResults');
+    const targets = [...panel.querySelectorAll('input[data-batch-target]:checked')]
+      .map((c) => ({ node_id: c.dataset.batchTarget, workspace_id: c.dataset.ws }));
+    const contentIds = [...panel.querySelectorAll('input[data-batch-item]:checked')]
+      .map((c) => c.dataset.batchItem);
+    if (!targets.length) { out.textContent = 'Choose which customers to send to.'; return; }
+    if (!contentIds.length) { out.textContent = 'Choose some content first.'; return; }
+
+    out.textContent = `Sending to ${targets.length}…`;
+    results.innerHTML = '';
+    try {
+      const r = await api.post('/mesh/content', { targets, content_ids: contentIds });
+      out.textContent = `${r.sent} sent${r.failed ? `, ${r.failed} failed` : ''}.`;
+      /*
+       * ⚠️ Listed per customer, always — including on full success. Across forty sites a few will
+       * be offline, and "38 sent" without naming the other two leaves the operator to either
+       * re-send to everyone or guess. Naming them is the only version they can act on.
+       */
+      results.innerHTML = (r.results || []).map((x) => `
+        <div style="padding:2px 0">
+          <span class="badge">${x.ok ? 'sent' : 'failed'}</span>
+          ${esc(x.nodeId)}${x.ok
+            ? ` — ${x.stored} stored${x.alreadyHeld ? `, ${x.alreadyHeld} already there` : ''}`
+            : ` — ${esc(x.reason || 'no reason given')}`}
+        </div>`).join('');
+    } catch (e) {
+      out.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+    }
+  });
 
   panel.querySelector('#addClientBtn')?.addEventListener('click', async () => {
     const name = panel.querySelector('#newClientName').value.trim();

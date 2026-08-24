@@ -274,7 +274,14 @@ test('⚠️ THE HUB API HAS EXACTLY ONE WRITE ROUTE, AND IT ONLY ASKS (I2)', ()
    * on the machine that owns the screens. Adding a third entry here should require the same
    * argument, which is why it stays an explicit list rather than a pattern.
    */
-  const ASKS_THE_CHILD = ['POST /write/:nodeId', 'POST /content/:nodeId'];
+  /*
+   * ⚠️ /content (no :nodeId) sends the SAME content to several clients in one action. It is not a
+   * new power: the content belongs to this operator, every target has already granted them
+   * content-push individually, and the route re-checks visibility and role PER NODE rather than
+   * once for the batch — a convenience must never become a way to reach a client you could not
+   * reach one at a time. Each child still fetches from this node; nothing is cached in between.
+   */
+  const ASKS_THE_CHILD = ['POST /write/:nodeId', 'POST /content/:nodeId', 'POST /content'];
   assert.deepEqual(mutating, [...HUB_LOCAL_ADMIN, ...ASKS_THE_CHILD],
     'the hub API grew a mutating route. Only the ones that ask a child may leave this node, the ' +
     'child decides, and the rest may touch nothing but this hub\'s own records.');
