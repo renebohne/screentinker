@@ -1197,6 +1197,22 @@ const migrations = [
    */
   "ALTER TABLE devices ADD COLUMN playlist_source TEXT",
 
+  /*
+   * What an ACTIVE SCHEDULE is currently imposing, kept apart from what the device is normally on.
+   *
+   * services/scheduler.js used to overwrite devices.playlist_id / layout_id and remember the
+   * previous values in an in-memory Map. A restart during an active schedule lost the Map and
+   * stranded the device on the scheduled playlist permanently, because nothing in the row said the
+   * change had been temporary. Separate columns make "revert" mean "clear this", and make every
+   * evaluation idempotent and self-healing across a restart.
+   *
+   * "Active now" depends on the device's timezone and is evaluated in JS (lib/schedule-eval), so
+   * this cannot be a subquery in the view — the scheduler still decides, it just records its
+   * decision somewhere that does not destroy the operator's.
+   */
+  "ALTER TABLE devices ADD COLUMN scheduled_playlist_id TEXT REFERENCES playlists(id) ON DELETE SET NULL",
+  "ALTER TABLE devices ADD COLUMN scheduled_layout_id TEXT REFERENCES layouts(id) ON DELETE SET NULL",
+
 ];
 // Apply each ALTER idempotently. A "duplicate column name" / "already exists"
 // error means the column is already present (expected on a migrated DB) - benign.

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../db/database');
-const { resolveDevicePlaylist } = require('../lib/resolve-device-playlist');
+const { resolveDevicePlaylist, resolvedLayoutId } = require('../lib/resolve-device-playlist');
 const { PLATFORM_ROLES, ELEVATED_ROLES, isPlatformStaff } = require('../middleware/auth');
 // Phase 2.2a: workspace-aware access. accessContext returns { workspaceRole, actingAs }
 // or null based on the caller's reach into a specific workspace.
@@ -187,7 +187,9 @@ router.get('/:id', (req, res) => {
   // (same rule as lib/zone-validate). The dashboard shows a per-item "reassign" warning;
   // active_layout_zones ships the zone list here too so the inline reassign dropdown needs
   // no separate /api/layouts round-trip. Informational only — playback uses the fallback.
-  const active_layout_zones = layoutZones(device.layout_id);
+  // Resolved layout, so the zone-orphan check is run against the layout the screen is ACTUALLY
+  // using — which, while a schedule is active, is the schedule's rather than the device's own.
+  const active_layout_zones = layoutZones(resolvedLayoutId(req.params.id) ?? device.layout_id);
   const activeZoneIdSet = new Set(active_layout_zones.map(z => z.id));
   for (const a of assignments) a.orphan = !!a.zone_id && !activeZoneIdSet.has(a.zone_id);
 

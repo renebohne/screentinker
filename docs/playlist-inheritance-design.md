@@ -1,7 +1,7 @@
 # Playlist inheritance
 
-**Status: ladder SETTLED (specificity). Resolver + backfill BUILT and committed; the twelve
-eager writers are not yet removed.**
+**Status: BUILT. Ladder settled (specificity); resolver, backfill, all writers, schedules-as-a-tier
+and the UI are committed. One open question remains, at the bottom.**
 How a screen resolves which playlist it plays.
 
 Decided 2026-08-23: walls beat groups; groups get a `priority` column (shipped, inert, `d58bf10`);
@@ -77,6 +77,7 @@ Resolution order, deliberately mirroring the schedule rule so the two cannot dri
 
 | # | Source | Notes |
 |---|---|---|
+| 0 | **Active schedule** | `scheduled_playlist_id`, written by the scheduler while it runs |
 | 1 | **Device override** | explicitly chosen for this screen |
 | 2 | **Video wall** | a wall member plays the wall's playlist — the wall IS the intent |
 | 3 | **Group**, highest `priority`, then oldest | via a new `device_groups.priority`, as schedules have |
@@ -302,13 +303,26 @@ over member *devices*, and members of a group with a shared playlist all resolve
 playlist — so adding one image to a group of five inserted it five times. Pre-existing (the old copy
 made every member's `playlist_id` identical too). Now de-duplicated by playlist.
 
+### Schedules are a tier now, and the Map is gone
+
+⚠️ **It cannot be a subquery.** "Active now" depends on the device's timezone and is evaluated in JS
+(`lib/schedule-eval`), so the resolver cannot derive it. The scheduler still decides — it just
+records its decision somewhere that does not destroy the operator's:
+
+- `devices.scheduled_playlist_id` and `scheduled_layout_id` are the view's **top tier**, above a
+  device override and above `'none'` (a deliberately dark screen must still be schedulable).
+- The scheduler writes *only* those columns. It never touches `playlist_id`, `playlist_source` or
+  `layout_id`.
+- "Revert" is **clearing a column**, not restoring something remembered. `activeOverrides` is
+  deleted, and with it the bug where a restart during an active schedule lost the Map and stranded
+  the device on the scheduled playlist *permanently* — nothing on the row had recorded that the
+  change was temporary. Every tick is now idempotent and self-healing across a restart.
+
+`resolvedLayoutId()` covers the layout half, which had the identical bug one column over.
+
 **Left to do:**
 
-1. **Schedules as their own tier**, above `device`, resolved live. Deletes `services/scheduler.js`'s
-   in-memory `activeOverrides` Map and the restart-strands-the-device bug with it.
-2. **UI**: surface `playlist_source` — "inherited from *Lobby*" vs "overridden", with a revert. The
-   row can finally answer this; nothing shows it yet.
-3. `assignments.js` `ensureDevicePlaylist` still returns the shared playlist for an inheriting
+1. `assignments.js` `ensureDevicePlaylist` still returns the shared playlist for an inheriting
    device, so "add content to this screen" edits the group's playlist and therefore every screen in
    it. Pre-existing, deliberately unchanged here, and worth its own decision.
 

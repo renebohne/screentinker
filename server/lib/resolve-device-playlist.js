@@ -61,4 +61,15 @@ function clearInheritedCopy(deviceId) {
     .run(deviceId);
 }
 
-module.exports = { resolveDevicePlaylist, resolveDevicePlaylistId, clearInheritedCopy };
+/**
+ * The layout the device is ACTUALLY using: an active schedule's, else its own. Same reasoning as
+ * the playlist — the scheduler no longer overwrites devices.layout_id, so reading that column
+ * directly would miss a schedule that is running right now.
+ */
+function resolvedLayoutId(deviceId) {
+  if (!deviceId) return null;
+  return db.prepare('SELECT layout_id FROM device_resolved_playlist WHERE device_id = ?')
+    .get(deviceId)?.layout_id ?? null;
+}
+
+module.exports = { resolveDevicePlaylist, resolveDevicePlaylistId, resolvedLayoutId, clearInheritedCopy };

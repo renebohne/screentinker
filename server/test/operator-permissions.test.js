@@ -54,7 +54,7 @@ db.exec(`
   -- resolves inheritance rather than reading devices.playlist_id, because a screen that INHERITS
   -- the playlist holding this content has no copy of the id on its row — and would otherwise be
   -- left showing a file that no longer exists on disk.
-  CREATE TABLE devices (id TEXT PRIMARY KEY, playlist_id TEXT, playlist_source TEXT, wall_id TEXT);
+  CREATE TABLE devices (id TEXT PRIMARY KEY, playlist_id TEXT, playlist_source TEXT, wall_id TEXT, layout_id TEXT, scheduled_playlist_id TEXT, scheduled_layout_id TEXT);
   CREATE TABLE playlists (id TEXT PRIMARY KEY, workspace_id TEXT, published_snapshot TEXT);
   CREATE TABLE playlist_items (id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id TEXT, content_id TEXT);
   CREATE TABLE video_walls (id TEXT PRIMARY KEY, playlist_id TEXT);

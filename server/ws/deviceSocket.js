@@ -385,7 +385,7 @@ function buildPlaylistPayload(deviceId) {
    * the bug this replaced. See lib/resolve-device-playlist.js.
    */
   const device = db.prepare(`SELECT r.playlist_id AS playlist_id, r.source AS playlist_source,
-      d.layout_id, d.orientation, d.wall_id, d.timezone, d.reported_timezone,
+      r.layout_id AS layout_id, d.orientation, d.wall_id, d.timezone, d.reported_timezone,
       d.triggers_accept_http, d.triggers_accept_udp, d.trigger_secret, d.trigger_http_port,
       d.trigger_udp_port, d.trigger_multicast_group, d.trigger_clear_all_token
       FROM devices d JOIN device_resolved_playlist r ON r.device_id = d.id

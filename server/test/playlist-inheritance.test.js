@@ -276,3 +276,79 @@ test('the resolver views come from ONE definition, shared with any hand-built fi
   join(d, mkGroup(pl));
   assert.equal(resolveDevicePlaylist(d).playlist_id, pl);
 });
+
+/*
+ * ─── Schedules, as a tier rather than a clobber ────────────────────────────────────────────
+ *
+ * services/scheduler.js used to overwrite devices.playlist_id / layout_id and remember the previous
+ * values in an in-memory Map. A restart during an active schedule lost the Map, so the device was
+ * stranded on the scheduled playlist FOREVER — nothing on the row recorded that it was temporary.
+ */
+
+test('⚠️ an active schedule outranks a device override, without overwriting it', () => {
+  const own = mkPlaylist('my-own'); const sched = mkPlaylist('lunchtime');
+  const d = mkDevice({ playlist_id: own, playlist_source: 'device' });
+
+  db.prepare('UPDATE devices SET scheduled_playlist_id = ? WHERE id = ?').run(sched, d);
+  assert.deepEqual(resolveDevicePlaylist(d), { playlist_id: sched, source: 'schedule' });
+
+  const row = db.prepare('SELECT playlist_id, playlist_source FROM devices WHERE id = ?').get(d);
+  assert.equal(row.playlist_id, own, "the operator's own choice must survive untouched");
+  assert.equal(row.playlist_source, 'device');
+});
+
+test('⚠️ THE RESTART BUG: clearing the schedule restores the original, with no memory involved', () => {
+  const own = mkPlaylist('normally'); const sched = mkPlaylist('at-noon');
+  const d = mkDevice({ playlist_id: own, playlist_source: 'device' });
+
+  db.prepare('UPDATE devices SET scheduled_playlist_id = ? WHERE id = ?').run(sched, d);
+  // A restart happens here. There is no in-memory state to lose, which is the entire point.
+  db.prepare('UPDATE devices SET scheduled_playlist_id = NULL WHERE id = ?').run(d);
+
+  assert.deepEqual(resolveDevicePlaylist(d), { playlist_id: own, source: 'device' },
+    'the pre-schedule playlist used to live only in a Map, so a restart mid-schedule pinned the '
+    + 'device to the scheduled playlist permanently');
+});
+
+test('a schedule reaches a device that INHERITS, and hands it back afterwards', () => {
+  const grpPl = mkPlaylist('group-normal'); const sched = mkPlaylist('group-noon');
+  const d = mkDevice();
+  join(d, mkGroup(grpPl));
+  assert.equal(resolveDevicePlaylist(d).source, 'group');
+
+  db.prepare('UPDATE devices SET scheduled_playlist_id = ? WHERE id = ?').run(sched, d);
+  assert.deepEqual(resolveDevicePlaylist(d), { playlist_id: sched, source: 'schedule' });
+
+  db.prepare('UPDATE devices SET scheduled_playlist_id = NULL WHERE id = ?').run(d);
+  assert.deepEqual(resolveDevicePlaylist(d), { playlist_id: grpPl, source: 'group' },
+    'reverting a device that had been INHERITING used to need the old source in the Map too, or it '
+    + 'stayed pinned');
+});
+
+test("a schedule outranks 'none', or a dark screen could never be scheduled to show anything", () => {
+  const sched = mkPlaylist('wake-up');
+  const d = mkDevice({ playlist_source: 'none' });
+  assert.equal(resolveDevicePlaylist(d).playlist_id, null);
+
+  db.prepare('UPDATE devices SET scheduled_playlist_id = ? WHERE id = ?').run(sched, d);
+  assert.deepEqual(resolveDevicePlaylist(d), { playlist_id: sched, source: 'schedule' });
+});
+
+test('a scheduled LAYOUT resolves the same way, and leaves the device layout alone', () => {
+  const { resolvedLayoutId } = require('../lib/resolve-device-playlist');
+  const own = crypto.randomUUID(); const sched = crypto.randomUUID();
+  for (const l of [own, sched]) {
+    db.prepare('INSERT INTO layouts (id, user_id, name) VALUES (?, ?, ?)').run(l, userId, 'l-' + l.slice(0, 4));
+  }
+  const d = mkDevice();
+  db.prepare('UPDATE devices SET layout_id = ? WHERE id = ?').run(own, d);
+  assert.equal(resolvedLayoutId(d), own);
+
+  db.prepare('UPDATE devices SET scheduled_layout_id = ? WHERE id = ?').run(sched, d);
+  assert.equal(resolvedLayoutId(d), sched);
+  assert.equal(db.prepare('SELECT layout_id FROM devices WHERE id = ?').get(d).layout_id, own,
+    'the schedule must not overwrite the device layout — that is the bug, one column over');
+
+  db.prepare('UPDATE devices SET scheduled_layout_id = NULL WHERE id = ?').run(d);
+  assert.equal(resolvedLayoutId(d), own);
+});

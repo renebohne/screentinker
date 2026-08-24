@@ -40,7 +40,11 @@ const RESOLVED_VIEW = `CREATE VIEW device_resolved_playlist AS
          -- 'none' short-circuits everything: "deliberately plays nothing" is not the same as
          -- "nothing was chosen". Without this branch the backfill's carefully-preserved dark
          -- screens inherit their group's playlist and light up during an upgrade.
-         CASE WHEN d.playlist_source = 'none' THEN NULL ELSE COALESCE(
+         CASE WHEN d.playlist_source = 'none' AND d.scheduled_playlist_id IS NULL THEN NULL ELSE COALESCE(
+           -- An ACTIVE SCHEDULE outranks everything, including a device override and 'none': it is
+           -- the operator saying "at this time of day, this instead". It outranks 'none' too, or a
+           -- deliberately dark screen could never be scheduled to show anything.
+           d.scheduled_playlist_id,
            CASE WHEN d.playlist_source = 'device' THEN d.playlist_id END,
            i.wall_playlist_id,
            i.group_playlist_id,
@@ -52,21 +56,36 @@ const RESOLVED_VIEW = `CREATE VIEW device_resolved_playlist AS
            d.playlist_id
          ) END AS playlist_id,
          CASE
+           WHEN d.scheduled_playlist_id IS NOT NULL THEN 'schedule'
            WHEN d.playlist_source = 'none' THEN NULL
            WHEN d.playlist_source = 'device' AND d.playlist_id IS NOT NULL THEN 'device'
            WHEN i.wall_playlist_id  IS NOT NULL THEN 'wall'
            WHEN i.group_playlist_id IS NOT NULL THEN 'group'
            WHEN d.playlist_id IS NOT NULL THEN 'device'
            ELSE NULL
-         END AS source
+         END AS source,
+         -- Layout follows the same rule, for the same reason: the scheduler used to overwrite
+         -- devices.layout_id and revert it from memory. There is no group or wall tier here —
+         -- a layout has only ever been per-device.
+         COALESCE(d.scheduled_layout_id, d.layout_id) AS layout_id
     FROM devices d
     JOIN device_inherited_playlist i ON i.device_id = d.id`;
 
 /**
- * (Re)create both views. Idempotent, and safe to call on a fixture whose tables were hand-built —
- * the columns referenced are `devices.wall_id`, `devices.playlist_id`, `devices.playlist_source`,
- * `video_walls.playlist_id`, `device_groups.playlist_id/priority/created_at` and
- * `device_group_members`, so a fixture must provide those or SQLite will reject the view.
+ * (Re)create both views. Idempotent, and safe to call on a fixture whose tables were hand-built.
+ *
+ * ⚠️ A fixture must provide every column named below or SQLite rejects the view at CREATE time —
+ * which is the point: the failure is loud rather than a test quietly proving things about a
+ * database that does not exist. Currently:
+ *
+ *   devices           id, playlist_id, playlist_source, wall_id, layout_id,
+ *                     scheduled_playlist_id, scheduled_layout_id
+ *   video_walls       id, playlist_id
+ *   device_groups     id, playlist_id, priority, created_at
+ *   device_group_members  device_id, group_id
+ *
+ * Adding a column here means updating that list AND any hand-built fixture (see
+ * test/operator-permissions.test.js) — the same duty a new column creates everywhere else.
  */
 function applyResolverViews(db) {
   db.exec('DROP VIEW IF EXISTS device_resolved_playlist');
