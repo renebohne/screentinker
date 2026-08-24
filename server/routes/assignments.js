@@ -54,14 +54,21 @@ function checkDeviceAccess(req, res, paramName = 'deviceId', requireWrite = true
 function ensureDevicePlaylist(deviceId, userId) {
   const device = db.prepare('SELECT playlist_id, workspace_id, name FROM devices WHERE id = ?').get(deviceId);
   /*
-   * ⚠️ The RESOLVED playlist, so this keeps returning the group's/wall's playlist for a device that
-   * inherits one — exactly as it did when that playlist was copied into the row.
+   * ⚠️ A per-device edit on an INHERITING screen forks, rather than editing the shared playlist.
    *
-   * That preserves today's behaviour, including today's footgun: adding content "to this screen"
-   * while it inherits edits the shared playlist, and therefore every other screen using it. Left
-   * alone deliberately — changing edit semantics is a product decision, not a side effect of
-   * introducing a resolver — but it should not stay unnamed.
+   * "Add content to this screen" used to edit the group's playlist and therefore every other screen
+   * in the group. That was never intended — it fell out of every device holding a copy of the same
+   * playlist id — and the device page now labels such a screen "Inherited from Lobby" right beside
+   * the Add Content button, which makes the old behaviour read as a bug rather than a design.
+   *
+   * forkInheritedPlaylist copies the inherited playlist (items, nesting, mute, per-item schedules
+   * AND its published snapshot, so the screen does not go dark before the operator publishes) into
+   * one owned by this device, and stamps playlist_source = 'device'.
    */
+  const forked = forkInheritedPlaylist(deviceId, userId);
+  if (forked) return forked;
+
+  // Already this screen's own, or driven by an active schedule: edit it in place.
   const resolved = resolveDevicePlaylistId(deviceId);
   if (resolved) return resolved;
 
@@ -182,6 +189,7 @@ function checkItemWrite(req, res) {
 // Per-item mute lives in lib/mute-sync.js so routes/playlists.js can share it.
 const { emitMuteChanged } = require('../lib/mute-sync');
 const { resolveDevicePlaylistId } = require('../lib/resolve-device-playlist');
+const { forkInheritedPlaylist } = require('../lib/fork-device-playlist');
 
 // Update playlist item
 router.put('/:id', (req, res) => {

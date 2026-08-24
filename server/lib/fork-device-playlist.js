@@ -1,0 +1,80 @@
+'use strict';
+
+const { v4: uuidv4 } = require('uuid');
+const { db } = require('../db/database');
+const { resolveDevicePlaylist } = require('./resolve-device-playlist');
+
+/*
+ * "Add content to THIS screen" on a device that inherits its playlist.
+ *
+ * Before inheritance existed, every device held a COPY of its group's playlist id, so editing "this
+ * screen" silently edited the group's playlist — and therefore every other screen using it. The
+ * resolver did not change that; it only made it visible, because the device page now says
+ * "Inherited from Lobby" directly beside the Add Content button. A label that says inherited next to
+ * a control that edits the shared thing is worse than either behaviour on its own.
+ *
+ * So a per-device edit FORKS: the inherited playlist is copied into one owned by this screen, and
+ * the row is stamped playlist_source = 'device' so the resolver stops looking at the group.
+ *
+ * ⚠️ The fork carries the source's PUBLISHED SNAPSHOT, not just its draft items. Devices play
+ * published_snapshot, so handing a screen a brand-new playlist with no snapshot would blank it the
+ * instant someone added an image — the screen would go dark as a side effect of an addition. With
+ * the snapshot copied, the screen keeps playing exactly what it was playing until the operator
+ * publishes their change, which is what the draft/publish flow means everywhere else.
+ *
+ * ⚠️ Forking breaks the live link on purpose. Later edits to the group's playlist no longer reach
+ * this screen — that is what "override" means, and the badge now says so.
+ */
+function forkInheritedPlaylist(deviceId, userId) {
+  const resolved = resolveDevicePlaylist(deviceId);
+  // Nothing to fork from: no playlist at all, or this screen already owns the one it plays.
+  if (!resolved.playlist_id || resolved.source === 'device' || resolved.source === 'schedule') return null;
+
+  const device = db.prepare('SELECT workspace_id, name FROM devices WHERE id = ?').get(deviceId);
+  const source = db.prepare('SELECT name, status, published_snapshot, published_structure FROM playlists WHERE id = ?')
+    .get(resolved.playlist_id);
+  if (!source) return null;
+
+  const newId = uuidv4();
+  const run = db.transaction(() => {
+    db.prepare(`INSERT INTO playlists (id, user_id, workspace_id, name, is_auto_generated, status,
+                                       published_snapshot, published_structure)
+                VALUES (?, ?, ?, ?, 1, ?, ?, ?)`)
+      .run(newId, userId, device?.workspace_id || null, `${device?.name || 'Display'} playlist`,
+           source.status || 'draft', source.published_snapshot || null, source.published_structure || null);
+
+    // Every column, including child_playlist_id and muted: a fork that quietly drops nesting or
+    // un-mutes an item is not a copy of what the screen was showing.
+    const items = db.prepare(`SELECT id, content_id, widget_id, child_playlist_id, zone_id, sort_order,
+                                     duration_sec, muted
+                                FROM playlist_items WHERE playlist_id = ? ORDER BY sort_order ASC`)
+      .all(resolved.playlist_id);
+    const insItem = db.prepare(`INSERT INTO playlist_items
+      (playlist_id, content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec, muted)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    const scheds = db.prepare(`SELECT active_days, start_time, end_time, start_date, end_date, sort_order
+                                 FROM playlist_item_schedules WHERE playlist_item_id = ?`);
+    const insSched = db.prepare(`INSERT INTO playlist_item_schedules
+      (id, playlist_item_id, active_days, start_time, end_time, start_date, end_date, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+
+    for (const it of items) {
+      const res = insItem.run(newId, it.content_id, it.widget_id, it.child_playlist_id, it.zone_id,
+                              it.sort_order, it.duration_sec, it.muted ? 1 : 0);
+      // Per-item dayparting is part of what the screen was showing, so it travels too.
+      for (const s of scheds.all(it.id)) {
+        insSched.run(uuidv4(), res.lastInsertRowid, s.active_days, s.start_time, s.end_time,
+                     s.start_date, s.end_date, s.sort_order);
+      }
+    }
+
+    db.prepare("UPDATE devices SET playlist_id = ?, playlist_source = 'device' WHERE id = ?")
+      .run(newId, deviceId);
+  });
+  run();
+
+  console.log(`[fork] device ${deviceId} forked "${source.name}" (${resolved.source}) -> own playlist ${newId}`);
+  return newId;
+}
+
+module.exports = { forkInheritedPlaylist };

@@ -313,8 +313,14 @@ router.delete('/:id/devices/:deviceId', requireGroupWrite, (req, res) => {
 // once playlists.js scopes by workspace_id this helper's rows remain visible.
 function ensureDevicePlaylist(deviceId, userId) {
   const device = db.prepare('SELECT workspace_id, name FROM devices WHERE id = ?').get(deviceId);
-  // Resolved, so a device inheriting its group's playlist keeps editing that one rather than
-  // silently getting a second, empty playlist of its own.
+  /*
+   * ⚠️ This one deliberately does NOT fork, unlike its twin in routes/assignments.js.
+   *
+   * The caller here is "add this content to every screen in the group" — the shared playlist IS the
+   * target. Forking would give each member a private copy and quietly end the group's ability to
+   * update them all, which is the opposite of what the operator asked for. The device-page path
+   * forks because there the operator is pointing at one screen; here they are pointing at the group.
+   */
   const resolved = resolveDevicePlaylistId(deviceId);
   if (resolved) return resolved;
   const playlistId = uuidv4();

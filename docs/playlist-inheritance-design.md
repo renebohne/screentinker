@@ -320,11 +320,37 @@ records its decision somewhere that does not destroy the operator's:
 
 `resolvedLayoutId()` covers the layout half, which had the identical bug one column over.
 
+### A per-device edit FORKS (decided; built)
+
+"Add content to this screen" on a device that inherits used to edit the group's playlist, and
+therefore every other screen in the group. That was never designed — it fell out of every device
+holding a copy of the same id — and the new badge made it indefensible: the page says *"Inherited
+from Lobby"* directly beside the Add Content button.
+
+`lib/fork-device-playlist.js` copies the inherited playlist into one owned by the device and stamps
+`playlist_source = 'device'`. What it must carry, because each is a silent failure otherwise:
+
+- **the items** — starting empty would drop everything the screen was showing
+- **the published snapshot** — devices play `published_snapshot`, so a brand-new playlist would
+  blank the screen *the instant someone added an image*. With it copied, the screen keeps playing
+  what it played until the operator publishes, which is what draft/publish means everywhere else.
+- **nesting, mute, per-item schedules** — a fork that quietly un-mutes or flattens is not a copy
+
+⚠️ **The group path deliberately does NOT fork.** `device-groups.js` has its own
+`ensureDevicePlaylist`, and its caller is "add this to every screen in the group" — the shared
+playlist *is* the target. Forking each member there would end the group's ability to update them all.
+The two helpers now differ on purpose, and both say why.
+
+Forking breaks the live link, which is what "override" means; the badge says so, and **Use inherited**
+reverses it.
+
 **Left to do:**
 
-1. `assignments.js` `ensureDevicePlaylist` still returns the shared playlist for an inheriting
-   device, so "add content to this screen" edits the group's playlist and therefore every screen in
-   it. Pre-existing, deliberately unchanged here, and worth its own decision.
+1. ⚠️ **Editing or deleting an existing item on an inheriting screen still edits the shared
+   playlist.** Those endpoints are *item*-scoped (`PUT/DELETE /api/assignments/:id`) and carry no
+   device context, so there is nothing to fork against without an API change. Unchanged from before,
+   and narrower than it was — the moment a screen forks, its items are its own — but it is the
+   remaining half of this decision and should not be assumed done.
 
 ### The view SQL lives in one module, because a fixture pasted a schema
 
