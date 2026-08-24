@@ -28,6 +28,10 @@
  */
 
 const mirrorStore = require('../lib/mesh/mirror-store');
+const contentReceive = require('../lib/mesh/content-receive');
+
+// Read lazily: config resolves DATA_DIR at first require, and this module is loaded early.
+const contentDir = () => require('../config').contentDir;
 
 /** How long a settled write op is remembered. Far beyond any retry; see the note above. */
 const WRITE_OP_RETENTION_DAYS = 30;
@@ -37,7 +41,7 @@ const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 function sweepOnce(db, logger = console) {
   const nowSec = Math.floor(Date.now() / 1000);
-  const out = { alerts: 0, playLogs: 0, tombstoned: 0, writeOps: 0, tickets: 0 };
+  const out = { alerts: 0, playLogs: 0, tombstoned: 0, writeOps: 0, tickets: 0, stagedParts: 0 };
 
   /*
    * Mirrored data, per edge, against that edge's OWN retention. Per edge rather than one global
@@ -77,6 +81,23 @@ function sweepOnce(db, logger = console) {
     logger.warn(`[mesh] could not prune pull tickets: ${e && e.message}`);
   }
 
+  /*
+   * ⚠️ Abandoned staged transfers. A crash between staging and commit leaves a FULL-SIZE orphan in
+   * the content directory that nothing else will ever look at — no row references it, no route
+   * serves it, and nothing enumerates that directory. On a node receiving large video that is the
+   * disk filling up invisibly, which is the exact failure the byte budget exists to prevent and
+   * would not catch, because these bytes were never charged to anyone.
+   *
+   * The age floor is a day: a 400 MB file over a link that drops every few minutes legitimately
+   * takes hours, and sweeping a transfer that is merely slow would make the bad-link case
+   * unwinnable. The `mesh-` prefix keeps this off ordinary uploads, which use their own `.part`.
+   */
+  try {
+    out.stagedParts = contentReceive.sweepStagedParts(contentDir()).removed;
+  } catch (e) {
+    logger.warn(`[mesh] could not sweep staged transfers: ${e && e.message}`);
+  }
+
   return out;
 }
 
@@ -92,11 +113,12 @@ function startMeshMaintenance(db, { logger = console } = {}) {
   const timer = setInterval(() => {
     try {
       const r = sweepOnce(db, logger);
-      const total = r.alerts + r.playLogs + r.tombstoned + r.writeOps + r.tickets;
+      const total = r.alerts + r.playLogs + r.tombstoned + r.writeOps + r.tickets + r.stagedParts;
       if (total > 0) {
         logger.log(`[mesh] housekeeping removed ${total} row(s): ` +
                    `${r.alerts} alerts, ${r.playLogs} play logs, ${r.tombstoned} tombstoned devices, ` +
-                   `${r.writeOps} write ops, ${r.tickets} expired tickets`);
+                   `${r.writeOps} write ops, ${r.tickets} expired tickets, ` +
+                   `${r.stagedParts} abandoned transfers`);
       }
     } catch (e) {
       logger.warn(`[mesh] housekeeping failed: ${e && e.message}`);

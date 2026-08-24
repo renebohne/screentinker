@@ -245,12 +245,15 @@ export async function render(container) {
  */
 async function renderClients(panel) {
   panel.innerHTML = '<div style="color:var(--text-muted)">Loading…</div>';
-  let clients = []; let nodes = []; let users = [];
+  let clients = []; let nodes = []; let users = []; let orgs = [];
   try {
-    [clients, nodes, users] = await Promise.all([
+    [clients, nodes, users, orgs] = await Promise.all([
       api.get('/mesh/clients'),
       api.get('/mesh/nodes').then((r) => r.nodes || []),
       api.getUsers().catch(() => []),
+      // Carries what each child has ANNOUNCED it will accept — writable, and how much storage is
+      // left. Never what this hub decided for itself.
+      api.get('/mesh/orgs').then((r) => r.orgs || r || []).catch(() => []),
     ]);
   } catch (e) {
     panel.innerHTML = `<div style="color:var(--danger)">${esc(e.message)}</div>`;
@@ -297,6 +300,31 @@ async function renderClients(panel) {
         <div style="color:var(--text-muted);font-size:12px;margin-bottom:8px">
           ${c.nodes.length ? `${c.nodes.length} server${c.nodes.length === 1 ? '' : 's'}` : 'No servers filed here yet'}
         </div>
+
+        ${c.nodes.map((nodeId) => {
+          const org = (orgs || []).find((o) => o.nodeId === nodeId) || {};
+          const spaces = (orgs || []).filter((o) => o.nodeId === nodeId);
+          const remaining = org.writeOffer && typeof org.writeOffer.bytesBudget === 'number'
+            ? ` — ${fmtBytes(org.writeOffer.bytesRemaining)} of storage left`
+            : '';
+          return `
+          <div style="padding:6px 0;border-top:1px solid var(--border)">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span style="flex:1">${esc(org.serverName || nodeId)}</span>
+              ${org.writable
+                /* ⚠️ Offered only when the CUSTOMER has granted it. The button's absence is the
+                   honest state — an operator who can press it and always be refused learns
+                   nothing, because the refusal is deliberately indistinguishable from "no such
+                   thing". */
+                ? `<button class="btn btn-secondary btn-sm" data-send-to="${esc(nodeId)}">Send content</button>`
+                : '<span class="badge">read-only — they have not granted changes</span>'}
+            </div>
+            <div style="color:var(--text-muted);font-size:12px">
+              ${org.writable ? `You may change playlists on this server${remaining}.` : ''}
+            </div>
+            <div data-send-panel="${esc(nodeId)}" style="margin-top:8px"></div>
+          </div>`;
+        }).join('')}
 
         ${c.access.length ? c.access.map((a) => `
           <div style="display:flex;gap:8px;align-items:center;padding:4px 0">
@@ -359,6 +387,81 @@ async function renderClients(panel) {
       if (!user) { out.textContent = 'Choose a colleague first.'; return; }
       try { await api.put(`/mesh/clients/${encodeURIComponent(id)}/access`, { user_id: user, role }); reload(); }
       catch (e) { out.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`; }
+    });
+  });
+
+  /*
+   * ⚠️ SENDING CONTENT IS TWO CHOICES, AND BOTH HAVE TO BE MADE EXPLICITLY.
+   *
+   * Which files, and which of the CUSTOMER's workspaces they are for. The second is not a detail:
+   * a server may hold several customers' workspaces, and depositing a campaign in the wrong one
+   * puts one client's material on another client's screens. The child re-checks it against its own
+   * grant and refuses if it is outside — but "the far end will catch it" is not a reason to make it
+   * easy to get wrong here.
+   */
+  panel.querySelectorAll('[data-send-to]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const nodeId = btn.dataset.sendTo;
+      const host = panel.querySelector(`[data-send-panel="${CSS.escape(nodeId)}"]`);
+      if (host.innerHTML) { host.innerHTML = ''; return; }   // toggle
+
+      host.innerHTML = '<div style="color:var(--text-muted);font-size:12px">Loading your content…</div>';
+      let mine = [];
+      try { mine = await api.get('/content'); } catch (e) { mine = []; }
+      // Remote and YouTube items travel as rows with no bytes; uploads are the interesting case.
+      const spaces = (orgs || []).filter((o) => o.nodeId === nodeId);
+
+      host.innerHTML = `
+        <div style="border:1px solid var(--border);border-radius:6px;padding:10px">
+          <label style="display:block;font-size:13px;margin-bottom:8px">
+            Into which of their workspaces
+            <select class="input" data-send-ws style="max-width:280px;margin-left:8px">
+              ${spaces.map((o) => `<option value="${esc(o.workspaceId || '')}">${esc(o.name)}</option>`).join('')}
+            </select>
+          </label>
+          ${mine.length ? `
+            <div style="max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:4px;padding:6px">
+              ${mine.map((c) => `
+                <label style="display:block;font-size:13px;margin:2px 0">
+                  <input type="checkbox" data-send-item="${esc(c.id)}"> ${esc(c.filename)}
+                  <span style="color:var(--text-muted)">${esc(fmtBytes(c.file_size || 0))}</span>
+                </label>`).join('')}
+            </div>`
+            : '<div style="color:var(--text-muted);font-size:12px">Your library is empty.</div>'}
+          <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+            <button class="btn btn-secondary btn-sm" data-send-go="${esc(nodeId)}">Send</button>
+            <span data-send-out style="font-size:12px"></span>
+          </div>
+          <!-- ⚠️ Says the two things an operator cannot see from here: transfers are slow by
+               nature over these links, and the customer's server has the final say. -->
+          <div style="color:var(--text-muted);font-size:12px;margin-top:6px">
+            Large files can take a while — their server fetches them itself and resumes if the link
+            drops. It will refuse anything beyond the storage they have granted.
+          </div>
+        </div>`;
+
+      host.querySelector('[data-send-go]').addEventListener('click', async () => {
+        const out = host.querySelector('[data-send-out]');
+        const ids = [...host.querySelectorAll('input[data-send-item]:checked')].map((c) => c.dataset.sendItem);
+        const ws = host.querySelector('[data-send-ws]')?.value;
+        if (!ids.length) { out.textContent = 'Choose some content first.'; return; }
+        if (!ws) { out.textContent = 'Choose a workspace on their server.'; return; }
+        out.textContent = 'Sending…';
+        try {
+          const r = await api.post(`/mesh/content/${encodeURIComponent(nodeId)}`,
+                                   { content_ids: ids, workspace_id: ws });
+          /*
+           * ⚠️ Reported per item. "Mostly worked" is the answer that gets a playlist published with
+           * a hole in it, and the operator is not standing in front of the screen.
+           */
+          const stored = (r.stored || []).length;
+          const held = (r.alreadyHeld || []).length;
+          out.textContent = `Sent ${stored} file(s)${held ? `, ${held} already there` : ''}.`;
+          showToast('Content sent.');
+        } catch (e) {
+          out.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+        }
+      });
     });
   });
 

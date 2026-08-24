@@ -195,12 +195,23 @@ test('⚠️ mesh writes address LOCAL administration only (I2)', () => {
    * route was re-addressed under the resource it actually modifies.
    */
   const LOCAL = ['/mesh/pair/code', '/mesh/uplink', '/mesh/clients'];
+
+  /*
+   * ⚠️ AND ONE THAT DELIBERATELY IS NOT LOCAL. /mesh/content asks a customer's server to accept
+   * files; it is the only call from this view that leaves this node, and it belongs to the same
+   * family as POST /mesh/write — the hub ASKS, and the child decides against its own grant, its own
+   * disk and its own free space. It is named separately from LOCAL rather than folded into it,
+   * because "this write stays here" and "this write goes to a customer" are different claims and
+   * collapsing them would let a future route inherit the wrong one silently.
+   */
+  const ASKS_A_CUSTOMER = ['/mesh/content/'];
   const writes = [...VIEW.matchAll(/api\.(post|put|patch|delete)\(\s*[`'"]([^`'"$]*)/g)]
     .map((m) => ({ verb: m[1], path: m[2] }));
   assert.ok(writes.length > 0, 'the Connect tab does write something');
   for (const w of writes) {
-    assert.ok(LOCAL.some((p) => w.path.startsWith(p)),
-      `api.${w.verb} to "${w.path}" — a write outside local administration`);
+    assert.ok(LOCAL.some((p) => w.path.startsWith(p)) || ASKS_A_CUSTOMER.some((p) => w.path.startsWith(p)),
+      `api.${w.verb} to "${w.path}" — a write that is neither local administration nor a request ` +
+      'to a customer. It must be one or the other, deliberately.');
   }
   for (const remote of ['/mesh/nodes', '/mesh/devices', '/mesh/orgs', '/mesh/topology']) {
     for (const verb of ['post', 'put', 'patch', 'delete']) {
