@@ -50,6 +50,37 @@ module.exports = function meshRoutes(db, { requireAuth }) {
   }
 
   /**
+   * May this user perform a WRITE action on the client that owns this node?
+   *
+   * ⚠️ TWO CONDITIONS, AND THE SECOND ONE IS THE POINT. The role must permit the action, AND the
+   * access must be `direct` — a row naming this user on THIS client. Read access inherits down the
+   * client tree deliberately; write must not, or dragging a client under "West Region" hands the
+   * ability to change a hospital's screens to everyone holding that region, in one drag, with
+   * nobody named. resolveAccess already reports provenance, so this is one extra comparison.
+   *
+   * ⚠️ This is a hub-side PRE-FILTER, not the enforcement. The child re-checks its own grant on
+   * every request and owes this hub nothing (I10). A hub that skipped this check would only be rude
+   * to its own staff; the child would still refuse.
+   */
+  function canWriteToNode(user, nodeId, action) {
+    const row = db.prepare('SELECT client_id FROM mesh_edges WHERE peer_node_id = ? AND direction = ?')
+      .get(nodeId, 'down');
+    if (!row || !row.client_id) return false;
+
+    const clients = db.prepare('SELECT id, parent_client_id FROM mesh_clients').all();
+    const parentOf = new Map(clients.map((c) => [c.id, c.parent_client_id]));
+    const getParentId = (id) => parentOf.get(id) || null;
+    const getAccessRow = (clientId, userId) => db.prepare(
+      'SELECT role FROM mesh_client_access WHERE client_id = ? AND user_id = ?').get(clientId, userId);
+
+    const { role, source } = clientTree.resolveAccess(
+      row.client_id, user, getParentId, getAccessRow, clientRoles);
+    if (!role || !clientRoles.roleAllows(role, action)) return false;
+    if (clientRoles.requiresDirectAccess(action) && source !== 'direct') return false;
+    return true;
+  }
+
+  /**
    * Every client beneath this one.
    *
    * ⚠️ Depth-bounded by a seen-set rather than trusting the tree to be acyclic. client-tree.js
@@ -479,6 +510,18 @@ module.exports = function meshRoutes(db, { requireAuth }) {
     const ids = visibleNodeIds(req.user);
     if (!ids.includes(req.params.nodeId)) {
       return res.status(404).json({ error: 'No such server.' });
+    }
+    /*
+     * ⚠️ Seeing a client is not permission to change their screens. Before this check any `viewer`
+     * who could reach the node could reach this route — the read proxy gates on visibility alone,
+     * which is right for reads and wrong here.
+     */
+    if (!canWriteToNode(req.user, req.params.nodeId, 'push-content')) {
+      return res.status(403).json({
+        error: 'You can see this server, but you are not named as a publisher on it. Write access ' +
+               'has to be granted on the client directly — it is deliberately not inherited from a ' +
+               'parent client.',
+      });
     }
     const writeTo = global.__meshWriteTo;
     if (!writeTo) {
