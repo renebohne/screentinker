@@ -399,7 +399,7 @@ test('every existing install becomes a node with zero edges (migration is a no-o
       const edgeCols = db.prepare("select name from pragma_table_info('mesh_edges')").all().map(r => r.name);
       const edges = db.prepare('select count(*) c from mesh_edges').get().c;
       const mirrorCounts = {};
-      for (const t of ['mesh_mirror_nodes','mesh_mirror_devices','mesh_mirror_alerts','mesh_mirror_play_logs']) {
+      for (const t of ['mesh_mirror_nodes','mesh_mirror_devices','mesh_mirror_alerts','mesh_mirror_play_logs','mesh_node_paths']) {
         mirrorCounts[t] = db.prepare('select count(*) c from ' + t).get().c;
       }
       db.close();
@@ -436,9 +436,21 @@ test('every existing install becomes a node with zero edges (migration is a no-o
        */
       'mesh_client_access', 'mesh_clients', 'mesh_content_provenance', 'mesh_edges',
       'mesh_mirror_alerts', 'mesh_mirror_devices', 'mesh_mirror_nodes', 'mesh_mirror_play_logs',
-      'mesh_mirror_workspaces', 'mesh_node', 'mesh_pairing_codes', 'mesh_pull_tickets',
-      'mesh_tombstones', 'mesh_write_ops',
+      'mesh_mirror_workspaces', 'mesh_node', 'mesh_node_paths', 'mesh_pairing_codes',
+      'mesh_pull_tickets', 'mesh_tombstones', 'mesh_write_ops',
     ]);
+
+    /*
+     * mesh_node_paths — how far away a node is and by which route, LEARNED from the ancestry a
+     * relayed payload carries rather than declared by anybody. A node cannot tell this hub where it
+     * sits (that is a relationship it is not a party to), but a payload that genuinely travelled
+     * A<-B<-C proves the shape by having taken it, and the receiver already refuses any item whose
+     * ancestry does not include the node that handed it over. Empty until something is relayed.
+     */
+    assert.equal(
+      mirrorCounts.mesh_node_paths === undefined ? 0 : mirrorCounts.mesh_node_paths, 0,
+      'a fresh install knows no paths — the shape is learned, never assumed',
+    );
 
     // Still empty on a fresh install: tables exist, nothing is mirrored until something is paired.
     for (const t of ['mesh_mirror_nodes', 'mesh_mirror_devices', 'mesh_mirror_alerts',

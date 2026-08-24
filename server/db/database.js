@@ -1204,6 +1204,25 @@ const migrations = [
    * from the edge a row came in on, so without this a screen relayed from two hops down is stored
    * correctly and then filtered out of every view — present in the database, absent from the page. */
   'ALTER TABLE mesh_mirror_devices ADD COLUMN edge_id TEXT',
+
+  /* HOW FAR AWAY A NODE IS, and by which route.
+   *
+   * ⚠️ Learned from the ancestry a relayed payload carries, never declared. A node cannot tell this
+   * hub where it sits — it would be describing a relationship it is not a party to — but a payload
+   * that arrives having genuinely travelled A<-B<-C proves the shape by having taken it.
+   *
+   * `hops` is the number of LINKS between here and that node: 1 is a server this one is paired
+   * with, 2 is a server behind one of those. That is the number an operator actually asks for when
+   * they want to know whether there is a relay in the middle. */
+  `CREATE TABLE IF NOT EXISTS mesh_node_paths (
+     node_id      TEXT PRIMARY KEY,
+     via_edge_id  TEXT NOT NULL,
+     path         TEXT NOT NULL,
+     hops         INTEGER NOT NULL,
+     first_seen_at INTEGER NOT NULL,
+     last_seen_at  INTEGER NOT NULL
+   )`,
+  'CREATE INDEX IF NOT EXISTS idx_mesh_node_paths_edge ON mesh_node_paths (via_edge_id)',
   /* ⚠️ WHEN THIS HUB FIRST SAW THE SCREEN, which received_at cannot answer — the row is upserted, so
    * received_at is always the LATEST report. Without a first-seen the uptime report has to assume
    * every screen existed for the whole reporting window, which scores a screen installed on the 20th

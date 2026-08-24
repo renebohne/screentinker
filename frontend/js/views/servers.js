@@ -182,11 +182,28 @@ export async function render(container) {
     try { return JSON.parse(localStorage.getItem('user') || '{}').role; } catch (e) { return null; }
   })();
   const isStaff = ['platform_admin', 'platform_operator'].includes(meRole);
+  /*
+   * ⚠️ THE HUB TABS ARE HIDDEN ON A NODE THAT IS NOT A HUB.
+   *
+   * Screens and Topology read /api/mesh/nodes and /api/mesh/topology, and those routes exist only
+   * where MESH_ACCEPT_ENROLLMENT is set — a node that hosts nobody does not mount them at all,
+   * deliberately (I1: an install that never set the flag should not be able to tell the mesh
+   * exists). So on a leaf site both tabs rendered "Could not load: Not found", which reads as a
+   * broken product rather than a feature that does not apply.
+   *
+   * The remaining tab is the one that does apply: what this server reports UPWARD.
+   */
+  const isHub = !!connect.canMint;
   const tabs = TABS.filter(([id]) => {
     if (id === 'connect') return showConnect;
-    if (id === 'clients') return isStaff && connect.canMint;
+    if (id === 'clients') return isStaff && isHub;
+    if (id === 'fleet' || id === 'topology') return isHub;
     return true;
   });
+  // A leaf's landing tab is its uplink, since the hub views are not there to fall back to.
+  if (!isHub && (state.tab === 'fleet' || state.tab === 'topology')) {
+    state.tab = showConnect ? 'connect' : 'fleet';
+  }
   if (state.tab === 'connect' && !showConnect) state.tab = 'fleet';
   if (state.tab === 'clients' && !(isStaff && connect.canMint)) state.tab = 'fleet';
 
@@ -643,6 +660,7 @@ async function renderTopology(panel) {
   }
 
   const edges = data.edges || [];
+  const indirect = data.indirect || [];
   /*
    * ⚠️ VERSION SKEW IS MEASURED AGAINST THE MOST COMMON VERSION, not against this server's. A hub
    * that has not been upgraded yet would otherwise mark its entire healthy fleet as skewed, which
@@ -657,6 +675,36 @@ async function renderTopology(panel) {
     stale: ['#f59e0b', 'not reachable'],
     unknown: ['#94a3b8', 'never synced'],
   };
+
+  /*
+   * ⚠️ HOW MANY SERVERS A SCREEN'S DATA CROSSES TO REACH HERE — the question this page could not
+   * answer at all.
+   *
+   * The table below lists this node's own links, which is the whole picture only in a two-tier
+   * mesh. With a relay in the middle it looked identical to having no relay: one row saying "we are
+   * paired with B", and nothing to say whether B is a site with two screens or a regional server
+   * with a dozen sites behind it.
+   *
+   * Hops counts LINKS, not servers, because that is what people mean: 1 is somewhere you are paired
+   * with directly, 2 is somewhere behind one of those. The path is shown nearest-first so it reads
+   * the way you would trace it.
+   */
+  const hopRows = indirect.map((n) => `
+    <tr style="${ROW}">
+      <td style="${TD}">${idBadge(n.nodeId)}</td>
+      <td style="${TD}">
+        <strong>${n.hops}</strong>
+        <span style="color:var(--text-muted);font-size:12px">
+          ${n.hops === 1 ? 'link — paired directly' : `links — through ${n.hops - 1} other server${n.hops > 2 ? 's' : ''}`}
+        </span>
+      </td>
+      <td style="${TD};font-size:12px">
+        this server → ${[...(n.path || [])].map((id, i) => (i === (n.path.length - 1)
+          ? `<strong>${esc(String(id).slice(0, 8))}</strong>`
+          : esc(String(id).slice(0, 8)))).join(' → ')}
+      </td>
+      <td style="${TD};font-size:12px">${esc(n.viaName || String(n.viaNodeId || '').slice(0, 8) || '—')}</td>
+    </tr>`).join('');
 
   const rows = edges.map((e) => {
     const [colour, word] = FRESH[e.freshness] || FRESH.unknown;
@@ -685,6 +733,15 @@ async function renderTopology(panel) {
     <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px">
       <div><div style="color:var(--text-muted);font-size:11px">Connected servers</div>
            <div style="font-size:20px">${edges.length}</div></div>
+      <!-- ⚠️ Servers BEYOND the ones this node is paired with. Counted separately because "we are
+           connected to 1 server" and "there are 4 servers in this estate" are different facts, and
+           conflating them is what made a relay invisible. -->
+      <div><div style="color:var(--text-muted);font-size:11px">Servers further down</div>
+           <div style="font-size:20px">${indirect.length}</div></div>
+      <div><div style="color:var(--text-muted);font-size:11px">Deepest path</div>
+           <div style="font-size:20px">${(edges.length ? 1 : 0) && indirect.length
+             ? Math.max(1, ...indirect.map((n) => n.hops)) : (edges.length ? 1 : 0)}
+             <span style="font-size:12px;color:var(--text-muted)">hop(s)</span></div></div>
       <div><div style="color:var(--text-muted);font-size:11px">Depth limit</div>
            <!-- Stated, because "why can't I add a server under that one" is otherwise an
                 unanswerable question from the UI. -->
@@ -693,9 +750,22 @@ async function renderTopology(panel) {
            <div style="font-size:20px">${esc(modal || '—')}</div></div>
     </div>
     <div class="settings-section">
+      <h3 style="margin-top:0">Servers paired with this one</h3>
       ${table(['Server', 'Client', 'Link', 'Version', 'Shares', 'Transport', 'Last sync'],
               rows, 'No servers are connected.')}
-    </div>`;
+    </div>
+
+    ${indirect.length ? `
+    <div class="settings-section" style="margin-top:16px">
+      <h3 style="margin-top:0">Servers reached through another server</h3>
+      <!-- ⚠️ Says how it knows, because "where did this row come from" is the immediate question
+           about a server you never paired with. It is not a claim anybody made — it is the route
+           their data demonstrably took to arrive. -->
+      <p style="color:var(--text-muted);font-size:12px;margin:0 0 10px">
+        Learned from the path their reports actually travelled, not from anything they declared.
+      </p>
+      ${table(['Server', 'Distance', 'Route', 'Reached through'], hopRows, '')}
+    </div>` : ''}`;
 }
 
 /* ===================== connecting servers ===================== */

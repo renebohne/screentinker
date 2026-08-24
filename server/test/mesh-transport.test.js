@@ -999,3 +999,35 @@ test('⚠️ sendMany preserves a relayed item\'s ancestry through batching', ()
   assert.equal(mine.origin_node_id, undefined);
   assert.equal(mine.ancestry, undefined);
 });
+
+/*
+ * ⚠️ AN ITEM'S OWN CHAIN MUST SURVIVE BEING UNPACKED, or a relay looks like a direct link.
+ *
+ * The batch validator says it plainly — the batch's ancestry proves the BATCH's path, not the
+ * item's — and itemAsEnvelope then handed every item the batch's chain anyway. A payload that
+ * arrived having travelled A<-B<-C was stored as though it came straight from B, so everything
+ * downstream that reasons about distance saw one hop where there were two.
+ *
+ * Measured: the top hub reported a server two links away as being one link away.
+ */
+test('⚠️ itemAsEnvelope keeps a relayed item\'s own ancestry', () => {
+  const batch = {
+    envelope_version: 1, origin_node_id: 'node-B', ancestry: ['node-B'], receipts: [],
+  };
+  const relayed = {
+    type: 'node-health', body_version: 1, origin_ts: 1,
+    origin_node_id: 'node-C', ancestry: ['node-C', 'node-B'], body: { node_id: 'node-C' },
+  };
+  const own = { type: 'node-health', body_version: 1, origin_ts: 1, body: { node_id: 'node-B' } };
+
+  const asRelayed = envelope.itemAsEnvelope(relayed, batch);
+  assert.equal(asRelayed.origin_node_id, 'node-C');
+  assert.deepEqual(asRelayed.ancestry, ['node-C', 'node-B'],
+    'two links from here, and the chain is the only thing that says so');
+
+  // ⚠️ And an ordinary item still inherits the batch's chain — that omission is what makes
+  // batching cheap, and it is correct because such an item did travel the batch's path.
+  const asOwn = envelope.itemAsEnvelope(own, batch);
+  assert.equal(asOwn.origin_node_id, 'node-B');
+  assert.deepEqual(asOwn.ancestry, ['node-B']);
+});

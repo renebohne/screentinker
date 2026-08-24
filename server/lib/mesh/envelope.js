@@ -254,7 +254,20 @@ function itemAsEnvelope(item, batch) {
     origin_ts: item.origin_ts,
     type: item.type,
     body_version: item.body_version,
-    ancestry: batch.ancestry,
+    /*
+     * ⚠️ THE ITEM'S OWN CHAIN WINS, and discarding it was the same mistake twice over.
+     *
+     * The validator that runs a few lines earlier says it outright: the batch's ancestry proves the
+     * BATCH's path, not the item's. This function then handed every item the batch's chain anyway —
+     * so a relayed payload that arrived carrying A<-B<-C was stored as though it had come straight
+     * from B, and everything downstream that reasons about distance saw one hop where there were
+     * two. A relay was indistinguishable from a direct link at exactly the layer that decides how
+     * far away something is.
+     *
+     * Falls back to the batch for ordinary items, which is correct: an item that did not bring its
+     * own chain travelled the batch's, and omitting it is what makes batching cheap.
+     */
+    ancestry: Array.isArray(item.ancestry) && item.ancestry.length ? item.ancestry : batch.ancestry,
     receipts: batch.receipts,
     body: item.body,
   };

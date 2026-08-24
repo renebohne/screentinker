@@ -179,8 +179,44 @@ function recordWriteOffer(db, edge, ctx) {
   return true;
 }
 
+/*
+ * ⚠️ WHERE THIS PAYLOAD CAME FROM, IN HOPS — learned rather than declared.
+ *
+ * A node cannot tell this hub where it sits in the tree; that would be describing a relationship it
+ * is not a party to, and it would be trusting a claim nobody can check. But a payload that has
+ * genuinely travelled through a relay carries the path it took, and the receiver already refuses
+ * any item whose ancestry does not include the node that handed it over. So the shape is proven by
+ * arrival: if this row is here and attested, that route exists.
+ *
+ * Recorded per node rather than per payload — the question is "how far away is this server", and
+ * the answer changes only when the topology does.
+ */
+function recordNodePath(db, edge, env, receivedAt) {
+  const chain = Array.isArray(env && env.ancestry) ? env.ancestry.filter((x) => typeof x === 'string') : [];
+  const origin = env && env.origin_node_id;
+  if (!origin || origin === edge.peer_node_id) return;      // direct: the edge already says it
+  if (!chain.includes(edge.peer_node_id)) return;           // unattested: not ours to record
+
+  /*
+   * Hops counted from THIS node: the chain is [origin, …, neighbour], so its length is exactly the
+   * number of links back to here. A screen on a directly-paired server is 1; one behind a relay is 2.
+   */
+  const hops = chain.length;
+  try {
+    db.prepare(`INSERT INTO mesh_node_paths (node_id, via_edge_id, path, hops, first_seen_at, last_seen_at)
+                VALUES (?,?,?,?,?,?)
+                ON CONFLICT(node_id) DO UPDATE SET
+                  via_edge_id  = excluded.via_edge_id,
+                  path         = excluded.path,
+                  hops         = excluded.hops,
+                  last_seen_at = excluded.last_seen_at`)
+      .run(origin, edge.id, JSON.stringify(chain), hops, receivedAt, receivedAt);
+  } catch (e) { /* a node with no paths table simply learns no shape */ }
+}
+
 function storeEnvelope(db, edge, env, now) {
   const receivedAt = now || Math.floor(Date.now() / 1000);
+  recordNodePath(db, edge, env, receivedAt);
   const ctx = { edgeId: edge.id, originNodeId: env.origin_node_id, body: env.body || {},
                 originTs: env.origin_ts ? Math.floor(env.origin_ts / 1000) : null, receivedAt };
   switch (env.type) {
@@ -296,6 +332,7 @@ function readDevice(db, originNodeId, deviceId) {
 }
 
 module.exports = {
+  recordNodePath,
   upsertNodeHealth, upsertDevice, upsertAlert, insertPlayLog, storeEnvelope,
   markDeleted, markNodeStale, pruneEdge, purgeNode, freshnessOf, readDevice, safeParseArray,
 };

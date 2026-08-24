@@ -91,6 +91,37 @@ function deviceProjections(db, grantCategories, edge) {
  * never as this node's own — a hub that could not tell whose screen it was looking at would file a
  * customer's estate under the wrong company, which is the worst available bug here.
  */
+/*
+ * ⚠️ THE NODES THEMSELVES, not only their screens — otherwise a site with nothing plugged in yet is
+ * invisible however clearly it consented.
+ *
+ * The shape was learned only from relayed payloads, so a customer's brand-new server appeared
+ * nowhere upstream until somebody hung a screen on it. That is the wrong dependency: whether a
+ * relationship exists and whether it currently has hardware are different questions, and an
+ * operator setting up a site wants to see the site appear before the screens do.
+ *
+ * Node health is the payload the child already sends about ITSELF every cycle, so relaying it
+ * carries both the node's existence and the ancestry that proves the route.
+ */
+function relayedNodeProjections(db) {
+  try {
+    return db.prepare(`
+      SELECT m.origin_node_id, m.node_version, m.device_count, m.devices_online, m.origin_ts
+        FROM mesh_mirror_nodes m
+        JOIN mesh_edges e ON e.peer_node_id = m.origin_node_id
+                         AND e.direction = 'down' AND e.revoked_at IS NULL
+       WHERE e.peer_shares_upward = 1`).all().map((r) => ({
+      node_id: r.origin_node_id,
+      version: r.node_version || null,
+      device_count: r.device_count ?? null,
+      devices_online: r.devices_online ?? null,
+      origin_node_id: r.origin_node_id,
+    }));
+  } catch (e) {
+    return [];
+  }
+}
+
 function relayedDeviceProjections(db, grantCategories) {
   let rows = [];
   try {
@@ -471,6 +502,7 @@ function answerRead(db, edge, req) {
 }
 
 module.exports = {
-  scopeClause, deviceProjections, relayedDeviceProjections, workspaceProjections, deviceDetail,
+  scopeClause, deviceProjections, relayedDeviceProjections, relayedNodeProjections,
+  workspaceProjections, deviceDetail,
   nodeHealth, openAlerts, answerRead,
 };

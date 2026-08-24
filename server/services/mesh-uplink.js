@@ -184,6 +184,15 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
       }),
     ];
     for (const w of workspaceProjections(db, grant, edge)) bulk.push(mk('workspace-summary', w));
+    /*
+     * Nodes below us that agreed to be passed on. Sent before their devices for the same reason
+     * workspaces precede devices: a screen arriving before the server it belongs to flickers into
+     * "unknown origin" and back out again on the very first sync.
+     */
+    for (const n of nodeData.relayedNodeProjections(db)) {
+      bulk.push(mkFor(n.origin_node_id, 'node-health', n));
+    }
+
     for (const d of deviceProjections(db, grant, edge)) {
       // Ours keep our origin; a relayed one keeps the origin it arrived with.
       bulk.push(mkFor(d.origin_node_id || me, 'device-summary', d));

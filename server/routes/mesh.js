@@ -1126,7 +1126,47 @@ module.exports = function meshRoutes(db, { requireAuth }) {
         freshness: require('../lib/mesh/mirror-store').freshnessOf(e, now),
       };
     });
-    res.json({ edges, asOf: now, depthCap: require('../config').meshMaxDepth });
+    /*
+     * ⚠️ NODES BEYOND THE FIRST HOP, so the shape of the estate is visible rather than just this
+     * node's own neighbours.
+     *
+     * Without it a three-tier mesh looked identical to a two-tier one: a single row saying "we are
+     * paired with B", and no way to tell whether B is a site with screens or a relay with a dozen
+     * sites behind it. The number an operator asks for is how many servers a screen's data crosses
+     * to reach them, and that number was nowhere on the page.
+     *
+     * Learned from attested ancestry (mirror-store.recordNodePath) rather than declared, and scoped
+     * the same way everything else here is: a path is shown only if the edge it arrived over is one
+     * this user may see.
+     */
+    let indirect = [];
+    try {
+      const visibleEdges = new Set(
+        db.prepare("SELECT id, client_id FROM mesh_edges WHERE direction = 'down' AND revoked_at IS NULL")
+          .all()
+          .filter((e) => (e.client_id ? visibleClientIds(req.user).has(e.client_id)
+                                      : req.user && req.user.role === 'platform_admin'))
+          .map((e) => e.id),
+      );
+      indirect = db.prepare('SELECT * FROM mesh_node_paths ORDER BY hops, node_id').all()
+        .filter((r) => visibleEdges.has(r.via_edge_id))
+        .map((r) => {
+          let path = [];
+          try { path = JSON.parse(r.path); } catch (e) { path = []; }
+          const via = db.prepare('SELECT peer_node_id, peer_name FROM mesh_edges WHERE id = ?').get(r.via_edge_id);
+          return {
+            nodeId: r.node_id,
+            hops: r.hops,
+            // Ordered nearest-first, so it reads the way an operator traces it: us -> B -> C.
+            path: [...path].reverse(),
+            viaNodeId: via ? via.peer_node_id : null,
+            viaName: via ? via.peer_name : null,
+            lastSeenAt: r.last_seen_at,
+          };
+        });
+    } catch (e) { indirect = []; }
+
+    res.json({ edges, indirect, asOf: now, depthCap: require('../config').meshMaxDepth });
   });
 
   return router;
