@@ -689,6 +689,51 @@ async function renderTopology(panel) {
    * with directly, 2 is somewhere behind one of those. The path is shown nearest-first so it reads
    * the way you would trace it.
    */
+  /*
+   * ⚠️ A TREE, BECAUSE THE SHAPE IS THE POINT.
+   *
+   * Two tables answer "who am I paired with" and "who is further away" separately, and an operator
+   * then has to hold the structure in their head to see that C sits under B while D sits beside it.
+   * That is precisely the thing they came to this page to find out, so the page should draw it.
+   *
+   * Built from what is already known rather than from a new query: direct edges are the first
+   * level, and every indirect node hangs off whichever node relayed it. Drawn with box-drawing
+   * characters rather than SVG — it survives being copied into a support ticket, reads the same in
+   * a screenshot, and has no layout to get wrong at four levels deep.
+   */
+  const childrenOf = new Map();
+  for (const e of edges) {
+    if (!childrenOf.has(null)) childrenOf.set(null, []);
+    childrenOf.get(null).push({ id: e.peerNodeId, freshness: e.freshness, version: e.peerVersion, hops: 1 });
+  }
+  for (const n of indirect) {
+    const parent = n.viaNodeId || null;
+    if (!childrenOf.has(parent)) childrenOf.set(parent, []);
+    childrenOf.get(parent).push({ id: n.nodeId, freshness: null, version: null, hops: n.hops });
+  }
+
+  const FRESHDOT = { live: '#22c55e', stale: '#f59e0b', unknown: '#94a3b8' };
+  const treeLines = [];
+  const walk = (parentId, prefix) => {
+    const kids = childrenOf.get(parentId) || [];
+    kids.forEach((k, i) => {
+      const last = i === kids.length - 1;
+      const dot = k.freshness
+        ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${FRESHDOT[k.freshness] || FRESHDOT.unknown};margin-right:6px"></span>`
+        // A relayed node's health is its own server's business; what this node knows is the route.
+        : '<span style="display:inline-block;width:8px;margin-right:6px"></span>';
+      treeLines.push(`<div style="white-space:pre;line-height:1.7">` +
+        `<span style="color:var(--text-muted)">${prefix}${last ? '└─ ' : '├─ '}</span>` +
+        `${dot}<code>${esc(String(k.id).slice(0, 8))}</code>` +
+        `<span style="color:var(--text-muted);font-size:12px">` +
+        `  ${k.hops} ${k.hops === 1 ? 'hop' : 'hops'}` +
+        `${k.version ? ` · ${esc(k.version)}` : ''}` +
+        `${k.hops > 1 ? ' · reached through the server above' : ''}</span></div>`);
+      walk(k.id, prefix + (last ? '   ' : '│  '));
+    });
+  };
+  walk(null, '');
+
   const hopRows = indirect.map((n) => `
     <tr style="${ROW}">
       <td style="${TD}">${idBadge(n.nodeId)}</td>
@@ -749,7 +794,16 @@ async function renderTopology(panel) {
       <div><div style="color:var(--text-muted);font-size:11px">Common version</div>
            <div style="font-size:20px">${esc(modal || '—')}</div></div>
     </div>
+    ${treeLines.length ? `
     <div class="settings-section">
+      <h3 style="margin-top:0">The shape of this estate</h3>
+      <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px">
+        <div style="line-height:1.7"><strong>this server</strong></div>
+        ${treeLines.join('')}
+      </div>
+    </div>` : ''}
+
+    <div class="settings-section" style="margin-top:16px">
       <h3 style="margin-top:0">Servers paired with this one</h3>
       ${table(['Server', 'Client', 'Link', 'Version', 'Shares', 'Transport', 'Last sync'],
               rows, 'No servers are connected.')}
