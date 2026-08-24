@@ -82,13 +82,13 @@ function upsertWorkspace(db, { originNodeId, body, originTs, receivedAt }) {
   return true;
 }
 
-function upsertDevice(db, { originNodeId, body, originTs, receivedAt }) {
+function upsertDevice(db, { originNodeId, body, originTs, receivedAt, edgeId }) {
   if (!body || !body.id) return false;
   db.prepare(`
     INSERT INTO mesh_mirror_devices
       (origin_node_id, device_id, name, status, last_heartbeat, body, origin_ts, received_at,
-       first_seen_at, workspace_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       first_seen_at, workspace_id, edge_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(origin_node_id, device_id) DO UPDATE SET
       name           = excluded.name,
       workspace_id   = excluded.workspace_id,
@@ -97,6 +97,7 @@ function upsertDevice(db, { originNodeId, body, originTs, receivedAt }) {
       body           = excluded.body,
       origin_ts      = excluded.origin_ts,
       received_at    = excluded.received_at,
+      edge_id        = excluded.edge_id,
       -- A device that reports again is not deleted, whatever a stale tombstone said.
       deleted_at     = NULL
       -- ⚠️ first_seen_at is deliberately ABSENT from this SET list, which is what makes it mean
@@ -107,7 +108,7 @@ function upsertDevice(db, { originNodeId, body, originTs, receivedAt }) {
       -- drop the whole existing fleet out of the first report anybody ran.
   `).run(originNodeId, body.id, body.name ?? null, body.status ?? null,
          body.last_heartbeat ?? null, JSON.stringify(body), originTs ?? null, receivedAt,
-         receivedAt, body.workspace_id ?? null);
+         receivedAt, body.workspace_id ?? null, edgeId ?? null);
   return true;
 }
 
@@ -167,8 +168,14 @@ function recordWriteOffer(db, edge, ctx) {
     at: ctx.receivedAt,
   };
   const empty = !offer.categories.length || !offer.workspaces.length;
-  db.prepare('UPDATE mesh_edges SET peer_write_offer = ? WHERE id = ?')
-    .run(empty ? null : JSON.stringify(offer), edge.id);
+  /*
+   * ⚠️ Recorded SEPARATELY from the write offer, and not cleared with it. A child may consent to
+   * its data travelling further up while granting no write at all — the two are unrelated
+   * decisions, and folding them together would silently revoke one by changing the other.
+   */
+  const sharesUpward = b.shareUpward === true ? 1 : 0;
+  db.prepare('UPDATE mesh_edges SET peer_write_offer = ?, peer_shares_upward = ? WHERE id = ?')
+    .run(empty ? null : JSON.stringify(offer), sharesUpward, edge.id);
   return true;
 }
 

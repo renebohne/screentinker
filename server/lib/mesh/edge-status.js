@@ -82,6 +82,12 @@ function consentView(edge, now) {
      * operator the truth about who can change their screens.
      */
     parentCanControlThisNode: writeCategories.length > 0 && writeWorkspaces.length > 0,
+    /*
+     * ⚠️ A separate answer from the write grant, and reported separately. It concerns a server this
+     * operator has no relationship with — whoever their parent reports to — so folding it into
+     * "can this hub control me" would hide the one consent that reaches a stranger.
+     */
+    shareUpward: Number(edge.share_upward) === 1,
     writeGrant: writeCategories,
     writeGrantExplained: grants.describeGrant(writeCategories),
     writeWorkspaces: writeWorkspaces,

@@ -394,6 +394,7 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
             writeBytesBudget: view.writeBytesBudget ?? null,
             writeBytesUsed: view.writeBytesUsed ?? 0,
             writeBytesRemaining: view.writeBytesRemaining ?? 0,
+            shareUpward: !!view.shareUpward,
           };
         })(),
       })),
@@ -709,6 +710,35 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
    * activity_log has no column for "which peer" — the alternative was a schema change to answer a
    * question the text already answers. Bounded and read-only.
    */
+  /*
+   * ⚠️ MAY THIS PARENT PASS WHAT WE SEND IT FURTHER UP?
+   *
+   * A separate decision from every other one on this page, and it has to be, because it is the only
+   * one that concerns a server this operator has no relationship with. Sharing with an MSP is a
+   * choice about the MSP; sharing with whoever the MSP reports to is a choice about a stranger, and
+   * collapsing them would mean agreeing to the second by making the first.
+   *
+   * Nothing infers it and nothing else sets it: absent means no, so every link made before relaying
+   * existed stays one hop until somebody says otherwise. Revocable the same way — set it false and
+   * the parent stops including this node's screens in its own reports on the next tick.
+   */
+  router.put('/uplink/:id/share-upward', requireAuth, requireCanShareSomething(db), (req, res) => {
+    const edge = db.prepare("SELECT * FROM mesh_edges WHERE id = ? AND direction = 'up'").get(req.params.id);
+    if (!edge) return res.status(404).json({ error: 'No such connection.' });
+    const allow = req.body && req.body.allow === true;
+    db.prepare('UPDATE mesh_edges SET share_upward = ? WHERE id = ?').run(allow ? 1 : 0, edge.id);
+    if (typeof onUplinkChanged === 'function') onUplinkChanged();
+    res.json({
+      ok: true,
+      shareUpward: allow,
+      note: allow
+        ? 'That server may now include your screens in the reports it sends to its own parent. ' +
+          'They will see what you already share here, attributed to this server.'
+        : 'That server will stop including your screens in its own reports. Anything it has ' +
+          'already passed on stays with whoever received it until they purge it.',
+    });
+  });
+
   router.get('/uplink/:id/activity', requireAuth, requireCanShareSomething(db), (req, res) => {
     const edge = db.prepare("SELECT * FROM mesh_edges WHERE id = ? AND direction = 'up'").get(req.params.id);
     if (!edge) return res.status(404).json({ error: 'No such connection.' });

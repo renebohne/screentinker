@@ -336,6 +336,22 @@ class Uplink extends EventEmitter {
         body_version: env.body_version,
         origin_ts: env.origin_ts,
         origin_node_id: env.origin_node_id,
+        /*
+         * ⚠️ THE ITEM'S OWN CHAIN, AND LEAVING IT OUT MADE RELAYING IMPOSSIBLE.
+         *
+         * This copied a fixed set of fields and ancestry was not one of them, so createBatch — which
+         * carries per-item ancestry precisely so a relayed item can be attested, and says so in its
+         * own comment — never received the field to carry. Every item arrived with an origin and no
+         * path, and the receiver refused it with "a node may only report data from its own subtree".
+         *
+         * Which was the CORRECT refusal: an item claiming an origin it cannot prove a path to is
+         * exactly what that check exists to stop. The bug was that an honest relay could not prove
+         * it either, because the proof was dropped one layer below the code written to send it.
+         *
+         * Costs nothing for the ordinary case: createBatch omits both fields when the item's origin
+         * matches the batch's, which is every item a node reports about itself.
+         */
+        ancestry: env.ancestry,
         body: env.body,
       });
       bytes += size;

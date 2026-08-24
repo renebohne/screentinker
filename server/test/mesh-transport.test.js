@@ -931,3 +931,71 @@ test('the screenshot path is not reachable by traversal', () => {
     assert.equal(readProxy.authorize({}, bad, 'GET', ['display-capture']).ok, false, bad);
   }
 });
+
+/*
+ * ⚠️ A BATCHED ITEM MUST CARRY ITS OWN ANCESTRY, OR RELAYING IS IMPOSSIBLE.
+ *
+ * createBatch has always carried per-item ancestry — with a comment saying it exists precisely so a
+ * relayed item can be attested, and that without it such an item is refused. sendMany then copied
+ * items into the batch field by field and ancestry was not one of the fields, so the code written to
+ * carry the proof never received it.
+ *
+ * The receiver's refusal was CORRECT: an item claiming an origin it cannot prove a path to is
+ * exactly what that check exists to stop. The bug was that an honest relay could not prove it
+ * either, because the proof was dropped a layer below the code that sends it. Nothing caught it,
+ * because nothing had ever relayed anything: the field was written for a feature that did not exist
+ * yet, and was broken by the time it did.
+ *
+ * Found by watching a three-node mesh refuse a screen: B sent ancestry [C,B] and A logged
+ * `ancestry=undefined` for the same item.
+ */
+test('⚠️ sendMany preserves a relayed item\'s ancestry through batching', () => {
+  const sent = [];
+  /*
+   * ⚠️ The double provides timeout(), because the real emit path is `socket.timeout(ms).emit(...)`.
+   * Without it the call throws, _emit's try/catch swallows it, and the test simply sees nothing
+   * sent — a stub simpler than its collaborator, which is the trap this codebase keeps falling into.
+   */
+  const sock = {
+    on() {}, disconnect() {},
+    emit(ev, payload) { sent.push({ ev, payload }); },
+    timeout() { return { emit(ev, payload) { sent.push({ ev, payload }); } }; },
+  };
+  const link = new Uplink({
+    parentUrl: 'http://127.0.0.1:9', edgeToken: 't', nodeId: 'node-B',
+    connect: () => sock, logger: { log() {}, warn() {} },
+  });
+  link.socket = sock;
+  link.connected = true;
+  // Announce batching the way a parent's hello does, so sendMany takes the batch path.
+  link.parentCapabilities = { supports: ['batch-v1'], encodings: [], maxBatchItems: 100, maxBatchBytes: 512 * 1024 };
+
+  const own = envelope.createEnvelope({
+    originNodeId: 'node-B', type: 'device-summary', bodyVersion: 1,
+    ancestry: ['node-B'], originTs: Date.now(), body: { id: 'mine' },
+  });
+  const relayed = envelope.createEnvelope({
+    originNodeId: 'node-C', type: 'device-summary', bodyVersion: 1,
+    ancestry: ['node-C', 'node-B'], originTs: Date.now(), body: { id: 'theirs' },
+  });
+
+  link.sendMany([own, relayed], { nodeId: 'node-B', ancestry: ['node-B'] });
+
+  const batch = sent.map((x) => x.payload).find((p) => p && p.type === 'batch');
+  assert.ok(batch, 'the items should have gone out as a batch');
+  const items = envelope.batchItems(batch);
+  assert.equal(items.length, 2);
+
+  const theirs = items.find((i) => i.body && i.body.id === 'theirs');
+  assert.equal(theirs.origin_node_id, 'node-C');
+  assert.deepEqual(theirs.ancestry, ['node-C', 'node-B'],
+    'without this the receiver cannot attest the item and refuses it — correctly');
+
+  /*
+   * ⚠️ And the ordinary case stays cheap: an item whose origin matches the batch carries neither
+   * field. Repeating them 400 times is most of what batching was for.
+   */
+  const mine = items.find((i) => i.body && i.body.id === 'mine');
+  assert.equal(mine.origin_node_id, undefined);
+  assert.equal(mine.ancestry, undefined);
+});

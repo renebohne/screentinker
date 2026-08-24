@@ -70,6 +70,21 @@ const FIELD_CATEGORY = Object.freeze({
   screen_height: 'display',
   attached_display: 'display',
   video_mode: 'display',
+  /*
+   * ⚠️ WHAT THE PANEL CAN ACTUALLY DO, and it travelled nowhere until now — not in the mirror, not
+   * even over the live read proxy, because a field in no category is a field that never moves.
+   *
+   * That was survivable while a hub could only look. It stopped being survivable when a hub could
+   * COMMAND: an operator can now ask a customer's screen to reboot or change its volume, and
+   * without this they cannot see which of those the panel supports. They pick from a list of
+   * everything, the child refuses with 'unsupported', and the refusal reads as a fault. The whole
+   * point of the capability mechanism is that a command fails loudly BEFORE it is sent.
+   *
+   * Filed under `display` rather than a category of its own: it describes the screen, it is the
+   * same kind of fact as its resolution and orientation, and a customer who shared "display"
+   * already agreed to say what their screen is.
+   */
+  capabilities: 'display',
   screenshot_url: 'display-capture',
 
   // content

@@ -805,6 +805,14 @@ const migrations = [
    * the hub's UI can offer the right controls instead of making an operator guess. NULL means "no
    * offer, or an offer that grants nothing", and those are the same thing to a renderer. */
   'ALTER TABLE mesh_edges ADD COLUMN peer_write_offer TEXT',
+  /* Whether this node's operator agreed that the parent on this edge may include what we report in
+   * ITS OWN reports further up. Set on an UP edge by the child's operator; announced to the parent
+   * so it knows, and mirrored onto the parent's DOWN edge as peer_shares_upward.
+   * ⚠️ Defaults to 0 — absent means no. A relationship formed before relaying existed never agreed
+   * to its data crossing a second hop, and inferring that consent is exactly what this design
+   * refuses to do. */
+  'ALTER TABLE mesh_edges ADD COLUMN share_upward INTEGER NOT NULL DEFAULT 0',
+  'ALTER TABLE mesh_edges ADD COLUMN peer_shares_upward INTEGER NOT NULL DEFAULT 0',
 
   /* WHICH of this server's workspaces travel up this edge. JSON array of workspace ids, or NULL.
    *
@@ -1188,6 +1196,14 @@ const migrations = [
      deleted_at      INTEGER,
      PRIMARY KEY (origin_node_id, device_id)
    )`,
+  /* Which edge this row arrived on. ⚠️ AFTER the CREATE above — an ALTER placed with the other
+   * mesh_edges alters runs before the table exists, fails as a benign "no such table", and the
+   * column silently never arrives (that exact mistake cost an hour earlier today).
+   *
+   * Needed because a relayed row's ORIGIN is a node this hub has no edge to. Visibility is resolved
+   * from the edge a row came in on, so without this a screen relayed from two hops down is stored
+   * correctly and then filtered out of every view — present in the database, absent from the page. */
+  'ALTER TABLE mesh_mirror_devices ADD COLUMN edge_id TEXT',
   /* ⚠️ WHEN THIS HUB FIRST SAW THE SCREEN, which received_at cannot answer — the row is upserted, so
    * received_at is always the LATEST report. Without a first-seen the uptime report has to assume
    * every screen existed for the whole reporting window, which scores a screen installed on the 20th

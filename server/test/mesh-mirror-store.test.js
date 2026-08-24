@@ -47,7 +47,10 @@ function freshDb() {
       write_bytes_budget INTEGER,
       write_bytes_used INTEGER NOT NULL DEFAULT 0,
       -- What a child announced this hub may do to it. Advisory — see mirror-store.recordWriteOffer.
-      peer_write_offer TEXT);
+      peer_write_offer TEXT,
+      -- Whether the peer agreed its data may travel a second hop, and whether we agreed ours may.
+      share_upward INTEGER NOT NULL DEFAULT 0,
+      peer_shares_upward INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE mesh_mirror_nodes (
       origin_node_id TEXT PRIMARY KEY, via_edge_id TEXT NOT NULL, node_version TEXT,
       device_count INTEGER, devices_online INTEGER, origin_ts INTEGER,
@@ -57,6 +60,9 @@ function freshDb() {
       last_heartbeat INTEGER, body TEXT NOT NULL DEFAULT '{}', origin_ts INTEGER,
       received_at INTEGER NOT NULL, deleted_at INTEGER, first_seen_at INTEGER,
       workspace_id TEXT,
+      -- Which edge the row arrived on. Relayed rows originate at a node this hub has no edge to,
+      -- so visibility is resolved from the edge rather than the origin.
+      edge_id TEXT,
       PRIMARY KEY (origin_node_id, device_id));
     CREATE TABLE mesh_mirror_workspaces (
       origin_node_id TEXT NOT NULL, workspace_id TEXT NOT NULL, name TEXT,

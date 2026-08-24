@@ -905,6 +905,22 @@ function writeGrantBlock(u, caps) {
       <!-- ⚠️ ON THE SAME PANEL AS THE GRANT, because "what did they do with it" is the second
            question every operator asks and there was nowhere to ask it. Collapsed by default: it
            is a record to consult, not a thing to read every visit. -->
+      <!-- ⚠️ ITS OWN CONTROL, not folded into the write grant. This is the only consent on this page
+           that concerns a server the operator has no relationship with — whoever their parent
+           reports to — and agreeing to it by agreeing to something else is exactly how a consent
+           screen stops being true. -->
+      <label style="display:flex;gap:8px;align-items:flex-start;margin-top:10px;font-size:13px">
+        <input type="checkbox" data-shareup="${esc(u.edgeId)}" ${u.shareUpward ? 'checked' : ''}
+               style="margin-top:3px">
+        <span>
+          <strong>Let this server pass your screens further up</strong><br>
+          <span style="color:var(--text-muted);font-size:12px">
+            If they report to a server of their own, yours will appear there too — showing what you
+            already share here, attributed to this server. Off by default.
+          </span>
+        </span>
+      </label>
+
       <!-- ⚠️ Next to the budget, because "18 GB of 20 GB used" is only actionable if the operator
            can see what the 18 GB IS. Without this the allowance could only go up in practice,
            however correctly the refund worked. -->
@@ -1082,6 +1098,19 @@ async function renderConnect(panel, caps) {
    * Loaded on first open rather than with the page: most visits never open it, and a customer with
    * a busy hub should not pay for a query they did not ask for on every render.
    */
+  panel.querySelectorAll('[data-shareup]').forEach((cb) => {
+    cb.addEventListener('change', async () => {
+      try {
+        const r = await api.put(`/mesh/uplink/${encodeURIComponent(cb.dataset.shareup)}/share-upward`,
+                                { allow: cb.checked });
+        showToast(r.note || 'Saved.');
+      } catch (e) {
+        cb.checked = !cb.checked;   // put it back: the server did not accept it
+        showToast(e.message, 'error');
+      }
+    });
+  });
+
   panel.querySelectorAll('.mesh-stored').forEach((box) => {
     box.addEventListener('toggle', async () => {
       if (!box.open || box.dataset.loaded) return;

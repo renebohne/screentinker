@@ -125,9 +125,38 @@ module.exports = function meshRoutes(db, { requireAuth }) {
      * mean a node paired before anybody organised it into clients is silently readable by every
      * technician — and "we hadn't got round to filing it yet" is not a defence in a security review.
      */
-    return edges
+    const direct = edges
       .filter((e) => (e.client_id ? allowed.has(e.client_id) : user && user.role === 'platform_admin'))
       .map((e) => e.peer_node_id);
+
+    /*
+     * ⚠️ NODES BELOW A VISIBLE ONE ARE VISIBLE TOO — otherwise a relayed screen is stored correctly
+     * and then filtered out of every view, which reads as the relay not working at all.
+     *
+     * A relayed row's ORIGIN is a node this hub has no edge to, so visibility cannot be resolved
+     * from the origin. It is resolved from the EDGE the row arrived on: if you may see the node
+     * that relayed it, you may see what it relayed, because that is the same client's estate one
+     * level further down.
+     *
+     * ⚠️ It does NOT widen who may see anything. The relayed row only exists because the node at
+     * the bottom consented to its data travelling a second hop, and it is filed under the same
+     * client as the node that carried it — so a technician sees exactly the clients they were named
+     * on, in more depth, and never a client they were not.
+     */
+    const visibleEdgeIds = new Set(
+      db.prepare("SELECT id, client_id FROM mesh_edges WHERE direction = 'down' AND revoked_at IS NULL")
+        .all()
+        .filter((e) => (e.client_id ? allowed.has(e.client_id) : user && user.role === 'platform_admin'))
+        .map((e) => e.id),
+    );
+    let relayed = [];
+    try {
+      relayed = db.prepare(
+        'SELECT DISTINCT origin_node_id, edge_id FROM mesh_mirror_devices WHERE edge_id IS NOT NULL',
+      ).all().filter((r) => visibleEdgeIds.has(r.edge_id)).map((r) => r.origin_node_id);
+    } catch (e) { relayed = []; }
+
+    return [...new Set([...direct, ...relayed])];
   }
 
   const edgeFor = (nodeId) => db.prepare(
@@ -333,9 +362,21 @@ module.exports = function meshRoutes(db, { requireAuth }) {
     const rows = db.prepare(q.sql).all(...q.params);
     const total = db.prepare(q.countSql).get(...q.countParams).c;
     const edges = new Map(ids.map((id) => [id, edgeFor(id)]));
+    /*
+     * ⚠️ A RELAYED SCREEN HAS NO DIRECT EDGE, and reading freshness from a missing one made it
+     * STALE — a live screen two hops down displayed as unreachable, which is worse than not showing
+     * it at all: an operator would go and investigate a site that is working.
+     *
+     * Its liveness belongs to the link it actually arrives over, which is the edge to the node that
+     * relayed it. If that link is healthy the reports are current; if it drops, everything beneath
+     * it goes stale together, which is exactly the truth.
+     */
+    const edgeById = new Map(
+      db.prepare("SELECT * FROM mesh_edges WHERE direction = 'down'").all().map((e) => [e.id, e]),
+    );
 
     const devices = rows.map((r) => {
-      const edge = edges.get(r.origin_node_id);
+      const edge = edges.get(r.origin_node_id) || edgeById.get(r.edge_id);
       const view = hubView.withAsOf(hubView.deviceStatus(r, edge, now), now);
       let body = {};
       try { body = JSON.parse(r.body || '{}'); } catch (e) { body = {}; }
@@ -345,6 +386,13 @@ module.exports = function meshRoutes(db, { requireAuth }) {
         // ("Lobby (Acme)") breaks sort and search for every row at once, and it is the sort of thing
         // that is very hard to undo once a customer has learned to read it.
         originNodeId: r.origin_node_id,
+        /*
+         * ⚠️ WHICH SERVER IT CAME THROUGH, when that is not the same as where it lives. Without it
+         * a three-tier estate is a flat list and an operator cannot tell which of their servers to
+         * ask about a screen — the first question anybody has about a row they cannot reach.
+         */
+        ...(edge && edge.peer_node_id !== r.origin_node_id
+          ? { relayedVia: edge.peer_node_id, relayedViaName: edge.peer_name || null } : {}),
         name: r.name,
         ...view,
         body,

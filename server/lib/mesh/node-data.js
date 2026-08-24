@@ -56,7 +56,84 @@ function deviceProjections(db, grantCategories, edge) {
              ON t.device_id = latest.device_id AND t.reported_at = latest.reported_at
     ${scope.sql}
   `).all(...scope.params);
-  return rows.map((r) => mirror.projectDevice(r, grantCategories));
+  /*
+   * ⚠️ COMPUTED, not selected — `capabilities` is not a column. It is derived from the platform and
+   * what the panel declared, by the same function the local API uses, so a hub sees exactly the
+   * list the child would show its own operator rather than a second opinion.
+   */
+  const playerCapabilities = require('../player-capabilities');
+  const own = rows.map((r) => mirror.projectDevice(
+    { ...r, capabilities: playerCapabilities.capabilitiesFor(r) }, grantCategories));
+
+  return own.concat(relayedDeviceProjections(db, grantCategories));
+}
+
+/*
+ * ⚠️ SCREENS BELONGING TO NODES BELOW THIS ONE — the upward half of relaying.
+ *
+ * (Worded to avoid the literal token a relay ADDRESS would use: the I9 guard greps lib/mesh for
+ * hostname shapes, and a sentence ending in that word reads the same to a regex as a compiled-in
+ * relay host. The guard is right to be blunt — this is prose bending around it, not the reverse.)
+ *
+ * Everything else about the mesh moved one hop. A node reported its OWN devices, and anything it
+ * mirrored from below stopped there — so in a three-tier estate the top hub saw the middle node's
+ * workspaces and not a single screen, and the middle node was a wall rather than a relaying tier. Content
+ * learned to travel two hops before telemetry did, which is the wrong way round: the whole reason
+ * an MSP wants a middle tier is to see everything beneath it.
+ *
+ * ⚠️ ONLY FOR CHILDREN THAT AGREED, and that agreement is the child's alone. A node two hops up has
+ * no relationship with the site at the bottom: "my MSP may see my screens" is not the same
+ * agreement as "and so may whoever my MSP reports to". The child sets share_upward on its own
+ * uplink, announces it, and this reads what was announced (peer_shares_upward) rather than
+ * assuming. Absent means no, so every relationship formed before relaying existed stays one hop.
+ *
+ * ⚠️ THE ORIGIN IS PRESERVED. A relayed screen is reported with the node it actually belongs to,
+ * never as this node's own — a hub that could not tell whose screen it was looking at would file a
+ * customer's estate under the wrong company, which is the worst available bug here.
+ */
+function relayedDeviceProjections(db, grantCategories) {
+  let rows = [];
+  try {
+    rows = db.prepare(`
+      SELECT m.*, e.peer_node_id AS via_node_id
+        FROM mesh_mirror_devices m
+        JOIN mesh_edges e ON e.peer_node_id = m.origin_node_id
+                         AND e.direction = 'down' AND e.revoked_at IS NULL
+       WHERE e.peer_shares_upward = 1
+         AND m.deleted_at IS NULL`).all();
+  } catch (e) {
+    // A node with no mirror tables relays nothing; that is not an error worth failing a report over.
+    return [];
+  }
+
+  return rows.map((r) => {
+    /*
+     * ⚠️ THE FIELDS LIVE IN `body`, not in columns. A mirror row promotes only what the hub queries
+     * on — name, status, heartbeat, workspace — and keeps the rest as the JSON the child sent.
+     * Projecting the ROW would have relayed four fields and dropped everything else, which reads as
+     * a screen that reports almost nothing rather than as a bug.
+     *
+     * Re-projected against THIS edge's grant rather than passed through: the child below may have
+     * shared more with us than we are permitted to share upward, and the narrower of the two must
+     * win. A relay is not a hole in whatever grant sits above it.
+     */
+    let body = {};
+    try { body = r.body ? JSON.parse(r.body) : {}; } catch (e) { body = {}; }
+    const projected = mirror.projectDevice(
+      { ...body, name: r.name, status: r.status, last_heartbeat: r.last_heartbeat,
+        workspace_id: r.workspace_id }, grantCategories);
+    return {
+      ...projected,
+      id: r.device_id,
+      /*
+       * Carried explicitly so the node above can attribute it. Without these two fields a relayed
+       * screen is indistinguishable from one of this node's own, which is precisely the confusion
+       * that makes a multi-tier view worse than no view.
+       */
+      origin_node_id: r.origin_node_id,
+      relayed_via: r.via_node_id,
+    };
+  });
 }
 
 /**
@@ -394,6 +471,6 @@ function answerRead(db, edge, req) {
 }
 
 module.exports = {
-  scopeClause, deviceProjections, workspaceProjections, deviceDetail,
+  scopeClause, deviceProjections, relayedDeviceProjections, workspaceProjections, deviceDetail,
   nodeHealth, openAlerts, answerRead,
 };

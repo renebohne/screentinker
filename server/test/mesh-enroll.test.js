@@ -43,6 +43,9 @@ function freshDb() {
       write_bytes_budget INTEGER, write_bytes_used INTEGER NOT NULL DEFAULT 0,
       -- What a child announced this hub may do to it (mirror-store.recordWriteOffer). Advisory.
       peer_write_offer TEXT,
+      -- Whether the peer agreed its data may travel a second hop, and whether we agreed ours may.
+      share_upward INTEGER NOT NULL DEFAULT 0,
+      peer_shares_upward INTEGER NOT NULL DEFAULT 0,
       UNIQUE (peer_node_id, direction));
     CREATE TABLE workspaces (id TEXT PRIMARY KEY, organization_id TEXT, name TEXT);
     CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT);

@@ -145,6 +145,25 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
      */
     const writeGrant = store.safeParseArray(edge.write_grant);
     const writeScope = store.safeParseArray(edge.write_scope);
+    /*
+     * ⚠️ A RELAYED SCREEN CARRIES ITS OWN ORIGIN, NOT OURS — and getting this wrong is the worst
+     * available bug in a multi-tier mesh.
+     *
+     * mk() stamps every envelope with THIS node as the origin, which is correct for our own
+     * devices and a lie about somebody else's. Sent that way, the node above files a customer's
+     * screens under the relay: an MSP looking at their top hub sees one company's estate labelled
+     * as another's, and every count, report and alert above that point is attributed to the wrong
+     * party. Measured in the lab before this existed — A showed C's screen as belonging to B.
+     *
+     * The ancestry carries the path with it, which is also what lets the node above know the shape
+     * of what is beneath it rather than just its immediate neighbours.
+     */
+    const mkFor = (originNodeId, type, body) => envelope.createEnvelope({
+      originNodeId, type, bodyVersion: 1,
+      ancestry: originNodeId === me ? [me] : [originNodeId, me],
+      originTs: Date.now(), body,
+    });
+
     const bulk = [
       mk('node-health', nodeHealth(db, me)),
       mk('write-offer', {
@@ -152,10 +171,23 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
         workspaces: writeScope,
         bytesBudget: typeof edge.write_bytes_budget === 'number' ? edge.write_bytes_budget : null,
         bytesUsed: Number(edge.write_bytes_used) || 0,
+        /*
+         * ⚠️ WHETHER THIS PARENT MAY PASS WHAT WE SEND IT FURTHER UP. Travels here because this is
+         * already the message where a child tells a parent what it has consented to — a second
+         * envelope type for one boolean would be a second thing to keep in step.
+         *
+         * The parent cannot infer this and must never assume it: a node two hops above has no
+         * relationship with this one, and "my MSP may see my screens" is not the same agreement as
+         * "and so may whoever my MSP reports to".
+         */
+        shareUpward: Number(edge.share_upward) === 1,
       }),
     ];
     for (const w of workspaceProjections(db, grant, edge)) bulk.push(mk('workspace-summary', w));
-    for (const d of deviceProjections(db, grant, edge)) bulk.push(mk('device-summary', d));
+    for (const d of deviceProjections(db, grant, edge)) {
+      // Ours keep our origin; a relayed one keeps the origin it arrived with.
+      bulk.push(mkFor(d.origin_node_id || me, 'device-summary', d));
+    }
     link.sendMany(bulk, { nodeId: me, ancestry: [me] });
   }
 
