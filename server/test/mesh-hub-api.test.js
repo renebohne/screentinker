@@ -239,9 +239,44 @@ test('⚠️ THE HUB API HAS EXACTLY ONE WRITE ROUTE, AND IT ONLY ASKS (I2)', ()
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'mesh.js'), 'utf8');
   const mutating = [...src.matchAll(/router\.(post|put|patch|delete)\(\s*'([^']+)'/g)]
     .map((m) => `${m[1].toUpperCase()} ${m[2]}`);
-  assert.deepEqual(mutating, ['POST /write/:nodeId'],
-    'the hub API grew a mutating route. There is exactly one, it proxies to the child, and the ' +
-    'child decides — anything else here would be a hub acting on its own authority.');
+
+  /*
+   * ⚠️ WIDENED ONCE, ON PURPOSE, AND THE PROPERTY IS UNCHANGED.
+   *
+   * This used to read `deepEqual(mutating, ['POST /write/:nodeId'])`. The property it exists to
+   * protect is that the hub may ASK a child to change and never decides for it — not that this
+   * file contains exactly one mutating route. Those coincided until client administration landed.
+   *
+   * The routes below mutate only THIS hub's own bookkeeping: which customers exist, which of this
+   * hub's staff may act on them, and which client a linked server belongs to. None of them reach a
+   * child, none can change a screen, and every one was needed because canWriteToNode resolves a
+   * role through mesh_clients / mesh_client_access and NOTHING in the codebase could create a row
+   * in either — the permission model had no way to grant permission, so the write path was
+   * unreachable by every user on every install.
+   *
+   * It stays an explicit list rather than a pattern: a new mutating route here must still be
+   * argued for, and the one that proxies to the child is still the only one that leaves this node.
+   */
+  const HUB_LOCAL_ADMIN = [
+    'POST /clients',                 // create a customer record
+    'PUT /nodes/:nodeId/client',     // file a linked server under one
+    'PUT /clients/:id/access',       // name one of THIS hub's staff on it
+  ];
+  assert.deepEqual(mutating, [...HUB_LOCAL_ADMIN, 'POST /write/:nodeId'],
+    'the hub API grew a mutating route. Exactly one reaches a child, it only asks, and the child ' +
+    'decides; the rest may touch nothing but this hub\'s own records.');
+
+  /*
+   * And the local ones must stay local: none may reach the child transport. If one ever needs to,
+   * it belongs behind the write route with the child's grant checked, not here.
+   */
+  for (const route of HUB_LOCAL_ADMIN) {
+    const name = route.split(' ')[1];
+    const body = src.slice(src.indexOf(`'${name}'`));
+    const end = body.indexOf('\n  router.');
+    assert.ok(!/__meshWriteTo|__meshReadFrom/.test(end === -1 ? body : body.slice(0, end)),
+      `${route} must not touch the mesh transport — it is hub-local bookkeeping`);
+  }
 
   /*
    * ...and it must not do its own allowlisting. A second copy of the child's list would drift, and

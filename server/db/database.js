@@ -1016,10 +1016,15 @@ const migrations = [
   `CREATE TABLE IF NOT EXISTS mesh_client_access (
      client_id  TEXT    NOT NULL,
      user_id    TEXT    NOT NULL,
-     -- Per-client role. ⚠️ NOT a read/write split: a hub cannot write to a client's screens at all
-     -- in 2.0 (I2), so the axis that differs is control of the RELATIONSHIP — 'viewer' sees the
-     -- client's mirrored data, 'manager' can also change retention, rotate tokens, disenroll, and
-     -- move nodes between clients. See server/lib/mesh/client-roles.js.
+     -- Per-client role. Two axes now, and they are kept separate on purpose: control of the
+     -- RELATIONSHIP ('viewer' sees mirrored data; 'manager' also changes retention, rotates
+     -- tokens, disenrolls, moves nodes between clients) and the ability to ACT on the client's
+     -- estate ('publisher' — push content, command devices).
+     -- ⚠️ This comment used to say a hub cannot write to a client's screens at all in 2.0. That
+     -- was true when the table was written and stopped being true when write landed; I2 now reads
+     -- "the child is the last word" rather than "upward only". Whatever this column says, the
+     -- decision is still the CHILD's — this role only decides which of THIS hub's staff may ask.
+     -- See server/lib/mesh/client-roles.js.
      role       TEXT    NOT NULL DEFAULT 'viewer',
      granted_at INTEGER NOT NULL,
      granted_by TEXT,

@@ -506,6 +506,106 @@ module.exports = function meshRoutes(db, { requireAuth }) {
    * rather than applying twice. Minting a fresh id on retry would defeat that entirely, which is
    * why it is generated per request body and echoed back in the response.
    */
+  /*
+   * ⚠️ CLIENTS, AND WHO MAY ACT ON THEM. WITHOUT THESE ROUTES THE WRITE PATH CANNOT BE REACHED.
+   *
+   * canWriteToNode resolves a role through mesh_clients / mesh_client_access, and nothing in the
+   * codebase ever created a row in either table — no route, no migration, no enrolment path. So
+   * the check could never pass, for anybody, on any install: the transport, the opId machinery and
+   * the whole 403/504/503 triad were unreachable behind a permission model with no way to grant
+   * permission. A capability that cannot be granted is a capability that does not exist.
+   *
+   * Deliberately platform-staff only. Deciding which of YOUR technicians may change a customer's
+   * screens is an instance-owner decision, not a per-client one — a manager who could name
+   * themselves publisher would defeat the direct-access rule that keeps write from inheriting down
+   * the client tree.
+   */
+  function requirePlatformStaff(req, res, next) {
+    if (!req.user || (req.user.role !== 'platform_admin' && req.user.role !== 'platform_operator')) {
+      return res.status(403).json({ error: "Only this platform's staff can manage client access." });
+    }
+    return next();
+  }
+
+  router.get('/clients', requireAuth, (req, res) => {
+    const visible = visibleClientIds(req.user);
+    const rows = db.prepare(`SELECT id, name, parent_client_id, created_at FROM mesh_clients
+                              ORDER BY name COLLATE NOCASE`).all()
+      .filter((c) => visible.has(c.id));
+    const access = db.prepare(`SELECT client_id, user_id, role FROM mesh_client_access`).all();
+    const users = db.prepare('SELECT id, email, name FROM users').all();
+    const byId = new Map(users.map((u) => [u.id, u]));
+    res.json(rows.map((c) => ({
+      ...c,
+      nodes: db.prepare('SELECT peer_node_id FROM mesh_edges WHERE client_id = ? AND direction = ?')
+        .all(c.id, 'down').map((e) => e.peer_node_id),
+      access: access.filter((a) => a.client_id === c.id).map((a) => ({
+        user_id: a.user_id, role: a.role,
+        email: (byId.get(a.user_id) || {}).email || null,
+        name: (byId.get(a.user_id) || {}).name || null,
+      })),
+    })));
+  });
+
+  router.post('/clients', requireAuth, requirePlatformStaff, (req, res) => {
+    const name = String((req.body && req.body.name) || '').trim();
+    if (!name) return res.status(400).json({ error: 'A client needs a name.' });
+    const parent = (req.body && req.body.parent_client_id) || null;
+    if (parent && !db.prepare('SELECT 1 FROM mesh_clients WHERE id = ?').get(parent)) {
+      return res.status(400).json({ error: 'That parent client does not exist.' });
+    }
+    const id = require('crypto').randomUUID();
+    db.prepare(`INSERT INTO mesh_clients (id, name, parent_client_id, created_at)
+                VALUES (?,?,?,strftime('%s','now'))`).run(id, name, parent);
+    res.status(201).json({ id, name, parent_client_id: parent });
+  });
+
+  /*
+   * Assign a linked server to a client. Until a node has a client it is visible to platform staff
+   * and writable by nobody — which is the right default: an unassigned customer is one nobody has
+   * been made responsible for yet.
+   */
+  router.put('/nodes/:nodeId/client', requireAuth, requirePlatformStaff, (req, res) => {
+    const edge = db.prepare('SELECT id FROM mesh_edges WHERE peer_node_id = ? AND direction = ?')
+      .get(req.params.nodeId, 'down');
+    if (!edge) return res.status(404).json({ error: 'No such server.' });
+    const clientId = (req.body && req.body.client_id) || null;
+    if (clientId && !db.prepare('SELECT 1 FROM mesh_clients WHERE id = ?').get(clientId)) {
+      return res.status(400).json({ error: 'That client does not exist.' });
+    }
+    db.prepare('UPDATE mesh_edges SET client_id = ? WHERE id = ?').run(clientId, edge.id);
+    res.json({ ok: true, node_id: req.params.nodeId, client_id: clientId });
+  });
+
+  router.put('/clients/:id/access', requireAuth, requirePlatformStaff, (req, res) => {
+    if (!db.prepare('SELECT 1 FROM mesh_clients WHERE id = ?').get(req.params.id)) {
+      return res.status(404).json({ error: 'No such client.' });
+    }
+    const userId = (req.body && req.body.user_id) || null;
+    const role = (req.body && req.body.role) || null;
+    if (!userId || !db.prepare('SELECT 1 FROM users WHERE id = ?').get(userId)) {
+      return res.status(400).json({ error: 'That user does not exist.' });
+    }
+    /*
+     * An empty role REMOVES the access rather than storing a blank one — the same shape as
+     * revoking a write grant with an empty category list, so "take it away" is expressible
+     * without severing anything else.
+     */
+    if (!role) {
+      db.prepare('DELETE FROM mesh_client_access WHERE client_id = ? AND user_id = ?')
+        .run(req.params.id, userId);
+      return res.json({ ok: true, removed: true });
+    }
+    if (!clientRoles.isKnownRole(role)) {
+      return res.status(400).json({ error: `Unknown role. Known roles: ${clientRoles.ROLE_NAMES.join(', ')}.` });
+    }
+    db.prepare(`INSERT INTO mesh_client_access (client_id, user_id, role, granted_at)
+                VALUES (?,?,?,strftime('%s','now'))
+                ON CONFLICT(client_id, user_id) DO UPDATE SET role = excluded.role`)
+      .run(req.params.id, userId, role);
+    res.json({ ok: true, client_id: req.params.id, user_id: userId, role });
+  });
+
   router.post('/write/:nodeId', requireAuth, async (req, res) => {
     const ids = visibleNodeIds(req.user);
     if (!ids.includes(req.params.nodeId)) {

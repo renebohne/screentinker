@@ -54,9 +54,38 @@ function createLocalApply(db, config, deps = {}) {
     return id;
   }
 
+  /*
+   * ⚠️ AND IT NEEDS TO BE A MEMBER, OR EVERY MESH WRITE IS A 403.
+   *
+   * The token is workspace-bound and the middleware forces the platform role to 'user', but
+   * tenancy asks a second question: accessContext() returns null unless the caller has a
+   * workspace_members row, an org role, or is platform staff. The principal had none of those, so
+   * every write this feature exists to perform was refused by the child's own API — the whole
+   * feature inert behind a generic "Access denied", exactly the shape of the constructor bug that
+   * would have made the entire mesh inert behind one warn line.
+   *
+   * Granted per workspace, at the moment a write is authorised for it, and never wider: the
+   * workspace here has already been resolved from THIS node's rows and checked against the
+   * operator's own write_scope. Membership is left in place rather than added and removed around
+   * each request — a half-written pair on a crash is worse than a standing row, the principal has
+   * no password and cannot sign in, and it makes the audit trail read correctly.
+   */
+  function ensureMeshMembership(userId, workspaceId) {
+    const existing = db.prepare(
+      'SELECT 1 AS ok FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
+    ).get(workspaceId, userId);
+    if (existing) return;
+    db.prepare(
+      "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')",
+    ).run(workspaceId, userId);
+  }
+
   return async function applyLocally({ path, method, body, workspaceId, edge }) {
     if (!doFetch) throw new Error('no fetch available to apply the write');
     if (!workspaceId) throw new Error('a write must resolve to a workspace before it is applied');
+
+    const principal = meshPrincipal();
+    ensureMeshMembership(principal, workspaceId);
 
     const secret = TOKEN_PREFIX + crypto.randomBytes(24).toString('hex');
     const hash = crypto.createHash('sha256').update(secret).digest('hex');
@@ -65,11 +94,22 @@ function createLocalApply(db, config, deps = {}) {
     db.prepare(`INSERT INTO api_tokens (id, token_hash, prefix, name, user_id, workspace_id, scope, created_at)
                 VALUES (?,?,?,?,?,?, 'write', strftime('%s','now'))`)
       .run(tokenId, hash, secret.slice(0, 12),
-           `mesh write (${(edge && edge.peer_node_id) || 'peer'})`, meshPrincipal(), workspaceId);
+           `mesh write (${(edge && edge.peer_node_id) || 'peer'})`, principal, workspaceId);
 
     try {
-      const res = await doFetch(`http://127.0.0.1:${config.port}${path}`, {
+      /*
+       * ⚠️ THE ORIGIN COMES FROM THE SERVER, NOT FROM config.port, AND REDIRECTS ARE AN ERROR.
+       *
+       * config.port is the API only when TLS is off; with certs present the API moves to httpsPort
+       * and config.port serves a 301-redirect app. fetch follows redirects by default and rewrites
+       * POST to GET, dropping the body — so the call returned 200 for a request the API never saw,
+       * and applyWrite recorded that invented success and replayed it for ever. `redirect: 'error'`
+       * means a redirect can never again be mistaken for an applied write, whatever the origin.
+       */
+      const origin = deps.apiOrigin || global.__localApiOrigin || `http://127.0.0.1:${config.port}`;
+      const res = await doFetch(`${origin}${path}`, {
         method,
+        redirect: 'error',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${secret}` },
         ...(body === undefined || method === 'DELETE' ? {} : { body: JSON.stringify(body) }),
       });

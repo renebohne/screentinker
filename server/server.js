@@ -1689,6 +1689,37 @@ app.get('*', (req, res) => {
 const listenPort = hasSsl ? config.httpsPort : config.port;
 const protocol = hasSsl ? 'https' : 'http';
 
+/*
+ * ⚠️ WHERE THIS SERVER'S OWN API ACTUALLY ANSWERS, for code that needs to call it.
+ *
+ * A mesh write is applied by re-entering this server's HTTP API over loopback, so that it passes
+ * exactly the guards a local request passes rather than growing a second implementation that
+ * drifts. That executor dialled `config.port` — which is correct only WITHOUT TLS. With certs
+ * present the API moves to httpsPort and config.port becomes a 301-redirect app, and fetch follows
+ * redirects by default while rewriting POST to GET and dropping the body. The call would report
+ * 200 for a request the API never saw: an invented success, recorded as applied and replayed for
+ * ever by idempotency. That is the unawaited-promise bug again, arriving through a different door.
+ *
+ * https://127.0.0.1 is not the answer either — the certificate names a hostname, not the loopback
+ * address, so verification fails, and switching it off to work around that is a worse trade than
+ * the problem. Instead, when TLS is on, the same app also answers plain HTTP on an ephemeral
+ * LOOPBACK-ONLY port. It is bound to 127.0.0.1, so it is reachable only from this machine, and it
+ * still requires a token like every other caller.
+ */
+global.__localApiOrigin = `http://127.0.0.1:${config.port}`;
+
+if (hasSsl) {
+  const loopbackApi = http.createServer(app);
+  loopbackApi.listen(0, '127.0.0.1', () => {
+    global.__localApiOrigin = `http://127.0.0.1:${loopbackApi.address().port}`;
+    console.log(`[mesh] internal loopback API on ${global.__localApiOrigin} (127.0.0.1 only)`);
+  });
+  loopbackApi.on('error', (e) => {
+    // Non-fatal: without it a mesh write cannot be applied, but nothing else on this node cares.
+    console.warn(`[mesh] internal loopback API not started: ${e && e.message}`);
+  });
+}
+
 server.listen(listenPort, '0.0.0.0', () => {
   console.log(`
 ╔══════════════════════════════════════════════════╗

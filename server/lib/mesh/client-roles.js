@@ -150,9 +150,26 @@ function roleAllows(role, action) {
  * @returns {string|null} effective role, or null for no access
  */
 function effectiveRole(accessRow, user) {
-  if (user && user.role === 'platform_admin') return 'manager';
-  if (!accessRow || !isKnownRole(accessRow.role)) return null;
-  return accessRow.role;
+  const named = (accessRow && isKnownRole(accessRow.role)) ? accessRow.role : null;
+
+  /*
+   * ⚠️ manager is the platform_admin FLOOR, not a ceiling — it used to be a ceiling, and that made
+   * the feature unusable by anyone.
+   *
+   * The short-circuit returned 'manager' and stopped, so an explicit publisher row on a
+   * platform_admin was read and discarded. manager.can does not include push-content, so the
+   * instance owner — the one person who cannot be locked out of anything here, per the note above —
+   * was the one person who could never push content to a client. Every user on every stock install
+   * was refused, and not by policy: by an early return.
+   *
+   * Taking the higher of the two keeps what the floor was for (an owner never loses sight of a
+   * client nobody named them on) without capping what an operator deliberately granted.
+   */
+  if (user && user.role === 'platform_admin') {
+    if (named && (ROLES[named].rank > ROLES.manager.rank)) return named;
+    return 'manager';
+  }
+  return named;
 }
 
 /** Convenience: the whole question in one call. */
