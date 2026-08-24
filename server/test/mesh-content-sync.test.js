@@ -341,3 +341,50 @@ test('⚠️ a size sent as a STRING is refused at the commit, not silently skip
   const r = await commitStagedAsset(db, edge, entry, staged, { contentDir, sniff, workspaceId: wsA, userId });
   assert.equal(r.ok, false, 'a size that is not a number is not a size');
 });
+
+/*
+ * ⚠️ THE DISK CHECK NEVER RAN.
+ *
+ * admitTransfer read `deps.freeBytes` and nothing in the tree ever supplied one, so `free` was null
+ * on every real call and the check was skipped entirely — the comment beside it described a guard
+ * that did not exist. The budget is what the operator agreed to give; free space is what the
+ * machine actually has, and on a signage box a full disk takes the screens down with it.
+ */
+test('⚠️ a transfer larger than the free disk is refused, budget notwithstanding', () => {
+  const edge = mkEdge({ budget: 100 * GB });
+  const r = admitTransfer(edge, 50 * GB, {
+    contentDir,
+    freeBytes: () => 2 * GB,             // plenty of allowance, nowhere to put it
+    freeFloorBytes: 1 * GB,
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /does not have room/i);
+});
+
+test('the floor is kept free rather than filled to the last byte', () => {
+  const edge = mkEdge({ budget: 100 * GB });
+  // Exactly enough for the file, but it would leave nothing behind — a signage server with a full
+  // disk cannot write a log, a snapshot, or the next playlist.
+  assert.equal(admitTransfer(edge, 10 * GB, {
+    contentDir, freeBytes: () => 10 * GB, freeFloorBytes: 1 * GB,
+  }).ok, false);
+  assert.equal(admitTransfer(edge, 10 * GB, {
+    contentDir, freeBytes: () => 12 * GB, freeFloorBytes: 1 * GB,
+  }).ok, true);
+});
+
+test('a disk that cannot be measured does not block every transfer', () => {
+  // statfs is unavailable on some platforms this runs on. Refusing everything on a box that cannot
+  // measure its own disk would break the feature for a diagnostic; the budget still bounds it.
+  const edge = mkEdge({ budget: 100 * GB });
+  assert.equal(admitTransfer(edge, 1 * GB, { contentDir, freeBytes: () => null }).ok, true);
+});
+
+test('⚠️ with no freeBytes supplied it measures the real disk rather than skipping the check', () => {
+  // ⚠️ The budget must be BIGGER than the ask, or the budget refuses first and this test passes
+  // while proving nothing about the disk. (It did, on the first attempt.)
+  const edge = mkEdge({ budget: 1e18 });
+  const r = admitTransfer(edge, 900 * 1024 * GB, { contentDir });
+  assert.equal(r.ok, false, 'the default free-space measurement must actually run');
+  assert.match(r.reason, /does not have room/i);
+});

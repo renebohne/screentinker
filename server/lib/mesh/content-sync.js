@@ -17,6 +17,17 @@ const uploadSniff = require('../upload-sniff');
  * is how a PNG gets stored as <sha>.png and announced to the player as video/mp4 — a black frame
  * for the item's whole duration, on every screen in the playlist.
  */
+/** Free bytes on the filesystem holding `dir`, or null when it cannot be measured. */
+function defaultFreeBytes(dir) {
+  if (!dir || typeof fs.statfsSync !== 'function') return null;
+  try {
+    const st = fs.statfsSync(dir);
+    return Number(st.bavail) * Number(st.bsize);
+  } catch (e) {
+    return null;
+  }
+}
+
 function defaultSniff(filePath) {
   let fd = null;
   try {
@@ -219,7 +230,21 @@ function admitTransfer(edge, bytesNeeded, deps = {}) {
    * full disk on a signage server takes the screens down with it.
    */
   const freeFloor = typeof deps.freeFloorBytes === 'number' ? deps.freeFloorBytes : 1024 * 1024 * 1024;
-  const free = typeof deps.freeBytes === 'function' ? deps.freeBytes() : null;
+  /*
+   * ⚠️ DEFAULTED TO A REAL MEASUREMENT. This read `deps.freeBytes` and nothing ever supplied one,
+   * so `free` was null on every real call and the whole disk check was skipped — the comment above
+   * described a guard that never ran. A budget is what the operator agreed to give; free space is
+   * what the machine actually has, and the second can be smaller.
+   *
+   * Measured against the directory the bytes will LAND in, not the process's cwd — on a signage box
+   * the content directory is very often a mounted disk while the root filesystem is a small card,
+   * and checking the wrong one gives a confident answer about the wrong number.
+   *
+   * If the measurement itself fails the check is skipped rather than failing closed: statfs is
+   * unavailable on some platforms this runs on, and refusing every transfer on a box that cannot
+   * measure its own disk would break the feature for a diagnostic. The budget still bounds it.
+   */
+  const free = typeof deps.freeBytes === 'function' ? deps.freeBytes() : defaultFreeBytes(deps.contentDir);
   if (free !== null && free - bytesNeeded < freeFloor) {
     return {
       ok: false,

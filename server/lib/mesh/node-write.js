@@ -206,6 +206,45 @@ async function applyWrite(db, edge, req, deps = {}) {
   }
 
   /*
+   * ⚠️ THE PARENT'S CONTENT IDS ARE NOT THIS NODE'S CONTENT IDS.
+   *
+   * A hub adding an item to a child's playlist sends the content id from ITS OWN library. That id
+   * does not exist here — ids are generated independently on every node — so the child's playlist
+   * route looked it up, found nothing, and answered 404. Nothing anywhere translated between the
+   * two, so this failed even for content that HAD been transferred: the bytes arrived, a local row
+   * was created with a fresh local id, and the hub went on naming its own.
+   *
+   * mesh_content_provenance is exactly this mapping — (origin_node_id, origin_content_id) →
+   * local_content_id — and it was written on receipt and read nowhere.
+   *
+   * ⚠️ The origin is the EDGE's peer, never anything in the body. A parent that could name the
+   * origin node could address another parent's provenance rows and attach that node's content to a
+   * playlist here.
+   *
+   * An id that maps to nothing AND is not already a local row means the bytes were never sent. That
+   * is refused with a reason the operator can act on, rather than the generic refusal: it is not a
+   * permission problem, and telling somebody "not permitted" when the answer is "send the file
+   * first" costs them an afternoon.
+   */
+  if (req.body && typeof req.body === 'object' && typeof req.body.content_id === 'string') {
+    const wanted = req.body.content_id;
+    const localRow = db.prepare('SELECT id FROM content WHERE id = ?').get(wanted);
+    if (!localRow) {
+      const mapped = db.prepare(`SELECT local_content_id FROM mesh_content_provenance
+                                  WHERE origin_node_id = ? AND origin_content_id = ?`)
+        .get(edge.peer_node_id, wanted);
+      if (!mapped) {
+        return {
+          ok: false,
+          reason: 'That content has not been sent to this server yet, so it cannot be added to a ' +
+                  'playlist here. Send the file first, then add the item.',
+        };
+      }
+      req = { ...req, body: { ...req.body, content_id: mapped.local_content_id } };
+    }
+  }
+
+  /*
    * ⚠️ CLAIM THE OPERATION *BEFORE* APPLYING IT, OR THE RETRY THE DESIGN MANDATES DOUBLE-APPLIES.
    *
    * The record used to be written after apply() returned, with nothing in between — so two

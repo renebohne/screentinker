@@ -757,10 +757,35 @@ router.post('/:id/items', requirePlaylistWrite, async (req, res) => {
 
     let content = null;
     if (content_id) {
-      content = db.prepare('SELECT id, workspace_id, duration_sec, mime_type, filepath FROM content WHERE id = ?').get(content_id);
+      content = db.prepare(`SELECT id, workspace_id, duration_sec, mime_type, filepath, remote_url,
+                                   is_active, expires_at
+                              FROM content WHERE id = ?`).get(content_id);
       if (!content) return res.status(404).json({ error: 'Content not found' });
       if (content.workspace_id && content.workspace_id !== req.playlist.workspace_id) {
         return res.status(403).json({ error: 'Content is not in this playlist\'s workspace' });
+      }
+      /*
+       * ⚠️ REFUSED HERE, BECAUSE THE PUBLISHED SNAPSHOT SILENTLY DROPS IT.
+       *
+       * buildSnapshotItems filters out content that is deactivated or past its expiry. This route
+       * only checked that the ROW existed — so adding an expired clip returned 201, publishing
+       * returned 200, and the snapshot came out one item short. The operator is told it worked and
+       * the wall plays something else. A short playlist that publishes successfully IS the silent
+       * failure, and it is worse than an error by exactly the amount nobody notices it.
+       *
+       * Reachable today from the mesh write allowlist too, which is how it surfaced — but it is a
+       * local bug and this is the local fix.
+       */
+      const expired = content.expires_at !== null && content.expires_at !== undefined
+        && Number(content.expires_at) <= Math.floor(Date.now() / 1000);
+      if (content.is_active === 0 || expired) {
+        return res.status(400).json({
+          error: expired
+            ? 'That content has expired, so it would be dropped when the playlist is published. ' +
+              'Extend its expiry first.'
+            : 'That content is deactivated, so it would be dropped when the playlist is published. ' +
+              'Reactivate it first.',
+        });
       }
       // Rows ingested before the probe existed (or while ffprobe was missing) have no stored
       // duration; re-probe once so this add still gets the clip's length, and backfill the row.

@@ -430,3 +430,78 @@ test('⚠️ a parent may never be pointed at the screen the host server itself 
   assert.equal(allowed.ok, true, 'the guard must be about the HOST, not about assignment');
   db.prepare('UPDATE mesh_node SET self_device_id = NULL').run();
 });
+
+/*
+ * ⚠️ THE PARENT'S CONTENT IDS ARE NOT THIS NODE'S CONTENT IDS.
+ *
+ * A hub adding an item sends the content id from ITS OWN library. Ids are generated independently
+ * on every node, so that id does not exist here — the playlist route looked it up, found nothing
+ * and answered 404. Nothing translated between the two, so this failed even for content that HAD
+ * been transferred: the bytes arrived, a local row was created with a fresh local id, and the hub
+ * went on naming its own. mesh_content_provenance is exactly this mapping, and it was written on
+ * receipt and read nowhere.
+ */
+test('⚠️ a content id from the hub is translated to the local row it became', async () => {
+  applied = [];
+  const localContent = id();
+  db.prepare(`INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type, file_size)
+              VALUES (?,?,?,?,?,?,?)`)
+    .run(localContent, userId, wsA, 'Clip.mp4', 'abc.mp4', 'video/mp4', 10);
+
+  const edge = mkEdge(['content-push'], [wsA]);
+  const originId = 'content-id-on-the-hub';
+  db.prepare(`INSERT INTO mesh_content_provenance
+                (origin_node_id, origin_content_id, local_content_id, edge_id, bytes, first_seen_at, last_seen_at)
+              VALUES (?,?,?,?,?,strftime('%s','now'),strftime('%s','now'))`)
+    .run(edge.peer_node_id, originId, localContent, edge.id, 10);
+
+  const r = await applyWrite(db, edge, req({
+    path: `/api/playlists/${plA}/items`, method: 'POST',
+    body: { content_id: originId }, opId: 'op-translate',
+  }), { apply });
+
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(applied[0].body.content_id, localContent,
+    'the executor must be handed the id that exists on THIS node');
+});
+
+test('⚠️ content that was never sent is refused with an ACTIONABLE reason', async () => {
+  applied = [];
+  const edge = mkEdge(['content-push'], [wsA]);
+  const r = await applyWrite(db, edge, req({
+    path: `/api/playlists/${plA}/items`, method: 'POST',
+    body: { content_id: 'never-sent-here' }, opId: 'op-missing-content',
+  }), { apply });
+
+  assert.equal(r.ok, false);
+  assert.equal(applied.length, 0);
+  // Deliberately NOT the generic refusal: this is not a permission problem, and telling somebody
+  // "not permitted" when the answer is "send the file first" costs them an afternoon.
+  assert.match(r.reason, /has not been sent to this server yet/i);
+  assert.notEqual(r.reason, require('../lib/mesh/write-proxy').REFUSED);
+});
+
+test('⚠️ the origin node is the EDGE, never anything in the body', async () => {
+  /*
+   * A parent that could name the origin node could address ANOTHER parent's provenance rows and
+   * attach that node's content to a playlist here.
+   */
+  applied = [];
+  const otherLocal = id();
+  db.prepare(`INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type, file_size)
+              VALUES (?,?,?,?,?,?,?)`)
+    .run(otherLocal, userId, wsA, 'Other.mp4', 'other.mp4', 'video/mp4', 10);
+  const edge = mkEdge(['content-push'], [wsA]);
+  db.prepare(`INSERT INTO mesh_content_provenance
+                (origin_node_id, origin_content_id, local_content_id, edge_id, bytes, first_seen_at, last_seen_at)
+              VALUES ('a-different-hub','shared-oid',?,?,?,strftime('%s','now'),strftime('%s','now'))`)
+    .run(otherLocal, edge.id, 10);
+
+  const r = await applyWrite(db, edge, req({
+    path: `/api/playlists/${plA}/items`, method: 'POST',
+    body: { content_id: 'shared-oid', origin_node_id: 'a-different-hub' }, opId: 'op-cross-origin',
+  }), { apply });
+
+  assert.equal(r.ok, false, "another hub's provenance must not be addressable from this edge");
+  assert.equal(applied.length, 0);
+});
