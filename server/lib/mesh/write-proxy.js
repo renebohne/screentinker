@@ -38,13 +38,55 @@ const WRITABLE = Object.freeze([
 ]);
 
 /*
+ * ⚠️ NORMALISE FIRST, AND SEND WHAT YOU MATCHED. THIS IS THE WHOLE GUARD.
+ *
+ * The allowlist is the entire security boundary of mesh write, and it was defeated by a backslash.
+ * The matcher validated by splitting on '/', so `..\..\..\devices\D1` was ONE segment: it slotted
+ * into :itemId and satisfied `DELETE /api/playlists/:id/items/:itemId`. The executor then handed
+ * that same raw string to fetch(), which builds its request-target from `new URL().pathname` — and
+ * the WHATWG parser turns backslashes into slashes for special schemes and resolves dot segments.
+ * Six segments to the guard, three to the server: the request that arrived was
+ * `DELETE /api/devices/D1`. `%2e%2e` did the same through decoding, turning "delete one item" into
+ * "delete the whole playlist".
+ *
+ * That reached every PUT and DELETE on every token-mounted router — devices, groups, triggers,
+ * folders, and /api/content, which unlinks media from disk. The claim above that nothing here
+ * touches bytes was true of the rules and false of what they permitted.
+ *
+ * The fix is not a longer list of forbidden characters; it is removing the gap between the two
+ * parsers. Resolve the path exactly as the executor will, match THAT, and give the caller back the
+ * resolved form so the request that goes out is the request that was authorised. Anything a
+ * traversal resolves to is then simply a path the allowlist does not contain.
+ */
+function normalizeTarget(raw) {
+  let u;
+  try {
+    /*
+     * The base is only a parser fixture — nothing is ever dialled from here — but it is written as
+     * loopback rather than a placeholder host because the I7 guard asserts that EVERY url in
+     * lib/mesh is loopback, and it is right to: a placeholder that nobody dials today is a
+     * placeholder somebody edits into a real host later. It also happens to be the address the
+     * executor genuinely uses, so the two cannot drift apart.
+     */
+    u = new URL(String(raw || ''), 'http://127.0.0.1');
+  } catch (e) {
+    return null;
+  }
+  if (!u.pathname || !u.pathname.startsWith('/')) return null;
+  return { path: u.pathname, search: u.search || '', full: u.pathname + (u.search || '') };
+}
+
+/*
  * ⚠️ Segment-exact, and copied from read-proxy rather than shared — because the day someone
  * loosens one matcher, the other must not loosen with it. `.` and `..` are refused explicitly:
  * they are legal path segments that satisfy "some non-empty value", which is how a matcher gets
- * walked out of its own rule.
+ * walked out of its own rule. They cannot survive normalisation, and are kept as defence in depth
+ * for any future caller that reaches matchPath with an already-parsed path.
  */
 function matchPath(path, method) {
-  const got = String(path || '').split('?')[0].split('/');
+  const norm = normalizeTarget(path);
+  if (!norm) return null;
+  const got = norm.path.split('/');
   const verb = String(method || '').toUpperCase();
   for (const rule of WRITABLE) {
     if (rule.method !== verb) continue;
@@ -94,7 +136,8 @@ const REFUSED = 'That is not something this connection may change. Write access 
                 "server's operator, per workspace — ask them if you believe it should be allowed.";
 
 function authorizeWrite(edge, path, method, writeGrant, writeScope, workspaceId) {
-  const rule = matchPath(path, method);
+  const norm = normalizeTarget(path);
+  const rule = norm && matchPath(norm.full, method);
   if (!rule) {
     // Same refusal for "no such route" and "not permitted": a parent has no business mapping this
     // server's API surface, and only needs to know the answer is no.
@@ -108,7 +151,11 @@ function authorizeWrite(edge, path, method, writeGrant, writeScope, workspaceId)
      */
     return { ok: false, reason: REFUSED };
   }
-  return { ok: true, rule };
+  /*
+   * ⚠️ `path` comes back NORMALISED, and the executor must send this one rather than what arrived.
+   * Authorising one string and transmitting another is exactly how the backslash bypass worked.
+   */
+  return { ok: true, rule, path: norm.full };
 }
 
-module.exports = { WRITABLE, REFUSED, matchPath, isWritable, authorizeWrite };
+module.exports = { WRITABLE, REFUSED, matchPath, isWritable, authorizeWrite, normalizeTarget };

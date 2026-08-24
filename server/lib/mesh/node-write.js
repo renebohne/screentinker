@@ -59,8 +59,17 @@ function resolveTargetWorkspace(db, path) {
  */
 async function applyWrite(db, edge, req, deps = {}) {
   const now = typeof deps.now === 'function' ? deps.now() : Date.now();
-  const path = req && req.path;
   const method = req && req.method;
+  /*
+   * ⚠️ NORMALISED ONCE, HERE, AND NOTHING BELOW EVER SEES THE RAW STRING AGAIN.
+   *
+   * The allowlist, the target lookup and the outgoing request must all be talking about the same
+   * path. When they were not, a backslash in an item id matched an allowlisted playlist rule and
+   * arrived at the server as DELETE /api/devices/<id> — see write-proxy.normalizeTarget.
+   */
+  const norm = writeProxy.normalizeTarget(req && req.path);
+  const path = norm ? norm.full : null;
+  if (!path) return { ok: false, reason: writeProxy.REFUSED };
 
   /*
    * ⚠️ A DEADLINE, CHECKED BEFORE ANYTHING ELSE. Revocation is "stop future writes", and without a
@@ -149,7 +158,8 @@ async function applyWrite(db, edge, req, deps = {}) {
 
   let result;
   try {
-    result = await apply({ path, method, body: req.body, workspaceId, rule: auth.rule, edge });
+    // ⚠️ auth.path, not `path`: the executor sends precisely the string that was authorised.
+    result = await apply({ path: auth.path, method, body: req.body, workspaceId, rule: auth.rule, edge });
   } catch (e) {
     // Record the refusal too: a retry of a write that genuinely failed must not silently succeed
     // on the second attempt against different state.

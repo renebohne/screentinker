@@ -186,3 +186,127 @@ test('the recorded outcome is the RESOLVED value, not a promise', async () => {
   assert.deepEqual(JSON.parse(row.outcome), { status: 201, result: { id: 'x' } },
     'JSON.stringify of an unawaited promise is "{}" — a recorded outcome that says nothing');
 });
+
+/*
+ * ⚠️ THE ALLOWLIST IS THE WHOLE SECURITY BOUNDARY, AND A BACKSLASH WALKED THROUGH IT.
+ *
+ * The matcher split on '/', so `..\..\..\devices\D1` counted as ONE segment and satisfied
+ * `DELETE /api/playlists/:id/items/:itemId`. The executor handed that same raw string to fetch(),
+ * whose WHATWG parser converts backslashes to slashes and resolves dot segments — so the request
+ * that actually arrived was `DELETE /api/devices/D1`. Six segments to the guard, three to the
+ * server. `%2e%2e` did it through decoding instead, turning "delete one item" into "delete the
+ * whole playlist".
+ *
+ * These assert on the RESOLVED path both ways round: that a traversal no longer matches, and that
+ * what a permitted write sends is byte-identical to what was authorised. The second half matters
+ * as much as the first — the bug was not a missing check, it was two parsers disagreeing.
+ */
+test('⚠️ a traversal hidden in an id cannot reach a route outside the allowlist', async () => {
+  const edge = mkEdge(['content-push', 'device-command'], [wsA, wsB]);
+  const B = String.fromCharCode(92);   // a literal backslash, kept out of the string escaping
+  const escapes = [
+    `/api/playlists/${plA}/items/..${B}..${B}..${B}devices${B}D1`,
+    `/api/playlists/${plA}/items/..%2f..%2f..%2fdevices%2fD1`,
+    `/api/playlists/${plA}/items/%2e%2e`,
+    `/api/playlists/${plA}/items/..`,
+    `/api/playlists/${plA}/items/.${B}.${B}content${B}c1`,
+  ];
+  for (const p of escapes) {
+    for (const method of ['PUT', 'DELETE']) {
+      applied = [];
+      const r = await applyWrite(db, edge, req({ path: p, method }), { apply });
+      assert.equal(r.ok, false, `${method} ${p} must be refused`);
+      assert.equal(applied.length, 0, `${method} ${p} must never reach the executor`);
+    }
+  }
+});
+
+test('⚠️ what the executor sends is exactly what was authorised, resolved', async () => {
+  applied = [];
+  const edge = mkEdge(['content-push'], [wsA]);
+  /*
+   * `/./` resolves AWAY, so this is a real, permitted write whose raw form differs from its
+   * resolved form — the only shape that can catch an executor sending req.path instead of the
+   * authorised path. A payload that merely gets refused proves nothing here, because a refusal
+   * never reaches the executor at all. (My first attempt at this test used a trailing `/./`, which
+   * normalises to a trailing slash, fails the segment count, and refuses — so it asserted nothing.)
+   */
+  const r = await applyWrite(db, edge, req({
+    path: `/api/playlists/${plA}/./items`, method: 'POST', opId: 'op-normalised',
+  }), { apply });
+  assert.equal(r.ok, true, 'a dot segment that resolves to an allowlisted path is a legitimate write');
+  assert.equal(applied.length, 1);
+  assert.equal(applied[0].path, `/api/playlists/${plA}/items`,
+    'the executor must send the RESOLVED path, never the raw one');
+});
+
+/*
+ * ⚠️ THE MATCHER IS TESTED DIRECTLY, because applyWrite normalises before calling it and would
+ * mask a matcher that had been loosened. Two layers resolve the path; each has to be shown to work
+ * on its own, or removing either one leaves every test green. (It did: both mutations survived the
+ * first version of these tests.)
+ */
+test('⚠️ the matcher itself refuses a traversal, independent of its caller', () => {
+  const writeProxy = require('../lib/mesh/write-proxy');
+  const B = String.fromCharCode(92);
+  const raw = [
+    `/api/playlists/p1/items/..${B}..${B}..${B}devices${B}D1`,
+    '/api/playlists/p1/items/..%2f..%2f..%2fdevices%2fD1',
+    '/api/playlists/p1/items/%2e%2e',
+  ];
+  for (const p of raw) {
+    assert.equal(writeProxy.matchPath(p, 'DELETE'), null, `${p} must not match any rule`);
+    assert.equal(writeProxy.isWritable(p, 'DELETE'), false);
+  }
+  // ...and the resolved forms they were smuggling are not writable under any method.
+  for (const p of ['/api/devices/D1', '/api/content/c1', '/api/playlists/p1']) {
+    assert.equal(writeProxy.matchPath(p, 'DELETE'), null, `${p} must never be deletable`);
+  }
+});
+
+test('⚠️ authorizeWrite hands back the resolved path, not the one it was given', () => {
+  const writeProxy = require('../lib/mesh/write-proxy');
+  const r = writeProxy.authorizeWrite(
+    {}, '/api/playlists/p1/./items', 'POST', ['content-push'], [wsA], wsA,
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.path, '/api/playlists/p1/items');
+});
+
+test('a malformed path is refused rather than thrown', async () => {
+  const edge = mkEdge(['content-push'], [wsA]);
+  for (const p of [null, '', 'not-a-path', '//evil.example.com/api/devices/x']) {
+    applied = [];
+    const r = await applyWrite(db, edge, req({ path: p, method: 'POST' }), { apply });
+    assert.equal(r.ok, false, `${p} must be refused`);
+    assert.equal(applied.length, 0);
+  }
+});
+
+/*
+ * ⚠️ AUTHORISE AND APPLY MUST NAME THE SAME OBJECT.
+ *
+ * This is the sharpest form of the two-parsers bug, and the reason the path is resolved BEFORE the
+ * target is looked up rather than only inside the matcher. `/api/playlists/<A>/../<B>/items`
+ * resolves to playlist B — but a raw split reads segment 3 as playlist A. Look the workspace up
+ * from the raw string and the grant is checked against A's workspace, which the parent may write,
+ * while the request that goes out modifies B, which it may not.
+ *
+ * Nothing is malformed here and nothing is refused by the matcher: both are real playlists and the
+ * resolved path is a legitimately allowlisted rule. The only defence is that both steps read the
+ * same resolved path.
+ */
+test('⚠️ a dot segment cannot authorise against one playlist and write to another', async () => {
+  applied = [];
+  const edge = mkEdge(['content-push'], [wsA]);          // may write wsA, NOT wsB
+  const r = await applyWrite(db, edge, req({
+    path: `/api/playlists/${plA}/../${plB}/items`,       // reads as plA, resolves to plB
+    method: 'POST',
+    opId: 'op-cross-workspace',
+  }), { apply });
+
+  assert.equal(r.ok, false, 'the grant must be judged against the playlist actually being written');
+  assert.equal(applied.length, 0, 'nothing may reach the executor');
+  // And if it were ever permitted, it must at least never touch the ungranted playlist.
+  for (const call of applied) assert.ok(!call.path.includes(plB));
+});
