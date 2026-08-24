@@ -12,6 +12,7 @@ const { db } = require('../db/database');
 const config = require('../config');
 const { sanitizeString } = require('../middleware/sanitize');
 const { videoDisplayDims, imageDisplayDims } = require('./media-orientation');
+const { digestFile } = require('./content-digest');
 const { finalizeUpload } = require('./upload-sniff');
 
 // Multer takes file.originalname from the multipart header, bypassing sanitizeBody, so
@@ -120,10 +121,26 @@ async function ingestUploadedFile({ file, userId, workspaceId, folderId = null }
   const { filepath, mime } = finalizeUpload(file);
   const { width, height, durationSec, thumbnailPath } = await deriveMediaMetadata(file.path, filepath, mime);
 
+  /*
+   * ⚠️ byte_digest IS SET HERE TOO, AND THAT IS THE POINT OF THE COLUMN.
+   *
+   * It was added for mesh content and implemented only in the mesh writer, so every locally
+   * uploaded file carried NULL — which made the dedup lookup unable to match anything already in
+   * the library. A node would re-download bytes it was already holding, and charge the operator's
+   * storage allowance for them. The column's own migration note named five writers that owe it a
+   * value; one of them had it.
+   *
+   * Hashing on ingest costs one streamed read of a file that was just written and is still in page
+   * cache. Failure is non-fatal: a NULL digest degrades to "cannot dedup", which is exactly where
+   * every existing row already is, so an unreadable file must not lose the upload.
+   */
+  let digest = null;
+  try { digest = await digestFile(path.join(config.contentDir, filepath)); } catch (e) { digest = null; }
+
   db.prepare(`
-    INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type, file_size, duration_sec, thumbnail_path, width, height, folder_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, userId, workspaceId, safeFilename(file.originalname), filepath, mime, file.size, durationSec, thumbnailPath, width, height, folderId || null);
+    INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type, file_size, duration_sec, thumbnail_path, width, height, folder_id, byte_digest)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, userId, workspaceId, safeFilename(file.originalname), filepath, mime, file.size, durationSec, thumbnailPath, width, height, folderId || null, digest);
 
   return db.prepare('SELECT * FROM content WHERE id = ?').get(id);
 }

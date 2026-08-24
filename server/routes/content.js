@@ -15,6 +15,8 @@ const { accessContext } = require('../lib/tenancy');
 // #73: the upload ingest (processing + insert) is now shared with the agency router.
 const { ingestUploadedFile, deriveMediaMetadata } = require('../lib/content-ingest');
 const { finalizeUpload, INLINE_SAFE_EXTS } = require('../lib/upload-sniff');
+const { digestFile } = require('../lib/content-digest');
+const { unlinkIfUnreferenced } = require('../lib/content-files');
 
 // Multer captures file.originalname directly from the multipart filename header,
 // bypassing sanitizeBody. Apply the same HTML-escape here so a filename like
@@ -295,14 +297,18 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // caller MUST have authorized the write. File unlinks are wrapped so they never throw.
 function purgeContentRow(content) {
   const id = content.id;
-  const unlink = (rel) => {
-    if (!rel) return;
-    const p = path.join(config.contentDir, path.basename(rel));
-    if (fs.existsSync(p)) { try { fs.unlinkSync(p); } catch (e) { /* best-effort */ } }
-  };
-  unlink(content.filepath);
-  unlink(content.thumbnail_path);
-  unlink(content.subtitle_url); // #216 sidecar (undefined on pre-#216 rows — no-op)
+  unlinkIfUnreferenced(content.filepath, id, 'filepath');
+  unlinkIfUnreferenced(content.thumbnail_path, id, 'thumbnail_path');
+  unlinkIfUnreferenced(content.subtitle_url, id, 'subtitle_url'); // #216 sidecar (no-op pre-#216)
+
+  /*
+   * ⚠️ And the provenance row goes with it, because nothing else will take it. The table declares
+   * no FOREIGN KEY, so the cascade that removes playlist_items does not reach it — the row would
+   * survive pointing at a deleted content id, and the next push of that asset would find it,
+   * conclude the bytes are merely missing, transfer the whole file again and charge the operator's
+   * allowance a second time for storage they had already paid for and then reclaimed.
+   */
+  db.prepare('DELETE FROM mesh_content_provenance WHERE local_content_id = ?').run(id);
 
   // Resolved: a device that INHERITS the playlist holding this content has no copy of the id on
   // its row, so joining on devices.playlist_id would leave exactly those screens showing content
@@ -500,16 +506,11 @@ router.put('/:id/replace', upload.single('file'), async (req, res) => {
   if (!content) return;
   if (!req.file) return res.status(400).json({ error: 'No file provided' });
 
-  // Delete old file
-  if (content.filepath) {
-    const oldPath = path.join(config.contentDir, content.filepath);
-    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
-  }
-  // Delete old thumbnail
-  if (content.thumbnail_path) {
-    const oldThumb = path.join(config.contentDir, content.thumbnail_path);
-    if (fs.existsSync(oldThumb)) fs.unlinkSync(oldThumb);
-  }
+  // Delete old file and thumbnail — but only if no other row still points at them. A
+  // mesh-received asset is named after its bytes and can legitimately back one row per
+  // workspace; replacing one customer's copy must not empty another's screen.
+  unlinkIfUnreferenced(content.filepath, content.id, 'filepath');
+  unlinkIfUnreferenced(content.thumbnail_path, content.id, 'thumbnail_path');
 
   // Same content-derived naming as the main ingest path (lib/upload-sniff) — the caller
   // does not choose the extension here either. A non-media upload 400s.
@@ -539,12 +540,24 @@ router.put('/:id/replace', upload.single('file'), async (req, res) => {
   // duration_sec comes from the NEW bytes. COALESCE-to-NULL rather than keeping the old value:
   // a replace that turns a video into an image genuinely has no duration, and a stale one would
   // silently become the default for every later playlist add (lib/item-duration.js).
+  /*
+   * ⚠️ byte_digest IS RE-HASHED FROM THE NEW BYTES, OR THE DIGEST BECOMES A LIE.
+   *
+   * This is the writer the column's migration note flags most sharply: the row keeps its id and
+   * filepath while its CONTENT changes, so a digest carried over from the old bytes describes a
+   * file that no longer exists. A mesh peer asking "do you already have this asset?" would then be
+   * told yes — matching digest, file present on disk — for ever, and its push would be skipped
+   * while the screen played the operator's local replacement instead.
+   */
+  let newDigest = null;
+  try { newDigest = await digestFile(path.join(config.contentDir, filepath)); } catch (e) { newDigest = null; }
+
   db.prepare(`UPDATE content
                  SET filepath = ?, mime_type = ?, file_size = ?, thumbnail_path = ?, width = ?, height = ?,
-                     duration_sec = ?,
+                     duration_sec = ?, byte_digest = ?,
                      updated_at = MAX(CAST(strftime('%s','now') AS INTEGER), COALESCE(NULLIF(updated_at, 0), created_at) + 1)
                WHERE id = ?`)
-    .run(filepath, mime, req.file.size, thumbnailPath, width, height, durationSec, req.params.id);
+    .run(filepath, mime, req.file.size, thumbnailPath, width, height, durationSec, newDigest, req.params.id);
 
   // ...and tell the panels, which the old code did not. Without this the new bytes reached a screen
   // only when something else happened to trigger a playlist refresh — an operator replacing a video
@@ -570,11 +583,8 @@ router.post('/:id/subtitle', upload.subtitleUpload.single('subtitle'), async (re
   }
   if (!req.file) return res.status(400).json({ error: 'No subtitle file provided' });
 
-  // Remove the previous subtitle file if there was one.
-  if (content.subtitle_url) {
-    const old = path.join(config.contentDir, path.basename(content.subtitle_url));
-    if (fs.existsSync(old)) { try { fs.unlinkSync(old); } catch {} }
-  }
+  // Remove the previous subtitle file if there was one, unless it is shared (see purgeContentRow).
+  unlinkIfUnreferenced(content.subtitle_url, content.id, 'subtitle_url');
   const lang = req.body.subtitle_lang ? String(req.body.subtitle_lang).slice(0, 10) : (content.subtitle_lang || null);
   db.prepare('UPDATE content SET subtitle_url = ?, subtitle_lang = ? WHERE id = ?')
     .run(req.file.filename, lang, req.params.id);
