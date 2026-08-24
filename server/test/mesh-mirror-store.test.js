@@ -416,3 +416,70 @@ test('a report carrying no version leaves the last known one alone', () => {
     assert.equal(db.prepare("SELECT peer_version v FROM mesh_edges WHERE id='e1'").get().v, '2.0.0-alpha1');
   }
 });
+
+/*
+ * ⚠️ WHAT A CHILD SAYS THIS HUB MAY DO TO IT.
+ *
+ * The hub has no copy of the child's write grant and must never infer one, so without this
+ * announcement it cannot tell an operator whether they may push to a client — it can only let them
+ * try and be refused, by a refusal deliberately identical for "no such thing" and "not permitted".
+ *
+ * Advisory in the strongest sense: the child re-checks its own row on every request. What is tested
+ * here is that the hub records it, shape-checks it, and NEVER ends up claiming more than the child
+ * offered — including when the offer is malformed, hostile, or absent.
+ */
+
+/*
+ * A real mesh_edges ROW, because recordWriteOffer UPDATEs it — the in-memory `edge()` builder above
+ * is enough for the mirror tables, which key on edge_id without needing the row to exist.
+ */
+function seedEdge(db, id = 'e1') {
+  db.prepare(`INSERT INTO mesh_edges (id, peer_node_id, direction, transport_direction, peer_version)
+              VALUES (?, 'child-1', 'down', 'they-dial', '2.0.0')`).run(id);
+  return db.prepare('SELECT * FROM mesh_edges WHERE id = ?').get(id);
+}
+
+test('a write offer from a child is recorded on the edge', () => {
+  const db = freshDb();
+  const edge = seedEdge(db);
+  ms.storeEnvelope(db, edge, {
+    type: 'write-offer', origin_node_id: 'child-1', origin_ts: Date.now(),
+    body: { categories: ['content-push'], workspaces: ['ws-1'], bytesBudget: 20 * 1024 ** 3, bytesUsed: 5 },
+  });
+  const offer = JSON.parse(db.prepare('SELECT peer_write_offer AS o FROM mesh_edges WHERE id = ?').get(edge.id).o);
+  assert.deepEqual(offer.categories, ['content-push']);
+  assert.deepEqual(offer.workspaces, ['ws-1']);
+  assert.equal(offer.bytesUsed, 5);
+});
+
+test('⚠️ an offer that grants nothing is stored as nothing, not as an empty promise', () => {
+  const db = freshDb();
+  const edge = seedEdge(db);
+  for (const body of [
+    { categories: [], workspaces: ['ws-1'] },          // no categories
+    { categories: ['content-push'], workspaces: [] },  // no workspaces — enforcement denies this too
+    {},
+  ]) {
+    ms.storeEnvelope(db, edge, { type: 'write-offer', origin_node_id: 'child-1', origin_ts: Date.now(), body });
+    const o = db.prepare('SELECT peer_write_offer AS o FROM mesh_edges WHERE id = ?').get(edge.id).o;
+    assert.equal(o, null, `${JSON.stringify(body)} must not read as an offer`);
+  }
+});
+
+test('⚠️ a malformed offer CLEARS the previous one rather than leaving it standing', () => {
+  // A stale, more permissive answer surviving a garbled update is the wrong way for this to fail:
+  // the hub would keep offering a button the customer has since taken away.
+  const db = freshDb();
+  const edge = seedEdge(db);
+  ms.storeEnvelope(db, edge, {
+    type: 'write-offer', origin_node_id: 'child-1', origin_ts: Date.now(),
+    body: { categories: ['content-push'], workspaces: ['ws-1'] },
+  });
+  assert.ok(db.prepare('SELECT peer_write_offer AS o FROM mesh_edges WHERE id = ?').get(edge.id).o);
+
+  ms.storeEnvelope(db, edge, {
+    type: 'write-offer', origin_node_id: 'child-1', origin_ts: Date.now(),
+    body: { categories: 'everything', workspaces: { all: true } },
+  });
+  assert.equal(db.prepare('SELECT peer_write_offer AS o FROM mesh_edges WHERE id = ?').get(edge.id).o, null);
+});

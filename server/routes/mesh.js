@@ -585,13 +585,25 @@ module.exports = function meshRoutes(db, { requireAuth }) {
    * and writable by nobody — which is the right default: an unassigned customer is one nobody has
    * been made responsible for yet.
    */
-  router.put('/nodes/:nodeId/client', requireAuth, requirePlatformStaff, (req, res) => {
+  /*
+   * ⚠️ ADDRESSED UNDER /clients, NOT /nodes, AND THE URL IS THE POINT.
+   *
+   * This writes mesh_edges.client_id — which customer a linked server is FILED under, this hub's
+   * own bookkeeping. It has nothing to do with the node's mirrored data, and a guard asserting that
+   * everything under /mesh/nodes is read-only caught the first spelling of this route. It was right
+   * to: a URL that reads like "write to a node" is one somebody later extends into writing to a
+   * node. The resource being modified is the client's list of servers, so that is where it lives.
+   *
+   * `unassigned` as the client id unfiles a server. An unfiled server is writable by nobody, which
+   * is the correct default — a customer nobody has been made responsible for yet.
+   */
+  router.put('/clients/:id/nodes/:nodeId', requireAuth, requirePlatformStaff, (req, res) => {
     const edge = db.prepare('SELECT id FROM mesh_edges WHERE peer_node_id = ? AND direction = ?')
       .get(req.params.nodeId, 'down');
     if (!edge) return res.status(404).json({ error: 'No such server.' });
-    const clientId = (req.body && req.body.client_id) || null;
+    const clientId = req.params.id === 'unassigned' ? null : req.params.id;
     if (clientId && !db.prepare('SELECT 1 FROM mesh_clients WHERE id = ?').get(clientId)) {
-      return res.status(400).json({ error: 'That client does not exist.' });
+      return res.status(404).json({ error: 'No such client.' });
     }
     db.prepare('UPDATE mesh_edges SET client_id = ? WHERE id = ?').run(clientId, edge.id);
     res.json({ ok: true, node_id: req.params.nodeId, client_id: clientId });

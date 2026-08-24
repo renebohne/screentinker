@@ -259,7 +259,7 @@ test('⚠️ THE HUB API HAS EXACTLY ONE WRITE ROUTE, AND IT ONLY ASKS (I2)', ()
    */
   const HUB_LOCAL_ADMIN = [
     'POST /clients',                 // create a customer record
-    'PUT /nodes/:nodeId/client',     // file a linked server under one
+    'PUT /clients/:id/nodes/:nodeId', // file a linked server under one
     'PUT /clients/:id/access',       // name one of THIS hub's staff on it
   ];
   assert.deepEqual(mutating, [...HUB_LOCAL_ADMIN, 'POST /write/:nodeId'],

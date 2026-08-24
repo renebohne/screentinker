@@ -138,6 +138,12 @@ function deviceRow(d) {
 const TABS = [
   ['fleet', 'Screens'],
   ['topology', 'Topology'],
+  /*
+   * ⚠️ WHO MAY ACT ON WHICH CUSTOMER. Platform staff only, and hidden entirely otherwise — an
+   * ordinary technician has no business seeing the shape of the client list, only the clients they
+   * were named on.
+   */
+  ['clients', 'Clients & access'],
   ['connect', 'Reporting upward'],
 ];
 
@@ -170,8 +176,19 @@ export async function render(container) {
   let connect = { canEnroll: false, canMint: false, uplinks: [] };
   try { connect = await api.get('/mesh/capabilities'); } catch (e) { /* enrollment not mounted */ }
   const showConnect = connect.canEnroll || (connect.uplinks || []).length > 0;
-  const tabs = TABS.filter(([id]) => id !== 'connect' || showConnect);
+  // Same source the admin views read. The tab is a convenience: every route behind it re-checks
+  // platform staff server-side, so hiding it is about not offering what cannot be used.
+  const meRole = (() => {
+    try { return JSON.parse(localStorage.getItem('user') || '{}').role; } catch (e) { return null; }
+  })();
+  const isStaff = ['platform_admin', 'platform_operator'].includes(meRole);
+  const tabs = TABS.filter(([id]) => {
+    if (id === 'connect') return showConnect;
+    if (id === 'clients') return isStaff && connect.canMint;
+    return true;
+  });
   if (state.tab === 'connect' && !showConnect) state.tab = 'fleet';
+  if (state.tab === 'clients' && !(isStaff && connect.canMint)) state.tab = 'fleet';
 
   container.innerHTML = `
     <div class="page-header">
@@ -204,8 +221,158 @@ export async function render(container) {
 
   const panel = container.querySelector('#serversPanel');
   if (state.tab === 'topology') return renderTopology(panel);
+  if (state.tab === 'clients') return renderClients(panel);
   if (state.tab === 'connect') return renderConnect(panel, connect);
   return renderFleet(panel);
+}
+
+
+/* ===================== clients & access ===================== */
+
+/*
+ * ⚠️ WITHOUT THIS THE WRITE PATH IS UNREACHABLE.
+ *
+ * canWriteToNode resolves a role through mesh_clients / mesh_client_access, and until the routes
+ * behind this page existed nothing in the product could create a row in either table — so the check
+ * could never pass, for anybody, on any install. A permission model with no way to grant permission
+ * refuses everyone, and it looks exactly like a bug in the transport.
+ *
+ * Two separate decisions on one page, deliberately not merged:
+ *   which customer a linked server belongs to  — filing
+ *   which of OUR staff may act on that customer — authority
+ * They have different blast radii. Filing a server under the wrong client shows somebody data they
+ * should not see; naming somebody publisher lets them change a hospital's screens.
+ */
+async function renderClients(panel) {
+  panel.innerHTML = '<div style="color:var(--text-muted)">Loading…</div>';
+  let clients = []; let nodes = []; let users = [];
+  try {
+    [clients, nodes, users] = await Promise.all([
+      api.get('/mesh/clients'),
+      api.get('/mesh/nodes').then((r) => r.nodes || []),
+      api.getUsers().catch(() => []),
+    ]);
+  } catch (e) {
+    panel.innerHTML = `<div style="color:var(--danger)">${esc(e.message)}</div>`;
+    return;
+  }
+
+  const unassigned = nodes.filter((n) => !n.clientId);
+
+  panel.innerHTML = `
+    <div class="settings-section">
+      <h3 style="margin-top:0">Customers</h3>
+      <p style="color:var(--text-muted);font-size:12px;margin:0 0 10px">
+        A customer groups the servers you look after for one organisation. Your staff see the
+        customers they are named on and no others.
+      </p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="newClientName" class="input" placeholder="Customer name" style="max-width:260px">
+        <button class="btn btn-secondary btn-sm" id="addClientBtn">Add customer</button>
+      </div>
+      <div id="clientOut" style="margin-top:8px"></div>
+    </div>
+
+    ${unassigned.length ? `
+    <div class="settings-section" style="margin-top:16px">
+      <h3 style="margin-top:0">Servers not filed under a customer</h3>
+      <!-- ⚠️ Called out rather than left in a list, because an unfiled server is writable by NOBODY
+           — which is the right default, and an invisible one if the page does not say so. -->
+      <p style="color:var(--text-muted);font-size:12px;margin:0 0 8px">
+        These report to you but belong to no customer yet, so nobody can act on them.
+      </p>
+      ${unassigned.map((n) => `
+        <div style="display:flex;gap:8px;align-items:center;padding:6px 0">
+          <span style="flex:1">${esc(n.serverName || n.nodeId)}</span>
+          <select class="input" data-assign-node="${esc(n.nodeId)}" style="max-width:220px">
+            <option value="">— choose a customer —</option>
+            ${clients.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}
+          </select>
+        </div>`).join('')}
+    </div>` : ''}
+
+    ${clients.map((c) => `
+      <div class="settings-section" style="margin-top:16px">
+        <h3 style="margin-top:0">${esc(c.name)}</h3>
+        <div style="color:var(--text-muted);font-size:12px;margin-bottom:8px">
+          ${c.nodes.length ? `${c.nodes.length} server${c.nodes.length === 1 ? '' : 's'}` : 'No servers filed here yet'}
+        </div>
+
+        ${c.access.length ? c.access.map((a) => `
+          <div style="display:flex;gap:8px;align-items:center;padding:4px 0">
+            <span style="flex:1">${esc(a.name || a.email || a.user_id)}</span>
+            <span class="badge">${esc(a.role)}</span>
+            <button class="btn btn-secondary btn-sm"
+                    data-revoke-access="${esc(c.id)}" data-user="${esc(a.user_id)}">Remove</button>
+          </div>`).join('')
+          : '<div style="color:var(--text-muted);font-size:12px">Nobody is named on this customer.</div>'}
+
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
+          <select class="input" data-grant-user="${esc(c.id)}" style="max-width:240px">
+            <option value="">— choose a colleague —</option>
+            ${users.map((u) => `<option value="${esc(u.id)}">${esc(u.name || u.email)}</option>`).join('')}
+          </select>
+          <select class="input" data-grant-role="${esc(c.id)}" style="max-width:180px">
+            <option value="viewer">viewer — see their data</option>
+            <option value="manager">manager — manage the link</option>
+            <option value="publisher">publisher — change their screens</option>
+          </select>
+          <button class="btn btn-secondary btn-sm" data-grant="${esc(c.id)}">Add</button>
+        </div>
+        <!-- ⚠️ Says the two things about publisher that are easy to get wrong, on the control that
+             grants it: it does not inherit down a hierarchy, and it is still the customer's call. -->
+        <div style="color:var(--text-muted);font-size:12px;margin-top:6px">
+          Publisher is never inherited — it must be granted on this customer directly. Even then,
+          the customer's own server decides what it accepts, and can revoke at any time.
+        </div>
+        <div data-client-out="${esc(c.id)}" style="margin-top:8px"></div>
+      </div>`).join('')}`;
+
+  const reload = () => renderClients(panel);
+
+  panel.querySelector('#addClientBtn')?.addEventListener('click', async () => {
+    const name = panel.querySelector('#newClientName').value.trim();
+    const out = panel.querySelector('#clientOut');
+    if (!name) { out.textContent = 'Give the customer a name.'; return; }
+    try { await api.post('/mesh/clients', { name }); reload(); }
+    catch (e) { out.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`; }
+  });
+
+  panel.querySelectorAll('[data-assign-node]').forEach((sel) => {
+    sel.addEventListener('change', async () => {
+      if (!sel.value) return;
+      try {
+        await api.put(
+          `/mesh/clients/${encodeURIComponent(sel.value)}/nodes/${encodeURIComponent(sel.dataset.assignNode)}`, {});
+        showToast('Filed.');
+        reload();
+      } catch (e) { showToast(e.message, 'error'); }
+    });
+  });
+
+  panel.querySelectorAll('[data-grant]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.grant;
+      const user = panel.querySelector(`[data-grant-user="${CSS.escape(id)}"]`).value;
+      const role = panel.querySelector(`[data-grant-role="${CSS.escape(id)}"]`).value;
+      const out = panel.querySelector(`[data-client-out="${CSS.escape(id)}"]`);
+      if (!user) { out.textContent = 'Choose a colleague first.'; return; }
+      try { await api.put(`/mesh/clients/${encodeURIComponent(id)}/access`, { user_id: user, role }); reload(); }
+      catch (e) { out.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`; }
+    });
+  });
+
+  panel.querySelectorAll('[data-revoke-access]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      // An empty role removes the row — the same shape as revoking a write grant with an empty
+      // category list, so "take it away" never means "sever something else".
+      try {
+        await api.put(`/mesh/clients/${encodeURIComponent(btn.dataset.revokeAccess)}/access`,
+                      { user_id: btn.dataset.user, role: '' });
+        reload();
+      } catch (e) { showToast(e.message, 'error'); }
+    });
+  });
 }
 
 /* ===================== the fleet ===================== */

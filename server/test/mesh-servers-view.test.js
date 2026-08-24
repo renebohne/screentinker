@@ -184,7 +184,17 @@ test('⚠️ mesh writes address LOCAL administration only (I2)', () => {
    * THIS node's own configuration by its own instance owner, so the guard is about the TARGET
    * rather than the verb.
    */
-  const LOCAL = ['/mesh/pair/code', '/mesh/uplink'];
+  /*
+   * ⚠️ /mesh/clients joins the list, and it belongs here for the same reason the other two do: it
+   * writes THIS hub's own records — which customers exist, which of this hub's staff may act on
+   * them, and which customer a linked server is filed under. Nothing under it reaches another node.
+   *
+   * The check below still forbids writes to /mesh/nodes, and it caught the first spelling of the
+   * filing route (PUT /mesh/nodes/:id/client). That was a real catch rather than a false positive:
+   * a URL reading "write to a node" is one somebody later extends into writing to a node, so the
+   * route was re-addressed under the resource it actually modifies.
+   */
+  const LOCAL = ['/mesh/pair/code', '/mesh/uplink', '/mesh/clients'];
   const writes = [...VIEW.matchAll(/api\.(post|put|patch|delete)\(\s*[`'"]([^`'"$]*)/g)]
     .map((m) => ({ verb: m[1], path: m[2] }));
   assert.ok(writes.length > 0, 'the Connect tab does write something');
