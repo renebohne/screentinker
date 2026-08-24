@@ -68,8 +68,26 @@ test('test_downward_handlers_are_an_allowlist (I2)', () => {
    *                 allowlist with the method pinned per rule, a write grant the CHILD's operator
    *                 set (never one that arrived over the wire), and the target's workspace resolved
    *                 from the child's own rows rather than taken from the request.
+   *
+   *   mesh:content-offer — "may I send you these files?" Answered by lib/mesh/content-receive.js.
+   *                 The message carries a DESCRIPTION and a one-time ticket per file; it carries no
+   *                 bytes and no location. The child then decides, against its own rows and its own
+   *                 disk, in this order: does the content-push grant cover the named workspace
+   *                 (grants.writeAllows, refusing an empty scope as firmly as an empty grant); does
+   *                 it actually need any of it (checking the DISK, not just its content rows); does
+   *                 the operator's byte allowance and the real free space both permit it — all
+   *                 before a single byte is requested.
+   *
+   *                 ⚠️ The URL it fetches from is the child's OWN stored peer_url, never anything
+   *                 in the message. A parent able to name the host would be a parent able to point
+   *                 this node at anything on its network and have it download the result, and it
+   *                 would look exactly like an ordinary content push (I7).
+   *
+   *                 ⚠️ Every arrived file is verified before it is visible: size from statSync, the
+   *                 digest, and a re-sniff of the type — a parent is an authenticated remote writer
+   *                 running a version we do not control.
    */
-  const ALLOWED_DOWNWARD = ['mesh:read', 'mesh:write', 'mesh:hello'];
+  const ALLOWED_DOWNWARD = ['mesh:read', 'mesh:write', 'mesh:hello', 'mesh:content-offer'];
 
   /*
    * Direction matters, and scanning both files for handlers gets it wrong: `mesh:envelope` is

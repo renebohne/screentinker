@@ -25,6 +25,11 @@ const { resolveSessionUser } = require('../middleware/auth');
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
+const contentOffer = require('../lib/mesh/content-offer');
+const path = require('path');
+const fs = require('fs');
+const config = require('../config');
+
 module.exports = function meshRoutes(db, { requireAuth }) {
   const router = express.Router();
 
@@ -694,6 +699,117 @@ module.exports = function meshRoutes(db, { requireAuth }) {
       return res.status(403).json({ error: (answer && answer.reason) || 'That server refused.', opId });
     }
     res.json({ ok: true, opId, replayed: !!answer.replayed, result: answer.outcome });
+  });
+
+  /*
+   * ⚠️ SEND CONTENT TO A CHILD — the SECOND route here that reaches another node, and like the
+   * first it only ASKS. It builds a description of some files and a one-time ticket for each, hands
+   * both to the child, and the child decides what it needs, whether it may accept it, and whether
+   * there is room. Nothing about the child's disk is judged here (I10).
+   *
+   * The bytes never touch this route. The envelope caps a batch at 512 KB against a 500 MB upload
+   * limit, so the socket carries the offer and the child pulls the files over HTTP from the address
+   * it already had — which also means one slow transfer cannot block the control plane.
+   */
+  router.post('/content/:nodeId', requireAuth, async (req, res) => {
+    const ids = visibleNodeIds(req.user);
+    if (!ids.includes(req.params.nodeId)) {
+      return res.status(404).json({ error: 'No such server.' });
+    }
+    if (!canWriteToNode(req.user, req.params.nodeId, 'push-content')) {
+      return res.status(403).json({
+        error: 'You do not have permission to send content to this client. Ask an administrator ' +
+               'to name you on it.',
+      });
+    }
+
+    const offerTo = global.__meshContentOfferTo;
+    if (!offerTo) {
+      return res.status(503).json({ error: 'This server is not accepting connections from others.' });
+    }
+
+    const edge = db.prepare("SELECT * FROM mesh_edges WHERE peer_node_id = ? AND direction = 'down'")
+      .get(req.params.nodeId);
+    if (!edge) return res.status(404).json({ error: 'No such server.' });
+
+    const workspaceId = req.body && req.body.workspace_id;
+    if (!workspaceId) {
+      return res.status(400).json({
+        error: 'Name the workspace on their server that this content is for.',
+      });
+    }
+
+    const built = contentOffer.buildOffer(db, edge, (req.body && req.body.content_ids) || [],
+                                          { contentDir: config.contentDir });
+    if (!built.ok) return res.status(400).json({ error: built.reason, skipped: built.skipped });
+
+    const answer = await offerTo(req.params.nodeId, {
+      manifest: built.manifest, tickets: built.tickets, workspaceId,
+    });
+
+    if (!answer || !answer.ok) {
+      /*
+       * Same three outcomes as a write, and they mean the same three things to an operator: 503
+       * nothing was sent, 504 some of it may have arrived and re-sending is safe, 403 the customer
+       * refused. A partial success arrives here too — the child reports per item, and that detail
+       * is passed through rather than flattened, because "3 of 9 files failed" is the only version
+       * of this an operator can act on.
+       */
+      if (answer && answer.offline) return res.status(503).json({ error: answer.reason });
+      if (answer && answer.indeterminate) return res.status(504).json({ error: answer.reason, resendIsSafe: true });
+      return res.status(403).json({
+        error: (answer && answer.reason) || 'That server refused the content.',
+        failed: (answer && answer.failed) || [],
+        stored: (answer && answer.stored) || [],
+      });
+    }
+    res.json({ ok: true, ...answer, skippedHere: built.skipped });
+  });
+
+  /*
+   * ⚠️ WHERE THE BYTES ACTUALLY COME FROM, and the only unauthenticated-by-JWT route in this file.
+   *
+   * The caller is a CHILD SERVER, not a person — it holds a ticket rather than a session, so
+   * requireAuth would be exactly wrong. The ticket is the credential: it is hashed at rest, names
+   * ONE file on ONE edge, expires in hours, and is checked against a LIVE read of the edge so a
+   * link severed a moment ago stops serving immediately.
+   *
+   * ⚠️ Range is honoured because the far side depends on it. These transfers run over the worst
+   * links this product sees — a shop on 4G, a coach with a rooftop modem — and a 400 MB file that
+   * restarts from zero on every drop never completes at all.
+   *
+   * ⚠️ NOT single-use, deliberately: a resumable download makes several requests against the same
+   * ticket by design, so single-use would break precisely the transfers this exists for.
+   */
+  router.get('/pull/:token', (req, res) => {
+    const redeemed = contentOffer.redeemTicket(db, req.params.token);
+    // One answer for "no such ticket", "expired" and "the link is gone" — a caller learns nothing
+    // from the difference, and there is nothing useful it could do with it.
+    if (!redeemed.ok) return res.status(404).json({ error: redeemed.reason });
+
+    const abs = path.join(config.contentDir, path.basename(redeemed.ticket.filepath));
+    if (!fs.existsSync(abs)) return res.status(404).json({ error: 'That file is no longer here.' });
+
+    /*
+     * ⚠️ The response is forced to an opaque type and marked nosniff. It is a byte stream for a
+     * machine; nothing about it should ever be interpreted by a browser that happens to open the
+     * URL, and the same rule the upload routes follow applies here.
+     */
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
+    res.setHeader('Cache-Control', 'private, no-store');
+    // A validator so the far side can use If-Range and refuse to stitch two different files.
+    if (redeemed.ticket.digest) res.setHeader('ETag', `"${redeemed.ticket.digest}"`);
+
+    db.prepare('UPDATE mesh_pull_tickets SET used_at = strftime(\'%s\',\'now\') WHERE id = ?')
+      .run(redeemed.ticket.id);
+
+    // res.sendFile handles Range, If-Range, 206 and 416 correctly; re-implementing that by hand is
+    // how off-by-one errors get into a byte stream.
+    return res.sendFile(abs, { dotfiles: 'deny' }, (err) => {
+      if (err && !res.headersSent) res.status(500).end();
+    });
   });
 
   router.get('/read/:nodeId', requireAuth, async (req, res) => {

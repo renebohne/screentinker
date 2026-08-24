@@ -55,7 +55,7 @@ class Uplink extends EventEmitter {
    */
   constructor({ parentUrl, edgeToken, nodeId, connect, tlsVerify = true,
                 bufferMax = DEFAULT_BUFFER_MAX, rand = Math.random, logger = console,
-                onRead = null, onWrite = null }) {
+                onRead = null, onWrite = null, onContentOffer = null }) {
     super();
     if (!parentUrl) throw new Error('An uplink needs a parent URL. There is no default address.');
     if (!edgeToken) throw new Error('An uplink needs an edge token.');
@@ -75,6 +75,14 @@ class Uplink extends EventEmitter {
     // Same default and same reason: with no handler the child refuses every write, which is correct
     // for a node whose operator has not granted one.
     this.onWrite = onWrite;
+    /*
+     * ⚠️ DESTRUCTURED ABOVE, and that is not a formality. The last handler added here was assigned
+     * from `opts.onContentOffer`-style scope that did not exist, which threw a ReferenceError in the
+     * CONSTRUCTOR — on every uplink, on every node. services/mesh-uplink.js catches per edge, so
+     * the entire mesh would have gone inert behind one warn line. I made the same mistake again
+     * writing this one; the test that merely CONSTRUCTS an Uplink caught it both times.
+     */
+    this.onContentOffer = onContentOffer;
 
     this.socket = null;
     this.connected = false;
@@ -163,6 +171,29 @@ class Uplink extends EventEmitter {
           .catch(() => ack({ ok: false, reason: 'That change could not be applied.' }));
       } catch (e) {
         ack({ ok: false, reason: 'That change could not be applied.' });
+      }
+    });
+
+    /*
+     * ⚠️ THE THIRD INBOUND HANDLER, and the same shape as the other two on purpose: this file does
+     * not know what content is, what a digest proves, or how much disk is left. It hands the offer
+     * to the owner of the disk and returns whatever that decides.
+     *
+     * The default with no handler wired is a REFUSAL rather than silence, for the same reason as
+     * mesh:write — "no response" and "stored it" are indistinguishable to a parent holding a
+     * timeout, and here the parent would go on to add those files to a playlist.
+     */
+    this.socket.on('mesh:content-offer', (req, ack) => {
+      if (typeof ack !== 'function') return;
+      if (!this.onContentOffer) {
+        return ack({ ok: false, reason: 'This server does not accept content from another server.' });
+      }
+      try {
+        Promise.resolve(this.onContentOffer(req || {}))
+          .then((r) => ack(r))
+          .catch((e) => ack({ ok: false, reason: 'That content could not be stored.' }));
+      } catch (e) {
+        ack({ ok: false, reason: 'That content could not be stored.' });
       }
     });
 

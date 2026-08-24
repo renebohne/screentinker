@@ -262,9 +262,22 @@ test('⚠️ THE HUB API HAS EXACTLY ONE WRITE ROUTE, AND IT ONLY ASKS (I2)', ()
     'PUT /clients/:id/nodes/:nodeId', // file a linked server under one
     'PUT /clients/:id/access',       // name one of THIS hub's staff on it
   ];
-  assert.deepEqual(mutating, [...HUB_LOCAL_ADMIN, 'POST /write/:nodeId'],
-    'the hub API grew a mutating route. Exactly one reaches a child, it only asks, and the child ' +
-    'decides; the rest may touch nothing but this hub\'s own records.');
+  /*
+   * ⚠️ TWO ROUTES REACH A CHILD NOW, AND BOTH ONLY ASK.
+   *
+   * /write proxies one change and the child decides whether to apply it. /content offers a
+   * description of some files plus a one-time ticket for each, and the child decides what it needs,
+   * whether it may accept it, and whether there is room — the bytes are then PULLED by the child
+   * over HTTP, so they never traverse this route at all.
+   *
+   * The property is unchanged and is what this list defends: a hub may ask; every decision is made
+   * on the machine that owns the screens. Adding a third entry here should require the same
+   * argument, which is why it stays an explicit list rather than a pattern.
+   */
+  const ASKS_THE_CHILD = ['POST /write/:nodeId', 'POST /content/:nodeId'];
+  assert.deepEqual(mutating, [...HUB_LOCAL_ADMIN, ...ASKS_THE_CHILD],
+    'the hub API grew a mutating route. Only the ones that ask a child may leave this node, the ' +
+    'child decides, and the rest may touch nothing but this hub\'s own records.');
 
   /*
    * And the local ones must stay local: none may reach the child transport. If one ever needs to,
@@ -289,6 +302,19 @@ test('⚠️ THE HUB API HAS EXACTLY ONE WRITE ROUTE, AND IT ONLY ASKS (I2)', ()
     'routes/mesh.js must not import the write allowlist — that list lives on the child');
   assert.ok(src.includes('__meshWriteTo'),
     'the write route must go through the socket layer to the child, never act locally');
+  assert.ok(src.includes('__meshContentOfferTo'),
+    'the content route must do the same — an offer that acted locally would be this hub writing ' +
+    'to itself while telling an operator it had sent something to a customer');
+
+  /*
+   * ⚠️ And the bytes must not be served by anything that trusts a session. GET /pull/:token is
+   * answered to a CHILD SERVER holding a ticket, not to a person holding a cookie — requireAuth on
+   * it would break every transfer, and a ticket route that ALSO accepted a session would let any
+   * logged-in user of this hub enumerate files by guessing tickets.
+   */
+  const pull = src.slice(src.indexOf("router.get('/pull/:token'"));
+  assert.ok(pull.startsWith("router.get('/pull/:token', (req, res)"),
+    'the pull route takes no auth middleware — the ticket IS the credential');
 });
 
 test('the uptime report is bucketed in the ORIGIN zone and says so', async () => {

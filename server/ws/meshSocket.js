@@ -381,7 +381,41 @@ function setupMeshSocket(io, deps) {
     };
   }
 
-  return { meshNs, backpressure, readFrom, writeTo };
+  /*
+   * ⚠️ THE SAME CONDUIT AS writeTo, WITH A LONGER FUSE. A content offer makes the child fetch files
+   * over a link that may be slow by nature, and the ack does not come back until it has finished —
+   * so the 15s a write allows would time out on any real transfer and report indeterminate for
+   * something that is merely working.
+   *
+   * It still decides nothing. The child evaluates what it needs, whether it may accept it, and
+   * whether there is room, then pulls the bytes itself using the address IT already had.
+   */
+  async function contentOfferTo(childNodeId, request, timeoutMs = 30 * 60 * 1000) {
+    for (const sock of meshNs.sockets.values()) {
+      if (sock.data && sock.data.childNodeId === childNodeId) {
+        return new Promise((resolve) => {
+          sock.timeout(timeoutMs).emit('mesh:content-offer', request, (err, res) => {
+            if (err) {
+              return resolve({
+                ok: false,
+                indeterminate: true,
+                reason: 'That server did not report back in time. Some files may have arrived — ' +
+                        'sending the same content again is safe and will tell you which.',
+              });
+            }
+            resolve(res || { ok: false, reason: 'That server returned nothing.' });
+          });
+        });
+      }
+    }
+    return {
+      ok: false,
+      offline: true,
+      reason: 'That server is not connected right now, so nothing was sent to it.',
+    };
+  }
+
+  return { meshNs, backpressure, readFrom, writeTo, contentOfferTo };
 }
 
 module.exports = setupMeshSocket;

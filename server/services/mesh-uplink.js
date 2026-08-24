@@ -20,6 +20,7 @@ const {
 } = nodeData;
 const { createReadRunner } = require('../lib/mesh/read-runner');
 const nodeWrite = require('../lib/mesh/node-write');
+const contentReceive = require('../lib/mesh/content-receive');
 const { createLocalApply } = require('../lib/mesh/local-apply');
 const envelope = require('../lib/mesh/envelope');
 const mirror = require('../lib/mesh/mirror');
@@ -55,6 +56,21 @@ function activeUpEdges(db) {
  * `null` means every workspace INCLUDING ones created later, which only the instance owner can
  * choose. A named list is fixed: a workspace added tomorrow is not silently swept in.
  */
+
+
+/*
+ * The synthetic principal that OWNS content received from a parent. Deliberately the same user the
+ * write executor mints tokens for: a row created by "the mesh" should read that way in the library,
+ * not as whichever human happened to enrol the link months ago.
+ */
+function meshPrincipalId(db) {
+  const existing = db.prepare("SELECT id FROM users WHERE email = 'mesh@localhost.invalid'").get();
+  if (existing) return existing.id;
+  const id = require('crypto').randomUUID();
+  db.prepare(`INSERT INTO users (id, email, name, password_hash, role)
+              VALUES (?, 'mesh@localhost.invalid', 'Another server (mesh)', NULL, 'user')`).run(id);
+  return id;
+}
 
 function startMeshUplinks(db, { config, connect, logger = console } = {}) {
   if (!config || !config.meshAllowUplink) return { stop() {}, links: new Map(), refresh() {} };
@@ -209,6 +225,26 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
              * the one answering every player's heartbeat: keep the surface small.
              */
             return nodeWrite.applyWrite(db, fresh, req, { apply: applyLocally });
+          },
+
+          /*
+           * ⚠️ CONTENT COMES IN OVER HTTP, NOT OVER THIS SOCKET. The envelope caps a batch at
+           * 512 KB against a 500 MB upload limit, so the socket carries the OFFER — a description
+           * and a ticket per file — and the child then pulls the bytes itself from the address it
+           * already had. That keeps a 400 MB video off the control plane entirely.
+           *
+           * The edge is re-read here for the same reason as onWrite: a grant revoked a moment ago
+           * must bite the very next request, not at the next restart.
+           */
+          onContentOffer: (req) => {
+            const fresh = db.prepare('SELECT * FROM mesh_edges WHERE id = ?').get(edge.id);
+            if (!fresh || fresh.revoked_at) {
+              return { ok: false, reason: 'This connection is no longer authorised.' };
+            }
+            return contentReceive.receiveContentOffer(db, fresh, req, {
+              contentDir: config.contentDir,
+              userId: meshPrincipalId(db),
+            });
           },
         }).start();
         /*

@@ -88,6 +88,9 @@ module.exports = function setupWebSockets(io) {
           // Same publication as the read side: routes reach the live socket layer through this
           // rather than importing it, because the sockets are constructed after routes are mounted.
           global.__meshWriteTo = meshNs.writeTo;
+          // Same publication, same reason. Content moves over HTTP; this is how the OFFER reaches a
+          // child that dialled out and may have no inbound route of its own.
+          global.__meshContentOfferTo = meshNs.contentOfferTo;
         }
         console.log(`[mesh] listening for child nodes as ${thisNodeId}`);
       }
