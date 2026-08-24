@@ -117,9 +117,25 @@ test('a write grant can never arrive over the wire (I2/I10)', () => {
       'the refusal must say WHERE a write grant comes from, not merely that this one is refused');
   }
 
-  // ...and the consent-side door accepts exactly those, and no read category.
-  for (const w of grants.ALL_WRITE) {
+  /*
+   * ...and the consent-side door accepts the ones this server can actually act on, and no read
+   * category.
+   *
+   * ⚠️ "Every write category is grantable by the owner" was too strong, and it hid a real problem
+   * rather than protecting anything: device-command is defined and described but NO rule in
+   * write-proxy.WRITABLE requires it, so an operator could read its consequence, tick it, and grant
+   * a permanent no-op. It is now marked unavailable and refused at the consent door. The invariant
+   * being protected here is that the door takes write categories and only the owner may use it —
+   * not that every category in the catalogue is currently implemented.
+   */
+  const implemented = grants.ALL_WRITE.filter((w) => grants.WRITE_CATEGORIES[w].available !== false);
+  assert.ok(implemented.length > 0, 'at least one write category must actually be grantable');
+  for (const w of implemented) {
     assert.equal(grants.validateWriteConsent([w]).ok, true, `${w} must be grantable by the owner`);
+  }
+  for (const w of grants.ALL_WRITE.filter((x) => !implemented.includes(x))) {
+    assert.equal(grants.validateWriteConsent([w]).ok, false,
+      `${w} has no enforcement rule, so granting it would promise something that cannot happen`);
   }
   for (const r of grants.ALL_READ) {
     assert.equal(grants.validateWriteConsent([r]).ok, false,

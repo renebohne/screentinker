@@ -471,6 +471,104 @@ async function renderScopeBox(panel) {
   });
 }
 
+
+/*
+ * ⚠️ THE CONSENT CONTROL. WITHOUT IT NOTHING ELSE IN THE WRITE FEATURE IS REACHABLE.
+ *
+ * The route that grants write access existed with no caller, and this tab rendered no trace of it,
+ * so a customer who linked read-only last month saw a screen identical to the one they saw before
+ * write existed. Every write on every install was refused for want of a grant nobody could give.
+ *
+ * Three things are stated before anything is ticked, because this is the screen where somebody
+ * gives away control of their own screens:
+ *   - what it currently is, in plain language, including nothing;
+ *   - both costs — what can change, and how much disk it may take;
+ *   - how much of that disk is already gone, which is only ever visible here.
+ *
+ * ⚠️ `writeBytesRemaining` is 0 rather than null when no budget is set — deliberately, so a
+ * careless renderer says "0 left" rather than "unlimited". So the budget is checked FIRST and the
+ * figure is not shown at all when there is none.
+ */
+function writeGrantBlock(u, caps) {
+  const cats = caps.writeCategories || {};
+  const granted = u.writeGrant || [];
+  const hasBudget = typeof u.writeBytesBudget === 'number';
+  const pct = hasBudget && u.writeBytesBudget > 0
+    ? Math.min(100, Math.round((u.writeBytesUsed / u.writeBytesBudget) * 100)) : 0;
+
+  const state = granted.length
+    ? `<span class="badge badge-warn">can change your screens</span>`
+    : `<span class="badge">read-only — this server cannot be changed from there</span>`;
+
+  const rows = Object.entries(cats).map(([name, meta]) => {
+    const unavailable = meta.available === false;
+    return `
+      <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;${unavailable ? 'opacity:.55' : ''}">
+        <input type="checkbox" data-wcat="${esc(name)}" ${granted.includes(name) ? 'checked' : ''}
+               ${unavailable ? 'disabled' : ''} style="margin-top:3px">
+        <span>
+          <strong>${esc(meta.summary || name)}</strong>
+          ${unavailable ? ' <span class="badge">not supported yet</span>' : ''}
+          <br><span style="color:var(--text-muted);font-size:12px">${esc(meta.consequence || '')}</span>
+        </span>
+      </label>`;
+  }).join('');
+
+  return `
+    <details class="mesh-write-grant" data-edge="${esc(u.edgeId)}" style="margin-top:10px" ${granted.length ? 'open' : ''}>
+      <summary style="cursor:pointer;font-size:13px">What this server may change here — ${state}</summary>
+
+      <div style="margin-top:10px;padding:10px;border:1px solid var(--border);border-radius:6px">
+        ${granted.length ? `
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+            ${(u.writeGrantExplained || []).map((line) => esc(line)).join('<br>')}
+            ${hasBudget ? `<br>Storage used: <strong>${esc(fmtBytes(u.writeBytesUsed))}</strong>
+              of ${esc(fmtBytes(u.writeBytesBudget))} (${pct}%).` : ''}
+          </div>` : ''}
+
+        ${rows}
+
+        <div data-wscope style="margin-top:10px"></div>
+
+        <label style="display:block;margin-top:10px;font-size:13px">
+          Storage it may use for content it sends you
+          <input class="input" type="number" min="1" step="1" data-wbudget
+                 value="${hasBudget ? Math.max(1, Math.round(u.writeBytesBudget / (1024 ** 3))) : ''}"
+                 placeholder="e.g. 20" style="max-width:120px;margin-left:8px"> GB
+        </label>
+        <!-- ⚠️ Says why the number is compulsory. An operator asked only "whose screens" answers
+             "how much of my disk" by default, and the default would be all of it. -->
+        <div style="color:var(--text-muted);font-size:12px;margin-top:4px">
+          Sending content means storing it here, so this is required. Lowering it never deletes
+          anything on its own.
+        </div>
+
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-secondary btn-sm" data-wsave="${esc(u.edgeId)}">Save</button>
+          ${granted.length ? `<button class="btn btn-secondary btn-sm" data-wrevoke="${esc(u.edgeId)}">
+             Revoke write access</button>` : ''}
+        </div>
+        <!-- ⚠️ Severing is a different act and says so, because "revoke" reads like "disconnect"
+             and an operator who wanted only to stop the writing must not lose the reporting. -->
+        <div style="color:var(--text-muted);font-size:12px;margin-top:6px">
+          Revoking write access keeps the connection and keeps reporting upward. Anything already
+          sent here stays until you remove it.
+        </div>
+        <div data-wout style="margin-top:8px"></div>
+      </div>
+    </details>`;
+}
+
+/** Bytes for humans. Mirrors grants.describeBytes on the server so both sides read the same. */
+function fmtBytes(n) {
+  const v = Number(n) || 0;
+  if (v <= 0) return 'nothing';
+  const GB = 1024 ** 3; const MB = 1024 ** 2;
+  if (v >= GB) return `${Math.round((v / GB) * 10) / 10} GB`;
+  if (v >= MB) return `${Math.round(v / MB)} MB`;
+  return `${v} bytes`;
+}
+
 async function renderConnect(panel, caps) {
   const uplinks = caps.uplinks || [];
 
@@ -523,6 +621,7 @@ async function renderConnect(panel, caps) {
               : esc(String(u.sharedWorkspaces.length)) + ' selected'}<br>
             Last synced: ${u.lastSyncAt ? esc(hhmm(Math.floor(u.lastSyncAt / 1000))) : 'never'}
           </div>
+          ${u.revoked ? '' : writeGrantBlock(u, caps)}
           ${u.revoked ? '' :
             `<button class="btn btn-secondary btn-sm" data-sever="${esc(u.edgeId)}"
                      style="margin-top:8px">Stop reporting</button>`}
@@ -564,6 +663,81 @@ async function renderConnect(panel, caps) {
         showToast(r.note || 'Stopped reporting.');
         renderConnect(panel, await api.get('/mesh/capabilities'));
       } catch (e) { showToast(e.message, 'error'); }
+    });
+  });
+
+  /*
+   * The workspace picker inside each write-grant block, filled from what THIS user may actually
+   * grant. Same source as the enrolment picker — /mesh/shareable-workspaces returns only workspaces the
+   * caller owns or administers, and the route re-checks that server-side, so this list is a
+   * convenience rather than the enforcement.
+   *
+   * ⚠️ No "all workspaces" option, deliberately, and this differs from the sharing picker above.
+   * Sharing all is a defensible default for visibility; writing to all — including workspaces
+   * created later, which nobody has considered yet — is not something to be able to tick once.
+   */
+  panel.querySelectorAll('.mesh-write-grant').forEach(async (box) => {
+    const holder = box.querySelector('[data-wscope]');
+    if (!holder) return;
+    const edgeId = box.dataset.edge;
+    const current = (caps.uplinks || []).find((u) => u.edgeId === edgeId) || {};
+    const chosen = new Set(current.writeWorkspaces || []);
+    try {
+      const r = await api.get('/mesh/shareable-workspaces');
+      const list = r.workspaces || [];
+      holder.innerHTML = list.length
+        ? `<div style="font-size:13px;margin-bottom:4px">Which workspaces it may write to</div>` +
+          list.map((w) => `
+            <label style="display:block;font-size:13px;margin:2px 0">
+              <input type="checkbox" data-wws="${esc(w.id)}" ${chosen.has(w.id) ? 'checked' : ''}>
+              ${esc(w.name)}${w.organization_name ? ` <span style="color:var(--text-muted)">— ${esc(w.organization_name)}</span>` : ''}
+            </label>`).join('')
+        : '<div style="color:var(--text-muted);font-size:12px">You do not administer any workspace here.</div>';
+    } catch (e) {
+      holder.innerHTML = '<div style="color:var(--text-muted);font-size:12px">Could not load workspaces.</div>';
+    }
+  });
+
+  const saveGrant = async (edgeId, body, box) => {
+    const out = box.querySelector('[data-wout]');
+    out.textContent = 'Saving…';
+    try {
+      const r = await api.put(`/mesh/uplink/${encodeURIComponent(edgeId)}/write-grant`, body);
+      /*
+       * ⚠️ The server's own consequence lines are shown, not a local paraphrase. They are written
+       * where the rule is enforced, so they cannot drift out of step with what was actually
+       * granted — and this is the sentence the operator is agreeing to.
+       */
+      showToast(r.note || 'Saved.');
+      out.innerHTML = (r.consequences || []).map((c) => `<div style="font-size:12px">${esc(c)}</div>`).join('');
+      renderConnect(panel, await api.get('/mesh/capabilities'));
+    } catch (e) {
+      out.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+    }
+  };
+
+  panel.querySelectorAll('[data-wsave]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const box = btn.closest('.mesh-write-grant');
+      const categories = [...box.querySelectorAll('input[data-wcat]:checked')].map((c) => c.dataset.wcat);
+      const workspaces = [...box.querySelectorAll('input[data-wws]:checked')].map((c) => c.dataset.wws);
+      const gb = Number(box.querySelector('[data-wbudget]')?.value);
+      saveGrant(btn.dataset.wsave, {
+        categories,
+        workspaces,
+        // The field is GB because that is the unit an operator thinks in; the wire is bytes
+        // because that is what the budget is spent in.
+        ...(Number.isFinite(gb) && gb > 0 ? { bytes_budget: Math.round(gb * (1024 ** 3)) } : {}),
+      }, box);
+    });
+  });
+
+  panel.querySelectorAll('[data-wrevoke]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const box = btn.closest('.mesh-write-grant');
+      // An empty category list is the documented way to revoke write WITHOUT severing the link —
+      // the whole point of having partial revocation at all.
+      saveGrant(btn.dataset.wrevoke, { categories: [] }, box);
     });
   });
 }

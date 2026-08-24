@@ -116,6 +116,21 @@ const WRITE_CATEGORIES = Object.freeze({
   'device-command': {
     summary: 'Reboot, reload, change settings on screens',
     consequence: 'This hub will be able to restart and reconfigure your screens.',
+    /*
+     * ⚠️ DEFINED BUT NOT YET IMPLEMENTED, AND SAID SO RATHER THAN LEFT TO LOOK REAL.
+     *
+     * Every rule in write-proxy.WRITABLE requires 'content-push'; there is no rule any
+     * device-command grant could satisfy, and the hub-side action name ('command-devices') is
+     * never checked anywhere either. So an operator could read this consequence, tick the box,
+     * and grant a permanent no-op — believing they had allowed something they had not, which is
+     * the worse direction for a consent screen to be wrong in.
+     *
+     * Device commands travel over the socket rather than the HTTP surface the allowlist covers, so
+     * this is a feature to build, not a line to add. Until then it is refused at the door and
+     * rendered unavailable, per the note in client-roles.js: a capability that does not exist
+     * reads as a promise the product does not keep.
+     */
+    available: false,
   },
 });
 
@@ -220,6 +235,22 @@ function validateWriteConsent(requested) {
               `and is set when the connection is made, not here.`,
     };
   }
+  /*
+   * ⚠️ Refused at the door rather than stored and quietly ignored. A category with no enforcement
+   * rule behind it grants nothing, and an operator who ticked it would believe otherwise — the
+   * consent screen's only job is to be true.
+   */
+  const unavailable = requested.filter((c) => WRITE_CATEGORIES[c] && WRITE_CATEGORIES[c].available === false);
+  if (unavailable.length) {
+    return {
+      ok: false,
+      rejected: unavailable,
+      reason: `${unavailable.join(', ')} cannot be granted yet — this server has no way to act on ` +
+              `${unavailable.length === 1 ? 'it' : 'them'}, so granting would permit nothing. ` +
+              'Leave it unticked until it is supported.',
+    };
+  }
+
   return { ok: true, categories: [...new Set(requested)] };
 }
 

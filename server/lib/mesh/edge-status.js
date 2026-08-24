@@ -74,7 +74,14 @@ function consentView(edge, now) {
      * that. A consent view that cannot report the thing it exists to report is worse than no
      * consent view, because it is believed.
      */
-    parentCanControlThisNode: writeCategories.length > 0,
+    /*
+     * ⚠️ BOTH HALVES, because enforcement needs both. grants.writeAllows refuses when the scope is
+     * empty just as firmly as when the categories are — so a row with categories and no workspaces
+     * denied everything while this reported that the parent could control the node. It failed in
+     * the safe direction and was still a lie, on the one screen whose entire purpose is to tell an
+     * operator the truth about who can change their screens.
+     */
+    parentCanControlThisNode: writeCategories.length > 0 && writeWorkspaces.length > 0,
     writeGrant: writeCategories,
     writeGrantExplained: grants.describeGrant(writeCategories),
     writeWorkspaces: writeWorkspaces,
@@ -86,6 +93,14 @@ function consentView(edge, now) {
      */
     writeBytesBudget: typeof edge.write_bytes_budget === 'number' ? edge.write_bytes_budget : null,
     writeBytesUsed: Number(edge.write_bytes_used) || 0,
+    /*
+     * ⚠️ 0, NOT null, when there is no budget — and that is deliberate in the dangerous direction.
+     * A UI that renders `remaining` without first checking `writeBytesBudget` will say "0 bytes
+     * remaining" for a grant that never involved storage, which is merely confusing; null invites
+     * the same careless UI to render "unlimited", which is a lie about how much of someone's disk
+     * a hub may take. Absent and empty are told apart by writeBytesBudget === null, and the consent
+     * view checks that before showing any figure.
+     */
     writeBytesRemaining: typeof edge.write_bytes_budget === 'number'
       ? Math.max(0, edge.write_bytes_budget - (Number(edge.write_bytes_used) || 0))
       : 0,

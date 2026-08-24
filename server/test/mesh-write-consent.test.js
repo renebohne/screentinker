@@ -100,7 +100,11 @@ test('⚠️ a write category offered over the wire is REFUSED, and says where o
 });
 
 test('the consent door takes writes and refuses reads; the wire door is the mirror image', () => {
-  assert.equal(grants.validateWriteConsent(['content-push', 'device-command']).ok, true);
+  assert.equal(grants.validateWriteConsent(['content-push']).ok, true);
+  // ⚠️ device-command was listed here too until it was marked unavailable: it is defined and
+  // described but no rule in write-proxy.WRITABLE requires it, so granting it permitted nothing.
+  // The mirror-image property this test exists for is unaffected — see the dedicated test below.
+  assert.equal(grants.validateWriteConsent(['content-push', 'device-command']).ok, false);
   assert.equal(grants.validateWriteConsent(['health']).ok, false,
     'a read category set through the write door would let one route widen the other column');
   assert.equal(grants.validateGrant(['health']).ok, true);
@@ -197,4 +201,57 @@ test('bytes are described in units an operator reads without counting zeroes', (
   assert.equal(grants.describeBytes(20 * GB), '20 GB');
   assert.equal(grants.describeBytes(0), 'nothing');
   assert.equal(grants.describeBytes(null), 'nothing');
+});
+
+/*
+ * ⚠️ SEVERING MUST TAKE THE WRITE GRANT WITH IT.
+ *
+ * Severing used to null only the token, leaving write_grant, write_scope and write_bytes_budget on
+ * the row — and the enrolment upsert sets revoked_at = NULL on conflict. So re-pairing the same
+ * peer silently RESTORED write access to workspaces chosen months earlier, while the response
+ * reported writeGrant: [] and "the connection was made read-only". An operator told to "re-pair to
+ * fix the stale token" handed write access back without being asked.
+ */
+test('⚠️ severing clears the write grant, so re-pairing cannot resurrect it', () => {
+  const edge = mkEdge({ write_grant: ['content-push'], write_scope: [wsA], budget: 20 * GB });
+  db.prepare(`UPDATE mesh_edges SET revoked_at = strftime('%s','now'), up_token = NULL,
+              write_grant = NULL, write_scope = NULL, write_bytes_budget = NULL
+              WHERE id = ?`).run(edge.id);
+
+  const after = db.prepare('SELECT * FROM mesh_edges WHERE id = ?').get(edge.id);
+  assert.equal(after.write_grant, null);
+  assert.equal(after.write_scope, null);
+  assert.equal(after.write_bytes_budget, null);
+
+  db.prepare('UPDATE mesh_edges SET revoked_at = NULL WHERE id = ?').run(edge.id);
+  const view = consentView({ ...db.prepare('SELECT * FROM mesh_edges WHERE id = ?').get(edge.id),
+                             grant_categories: [] }, Date.now());
+  assert.equal(view.parentCanControlThisNode, false);
+  assert.deepEqual(view.writeGrant, []);
+});
+
+test('⚠️ a grant with categories but no workspaces does not claim the parent can control this node', () => {
+  /*
+   * Enforcement refuses an empty scope exactly as firmly as an empty category list, so such a row
+   * permits nothing — but the consent view reported that the parent COULD control the node. It
+   * failed in the safe direction and was still a lie, on the one screen whose whole purpose is to
+   * tell an operator the truth about who can change their screens.
+   */
+  const edge = mkEdge({ write_grant: ['content-push'], write_scope: [] });
+  const view = consentView({ ...edge, grant_categories: [] }, Date.now());
+  assert.equal(view.parentCanControlThisNode, false);
+});
+
+test('⚠️ a category nothing can enforce cannot be granted', () => {
+  const r = grants.validateWriteConsent(['device-command']);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /cannot be granted yet/i);
+  assert.deepEqual(r.rejected, ['device-command']);
+  assert.equal(grants.validateWriteConsent(['content-push']).ok, true);
+});
+
+test('the catalogue marks which categories are unavailable, so the UI can say so', () => {
+  assert.equal(grants.WRITE_CATEGORIES['content-push'].available, undefined,
+    'available is absent on the ones that work — only the exception is marked');
+  assert.equal(grants.WRITE_CATEGORIES['device-command'].available, false);
 });

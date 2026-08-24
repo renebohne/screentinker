@@ -51,3 +51,42 @@ function unlinkIfUnreferenced(rel, keeperId, column) {
 }
 
 module.exports = { unlinkIfUnreferenced, REFCOUNTED_COLUMNS };
+
+/*
+ * ⚠️ RETURNING THE ALLOWANCE WHEN MESH-RECEIVED CONTENT IS DELETED.
+ *
+ * write_bytes_used only ever went up. There was one mutation of it in the tree and it was `+ ?`,
+ * so an operator's storage grant was a one-way ratchet: a 20 GB allowance that had cycled through
+ * 20 GB of rotated campaigns was permanently exhausted, with no remedy short of editing SQLite.
+ * Worse, the route that sets a budget refuses any value below `used` and tells the operator to
+ * "remove some of it first" — advice that could not work, because removing it changed nothing.
+ *
+ * The number was written as CONSUMPTION ("bytes ever pushed") and presented as CAPACITY ("storage
+ * you are lending"). Those are the same figure only until something is deleted, which for signage
+ * is weekly.
+ *
+ * Called with the provenance row still present, and does both halves in one transaction: a refund
+ * without the deletion would double-refund on the next delete.
+ */
+function releaseMeshProvenance(contentId) {
+  const prov = db.prepare(
+    'SELECT edge_id, bytes FROM mesh_content_provenance WHERE local_content_id = ?',
+  ).all(contentId);
+  if (!prov.length) return { released: 0 };
+
+  let released = 0;
+  db.transaction(() => {
+    for (const row of prov) {
+      if (row.edge_id && row.bytes > 0) {
+        db.prepare(`UPDATE mesh_edges
+                       SET write_bytes_used = MAX(0, COALESCE(write_bytes_used,0) - ?)
+                     WHERE id = ?`).run(row.bytes, row.edge_id);
+        released += row.bytes;
+      }
+    }
+    db.prepare('DELETE FROM mesh_content_provenance WHERE local_content_id = ?').run(contentId);
+  })();
+  return { released };
+}
+
+module.exports.releaseMeshProvenance = releaseMeshProvenance;

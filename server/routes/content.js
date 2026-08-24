@@ -16,7 +16,7 @@ const { accessContext } = require('../lib/tenancy');
 const { ingestUploadedFile, deriveMediaMetadata } = require('../lib/content-ingest');
 const { finalizeUpload, INLINE_SAFE_EXTS } = require('../lib/upload-sniff');
 const { digestFile } = require('../lib/content-digest');
-const { unlinkIfUnreferenced } = require('../lib/content-files');
+const { unlinkIfUnreferenced, releaseMeshProvenance } = require('../lib/content-files');
 
 // Multer captures file.originalname directly from the multipart filename header,
 // bypassing sanitizeBody. Apply the same HTML-escape here so a filename like
@@ -308,7 +308,7 @@ function purgeContentRow(content) {
    * conclude the bytes are merely missing, transfer the whole file again and charge the operator's
    * allowance a second time for storage they had already paid for and then reclaimed.
    */
-  db.prepare('DELETE FROM mesh_content_provenance WHERE local_content_id = ?').run(id);
+  releaseMeshProvenance(id);
 
   // Resolved: a device that INHERITS the playlist holding this content has no copy of the id on
   // its row, so joining on devices.playlist_id would leave exactly those screens showing content

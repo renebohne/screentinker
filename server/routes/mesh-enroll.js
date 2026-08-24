@@ -369,7 +369,40 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
         sharedWorkspaces: e.shared_workspaces ? store.safeParseArray(e.shared_workspaces) : null,
         lastSyncAt: e.last_sync_at ? e.last_sync_at * 1000 : null,
         revoked: !!e.revoked_at,
+
+        /*
+         * ⚠️ THE WRITE GRANT TRAVELS WITH THE REST, or the operator cannot see it.
+         *
+         * consentView() computes every one of these carefully — and was served ONLY by GET /uplink,
+         * which nothing calls. The Connect tab reads this route, whose projection had no write
+         * fields at all, so a customer who linked read-only last month saw a screen identical to
+         * the one they saw before write existed: no grant, no budget, no revoke, no affordance to
+         * discover any of it. The route to grant write access existed and had no caller either.
+         *
+         * Spread from the same function rather than re-derived here, because a second computation
+         * of "can this parent control my screens" is a second chance to answer it wrongly.
+         */
+        ...(() => {
+          const view = edgeStatus.consentView(
+            { ...e, grant_categories: store.safeParseArray(e.grant_categories) }, Date.now(),
+          ) || {};
+          return {
+            parentCanControlThisNode: !!view.parentCanControlThisNode,
+            writeGrant: view.writeGrant || [],
+            writeGrantExplained: view.writeGrantExplained || [],
+            writeWorkspaces: view.writeWorkspaces || [],
+            writeBytesBudget: view.writeBytesBudget ?? null,
+            writeBytesUsed: view.writeBytesUsed ?? 0,
+            writeBytesRemaining: view.writeBytesRemaining ?? 0,
+          };
+        })(),
       })),
+      /*
+       * The catalogue the consent UI renders its checkboxes from — names, plain-language
+       * consequences and which ones cost disk. Sent with the state so the two cannot disagree
+       * about what a category means.
+       */
+      writeCategories: grants.WRITE_CATEGORIES,
     });
   });
 
@@ -581,16 +614,34 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
       });
     }
     /*
-     * ⚠️ Membership is checked against OUR OWN rows, not against anything the caller sent about
-     * itself. An id in the body is a request; whether it names a workspace on this node is a
-     * question only this node can answer.
+     * ⚠️ AGAINST THE CALLER'S OWN WORKSPACES, NOT EVERY WORKSPACE ON THE SERVER.
+     *
+     * This read `SELECT id FROM workspaces` — the whole box — while the route is gated only by
+     * "administers at least one workspace". So any workspace admin could hand a hub write access
+     * to someone ELSE's workspace on a shared server: strictly more power than POST /uplink, which
+     * grants only visibility and correctly checks owner/admin membership per workspace. The route
+     * giving away more had the weaker check.
+     *
+     * Same query as the enrolment path, and the instance owner keeps the wider set for the same
+     * reason they do there.
      */
-    const mine = new Set(db.prepare('SELECT id FROM workspaces').all().map((w) => w.id));
+    const isOwner = req.user && req.user.role === 'platform_admin';
+    let mineRows = [];
+    try {
+      mineRows = isOwner
+        ? db.prepare('SELECT id FROM workspaces').all()
+        : db.prepare(`SELECT w.id FROM workspaces w
+                        JOIN workspace_members m ON m.workspace_id = w.id
+                       WHERE m.user_id = ? AND m.role IN ('owner','admin')`).all(req.user.id);
+    } catch (e) { mineRows = []; }
+    const mine = new Set(mineRows.map((w) => w.id));
     const foreign = wanted.filter((w) => !mine.has(w));
     if (foreign.length) {
       return res.status(400).json({
-        error: `${foreign.length === 1 ? 'That workspace is' : 'Those workspaces are'} not on this ` +
-               'server.', rejected: foreign,
+        // Deliberately does not distinguish "does not exist here" from "not yours" — the same
+        // reasoning as the write door's single refusal string.
+        error: `${foreign.length === 1 ? 'That workspace is' : 'Those workspaces are'} not yours ` +
+               'to grant on this server.', rejected: foreign,
       });
     }
 
@@ -645,15 +696,32 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
   router.delete('/uplink/:id', requireAuth, requireCanShareSomething(db), (req, res) => {
     const edge = db.prepare("SELECT * FROM mesh_edges WHERE id = ? AND direction = 'up'").get(req.params.id);
     if (!edge) return res.status(404).json({ error: 'No such connection.' });
-    db.prepare('UPDATE mesh_edges SET revoked_at = ?, up_token = NULL WHERE id = ?')
-      .run(nowSec(), edge.id);
+    /*
+     * ⚠️ THE WRITE GRANT GOES WITH IT. Severing used to null only the token, leaving write_grant,
+     * write_scope and write_bytes_budget on the row — and the enrolment upsert sets revoked_at =
+     * NULL on conflict, so re-pairing the same peer silently RESTORED write access to workspaces
+     * the operator had chosen months earlier, while the response cheerfully reported
+     * `writeGrant: []` and "the connection was made read-only".
+     *
+     * The partial-revoke path already clears all three and says why: so a later re-grant cannot
+     * inherit an old choice. Severing is the stronger act and had the weaker cleanup. The note in
+     * the enrolment path claiming re-pairing cannot widen a grant was true only for an edge that
+     * had never been revoked; against a revoked one, un-revoking IS the widening.
+     *
+     * write_bytes_used is deliberately left alone — it is a record of what is still stored here,
+     * not a permission, and zeroing it would lose track of bytes that are still on the disk.
+     */
+    db.prepare(`UPDATE mesh_edges SET revoked_at = ?, up_token = NULL,
+                write_grant = NULL, write_scope = NULL, write_bytes_budget = NULL
+                WHERE id = ?`).run(nowSec(), edge.id);
     if (typeof onUplinkChanged === 'function') onUplinkChanged();
     res.json({
       ok: true,
       // ⚠️ Says plainly what severing does and does NOT do. The parent keeps what it already
       // received; pretending otherwise would be the more comfortable answer and the false one.
-      note: 'This server has stopped reporting upward. Data already sent is still held by the other ' +
-            'server until it purges it — ask them to purge if that matters.',
+      note: 'This server has stopped reporting upward, and any write access it had is revoked. ' +
+            'Data already sent is still held by the other server until it purges it — ask them to ' +
+            'purge if that matters.',
     });
   });
 

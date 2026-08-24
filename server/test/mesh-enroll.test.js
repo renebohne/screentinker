@@ -34,7 +34,14 @@ function freshDb() {
       tls_verify INTEGER DEFAULT 1, peer_version TEXT, peer_min_version TEXT, token_hash TEXT,
       token_expires_at INTEGER, client_id TEXT, created_at INTEGER, last_sync_at INTEGER,
       revoked_at INTEGER, peer_url TEXT, up_token TEXT, peer_name TEXT,
-      shared_workspaces TEXT, UNIQUE (peer_node_id, direction));
+      shared_workspaces TEXT,
+      -- ⚠️ The write-consent columns. Absent from this fixture, severing an uplink threw (it clears
+      -- the grant so a later re-pair cannot resurrect it) and the route answered the SPA's HTML
+      -- error page — which surfaced as "Unexpected token '<'". Third fixture drift of this kind in
+      -- one sweep, hence the schema guard at the end of this file.
+      write_grant TEXT, write_scope TEXT,
+      write_bytes_budget INTEGER, write_bytes_used INTEGER NOT NULL DEFAULT 0,
+      UNIQUE (peer_node_id, direction));
     CREATE TABLE workspaces (id TEXT PRIMARY KEY, organization_id TEXT, name TEXT);
     CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT);
     CREATE TABLE workspace_members (id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT, role TEXT);
@@ -358,4 +365,46 @@ test('sharing nothing at all is refused rather than treated as everything', asyn
     assert.equal(r.status, 400);
     assert.match((await r.json()).error, /at least one workspace/);
   } finally { await close(); cleanup(db); }
+});
+
+/*
+ * ⚠️ THE FIXTURE SCHEMA MATCHES THE REAL ONE.
+ *
+ * This file builds mesh_edges by hand, and a hand-built table silently diverges from the migrations
+ * every time a column is added — the route then throws, Express serves the SPA's HTML error page,
+ * and the failure reads as "Unexpected token '<'" rather than "your fixture is out of date". That
+ * has now happened three times in one sweep, in three different files, so it is worth a guard
+ * rather than a habit.
+ *
+ * mesh-mirror-store.test.js has carried this check for a while and it caught the write columns in
+ * one run. This is the same guard, on the table this file owns.
+ */
+test('⚠️ the hand-built mesh_edges matches the real schema', () => {
+  const os = require('node:os');
+  const nodePath = require('node:path');
+  const cryptoMod = require('node:crypto');
+
+  // A real database, built by the migrations, in a throwaway directory.
+  const dir = nodePath.join(os.tmpdir(), 'st-enroll-schema-' + cryptoMod.randomBytes(4).toString('hex'));
+  const prev = process.env.DATA_DIR;
+  process.env.DATA_DIR = dir;
+  for (const k of Object.keys(require.cache)) {
+    if (k.includes('/db/database') || k.endsWith('/server/config.js')) delete require.cache[k];
+  }
+  let real;
+  try {
+    const { db: realDb } = require('../db/database');
+    real = realDb.prepare('PRAGMA table_info(mesh_edges)').all().map((c) => c.name).sort();
+  } finally {
+    process.env.DATA_DIR = prev;
+    for (const k of Object.keys(require.cache)) {
+      if (k.includes('/db/database') || k.endsWith('/server/config.js')) delete require.cache[k];
+    }
+  }
+
+  const fixture = freshDb().prepare('PRAGMA table_info(mesh_edges)').all().map((c) => c.name).sort();
+  const missing = real.filter((c) => !fixture.includes(c));
+  assert.deepEqual(missing, [],
+    `this file's mesh_edges is missing ${missing.join(', ')} — add them to the CREATE TABLE above, ` +
+    'or every route touching those columns will throw here and pass in production');
 });
