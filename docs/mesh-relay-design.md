@@ -61,29 +61,60 @@ whole security review:
    be told about (a new downward verb, with all that implies) or cached content outlives the
    relationship that created it.
 
-## The design I would propose, if the answers are the conservative ones
+## Decision taken: both modes, and the flag is not where the authority lives
 
-Scoped to question 1's safer half: **a relay caches only content its own operator pushed.** Then:
+Question 1 is answered — **both**. An MSP pushing their own campaign to forty sites and a customer
+distributing their own media between their own sites are both real, and one build should serve both.
 
-- No new consent surface. The relay's operator owns the bytes; the child already consents to
-  receiving them from that operator's hub.
-- Tickets stay honest. The relay is the originator of its own pushes, so it mints tickets for
-  content it owns, exactly as a hub does today.
-- Accounting is unchanged. The child's allowance covers what lands on the child; the relay's disk is
-  the relay operator's own problem.
-- The digest makes it verifiable end to end: a child checks size, digest and type on arrival
-  regardless of which node it fetched from, so a compromised relay cannot substitute a file.
-- Revocation still works, because there is no third party's content to strand.
+⚠️ **But "configurable" cannot mean one flag.** Whoever sets a flag on the relay is the relay's
+operator — the party that BENEFITS from caching — while the party giving something up is the
+customer whose bytes land on a node they have no relationship with. A single setting hands the
+decision to the wrong side of the transaction, which is exactly the defect the write grant already
+had once: the parent authored the grant the child enforced, and it took an amendment to I2 to fix.
 
-What this does **not** solve is the case where a customer's own content needs distributing across
-their own sites — which is the same feature with question 2 answered, and should be a separate
-decision taken deliberately rather than inherited.
+So it is two settings, held by two parties, and both are required before a byte is cached:
+
+| Setting | Held by | Answers | Nature |
+|---|---|---|---|
+| `redistributes-content` capability | the relay's operator | "am I willing to spend my disk and bandwidth being a cache?" | a RESOURCE decision |
+| a cache consent on the write grant | the content's owner | "may my media be held on intermediate servers to reach my other sites?" | an AUTHORITY decision |
+
+The first is a capability declaration, like every other one on an edge — it says what a node *can*
+do, never what it *may*. The second is a new consent on the existing grant surface: the same page,
+the same wording discipline, the same partial revocation. Absent means no, as it does everywhere
+else in this design, so every existing relationship stays uncached until somebody says otherwise.
+
+**The conservative mode falls out for free rather than being a separate build.** Content the relay's
+own operator owns needs no cache consent from anyone, because the relay operator IS the owner — the
+consent check simply passes trivially. So "MSP caches their own campaign" works with nothing ticked,
+and "customer's media crosses a third node" requires the customer to have said so. One mechanism,
+two behaviours, and the difference is whose content it is rather than whose flag is set.
+
+### What the consent must say
+
+The sentence has to name the thing a customer cannot infer: that a copy of their media will sit on
+a server belonging to somebody they have no contract with, for as long as that server keeps it.
+Anything vaguer and the screen overstates what it grants — the failure this design keeps returning
+to. It should also say what revocation does and does not reach, because the honest answer is that a
+cached copy outlives the relationship unless the purge verb below exists.
+
+### What it still forces us to build
+
+- **A downward purge verb.** With cache consent revocable, revoking has to reach the cached copies,
+  or revocation means less than it says. That is a new downward message and needs the same allowlist
+  treatment as every other one (I2).
+- **Digest verification on ingest AND on serve.** A relay serving one wrong file puts it on every
+  screen beneath it — a larger blast radius than any single node has today. The child still verifies
+  independently, so a compromised relay cannot substitute a file, but it must not be the only check.
+- **A third accounting axis.** A cached copy is on neither the child's disk nor the originating
+  hub's. Unbounded otherwise.
 
 ## Preconditions to lift before writing any of it
 
 1. A two-tier mesh running on real hardware across a real WAN link, with the content transfer
    exercised on a link that genuinely drops. Not a lab.
-2. An answer to question 1 — because the conservative and permissive versions are different
-   features, not different settings.
+2. ~~An answer to question 1~~ — answered: both, via two settings held by two parties (above).
+   What remains is question 2's mechanics: the exact consent wording, and the purge verb that makes
+   revoking a cache consent mean something.
 3. `MESH_MAX_DEPTH` raised only after 1, and only for topologies that have been drawn out. A depth
    of 3 with N regional nodes is a different failure surface from a chain of 3.
