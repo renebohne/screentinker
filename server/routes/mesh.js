@@ -149,11 +149,24 @@ module.exports = function meshRoutes(db, { requireAuth }) {
         .filter((e) => (e.client_id ? allowed.has(e.client_id) : user && user.role === 'platform_admin'))
         .map((e) => e.id),
     );
+    /*
+     * ⚠️ FROM THE ROUTE MAP, NOT FROM DEVICE ROWS.
+     *
+     * This first derived relayed nodes from mesh_mirror_devices, which tied a server's VISIBILITY to
+     * it having screens. A site that had connected but had nothing plugged in yet was therefore
+     * invisible — its workspace arrived and could not be shown, and acting on it answered "no such
+     * server" about a row on the topology page, because the topology reads the route map while this
+     * read the devices.
+     *
+     * mesh_node_paths is the right source: it is written for ANY relayed payload — node health, a
+     * workspace, a screen — so a server appears as soon as it is genuinely reachable through
+     * something visible, which is the same moment the topology admits it exists.
+     */
     let relayed = [];
     try {
-      relayed = db.prepare(
-        'SELECT DISTINCT origin_node_id, edge_id FROM mesh_mirror_devices WHERE edge_id IS NOT NULL',
-      ).all().filter((r) => visibleEdgeIds.has(r.edge_id)).map((r) => r.origin_node_id);
+      relayed = db.prepare('SELECT node_id, via_edge_id FROM mesh_node_paths').all()
+        .filter((r) => visibleEdgeIds.has(r.via_edge_id))
+        .map((r) => r.node_id);
     } catch (e) { relayed = []; }
 
     return [...new Set([...direct, ...relayed])];
@@ -691,11 +704,53 @@ module.exports = function meshRoutes(db, { requireAuth }) {
     res.json({ ok: true, client_id: req.params.id, user_id: userId, role });
   });
 
+  /*
+   * ⚠️ "NO SUCH SERVER" IS THE RIGHT ANSWER TO A STRANGER AND THE WRONG ONE TO YOUR OWN OPERATOR.
+   *
+   * Acting on a node requires a DIRECT link: writes, content and commands all reach a child over
+   * the socket it dialled in on, and there is deliberately no forwarding — the servers below a
+   * relay granted THAT relay, not whoever sits above it, so passing an instruction through would
+   * let a grandparent act on a grant it was never given.
+   *
+   * But relayed telemetry means a node two hops down now APPEARS on the topology and in the fleet
+   * list. An operator clicks it and, before this, was told "No such server" about a row they were
+   * looking at. The refusal was correct and the message was a lie.
+   *
+   * So the two cases are separated: a node nobody may see stays "no such server", because whether
+   * it exists is not something an unauthorised caller learns. A node you CAN see but cannot reach
+   * directly says so, and names the server that does have the link — which is the next thing that
+   * person needs to know.
+   */
+  function directEdgeOrExplain(user, nodeId) {
+    const ids = visibleNodeIds(user);
+    if (!ids.includes(nodeId)) return { ok: false, status: 404, error: 'No such server.' };
+
+    const direct = db.prepare(
+      "SELECT * FROM mesh_edges WHERE peer_node_id = ? AND direction = 'down' AND revoked_at IS NULL")
+      .get(nodeId);
+    if (direct) return { ok: true, edge: direct };
+
+    let via = null;
+    try {
+      const path = db.prepare('SELECT via_edge_id, hops FROM mesh_node_paths WHERE node_id = ?').get(nodeId);
+      if (path) via = db.prepare('SELECT peer_node_id, peer_name FROM mesh_edges WHERE id = ?').get(path.via_edge_id);
+    } catch (e) { via = null; }
+
+    return {
+      ok: false,
+      status: 409,
+      error: via
+        ? `That server reports through ${via.peer_name || `server ${String(via.peer_node_id).slice(0, 8)}`}, ` +
+          'not to this one, so changes cannot be sent to it from here. Ask that server to make the ' +
+          'change, or connect to it directly.'
+        : 'That server does not report to this one directly, so changes cannot be sent to it from here.',
+      reachableFrom: via ? via.peer_node_id : null,
+    };
+  }
+
   router.post('/write/:nodeId', requireAuth, async (req, res) => {
-    const ids = visibleNodeIds(req.user);
-    if (!ids.includes(req.params.nodeId)) {
-      return res.status(404).json({ error: 'No such server.' });
-    }
+    const reach = directEdgeOrExplain(req.user, req.params.nodeId);
+    if (!reach.ok) return res.status(reach.status).json(reach);
     /*
      * ⚠️ Seeing a client is not permission to change their screens. Before this check any `viewer`
      * who could reach the node could reach this route — the read proxy gates on visibility alone,
@@ -772,10 +827,8 @@ module.exports = function meshRoutes(db, { requireAuth }) {
    * it already had — which also means one slow transfer cannot block the control plane.
    */
   router.post('/content/:nodeId', requireAuth, async (req, res) => {
-    const ids = visibleNodeIds(req.user);
-    if (!ids.includes(req.params.nodeId)) {
-      return res.status(404).json({ error: 'No such server.' });
-    }
+    const reach = directEdgeOrExplain(req.user, req.params.nodeId);
+    if (!reach.ok) return res.status(reach.status).json(reach);
     if (!canWriteToNode(req.user, req.params.nodeId, 'push-content')) {
       return res.status(403).json({
         error: 'You do not have permission to send content to this client. Ask an administrator ' +
@@ -788,9 +841,7 @@ module.exports = function meshRoutes(db, { requireAuth }) {
       return res.status(503).json({ error: 'This server is not accepting connections from others.' });
     }
 
-    const edge = db.prepare("SELECT * FROM mesh_edges WHERE peer_node_id = ? AND direction = 'down'")
-      .get(req.params.nodeId);
-    if (!edge) return res.status(404).json({ error: 'No such server.' });
+    const edge = reach.edge;
 
     const workspaceId = req.body && req.body.workspace_id;
     if (!workspaceId) {
@@ -884,13 +935,14 @@ module.exports = function meshRoutes(db, { requireAuth }) {
       const workspaceId = t && t.workspace_id;
       const label = { nodeId, workspaceId };
       if (!nodeId || !workspaceId) return { ...label, ok: false, reason: 'Missing server or workspace.' };
-      if (!visible.includes(nodeId)) return { ...label, ok: false, reason: 'No such server.' };
+      // ⚠️ Same reachability answer as the single send, per target — a batch across forty sites is
+      // exactly where an operator meets a relayed node and needs to be told why it was skipped.
+      const reach = directEdgeOrExplain(req.user, nodeId);
+      if (!reach.ok) return { ...label, ok: false, reason: reach.error };
       if (!canWriteToNode(req.user, nodeId, 'push-content')) {
         return { ...label, ok: false, reason: 'You may not send content to that client.' };
       }
-      const edge = db.prepare("SELECT * FROM mesh_edges WHERE peer_node_id = ? AND direction = 'down'")
-        .get(nodeId);
-      if (!edge) return { ...label, ok: false, reason: 'No such server.' };
+      const edge = reach.edge;
 
       /*
        * ⚠️ A FRESH OFFER PER TARGET, tickets included. A ticket names one file on one EDGE, so
@@ -947,8 +999,8 @@ module.exports = function meshRoutes(db, { requireAuth }) {
    * wall, and the decision to accept that belongs to whoever is standing in front of it.
    */
   router.post('/content/:nodeId/purge', requireAuth, async (req, res) => {
-    const ids = visibleNodeIds(req.user);
-    if (!ids.includes(req.params.nodeId)) return res.status(404).json({ error: 'No such server.' });
+    const reach = directEdgeOrExplain(req.user, req.params.nodeId);
+    if (!reach.ok) return res.status(reach.status).json(reach);
     if (!canWriteToNode(req.user, req.params.nodeId, 'push-content')) {
       return res.status(403).json({ error: 'You do not have permission to change content on this client.' });
     }
@@ -1019,11 +1071,15 @@ module.exports = function meshRoutes(db, { requireAuth }) {
   });
 
   router.get('/read/:nodeId', requireAuth, async (req, res) => {
-    const ids = visibleNodeIds(req.user);
-    if (!ids.includes(req.params.nodeId)) {
-      // 404 rather than 403: whether a node exists is not something an unauthorised caller learns.
-      return res.status(404).json({ error: 'No such server.' });
-    }
+    /*
+     * ⚠️ Reads do not traverse a relay either — readFrom finds a directly-connected socket or
+     * nothing. Before this, asking a two-hop server for live data answered "not connected right
+     * now", which reads as a temporary fault and invites retrying something that can never work.
+     * A node nobody may see still gets the flat 404: whether it exists is not something an
+     * unauthorised caller learns.
+     */
+    const reach = directEdgeOrExplain(req.user, req.params.nodeId);
+    if (!reach.ok) return res.status(reach.status).json(reach);
     const readFrom = global.__meshReadFrom;
     if (!readFrom) {
       return res.status(503).json({ error: 'This server is not accepting connections from others.' });

@@ -192,6 +192,15 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
     for (const n of nodeData.relayedNodeProjections(db)) {
       bulk.push(mkFor(n.origin_node_id, 'node-health', n));
     }
+    /*
+     * ⚠️ Workspaces before the devices that belong to them — the same ordering rule as our own, and
+     * for the same reason: a screen arriving before its workspace flickers into "unfiled" and back
+     * out again on the first sync. Without these at all, a relayed screen upstream carried a
+     * workspace id that node had never heard of and could not be filed under any customer.
+     */
+    for (const w of nodeData.relayedWorkspaceProjections(db)) {
+      bulk.push(mkFor(w.origin_node_id, 'workspace-summary', w));
+    }
 
     for (const d of deviceProjections(db, grant, edge)) {
       // Ours keep our origin; a relayed one keeps the origin it arrived with.

@@ -122,6 +122,32 @@ function relayedNodeProjections(db) {
   }
 }
 
+/*
+ * ⚠️ AND THE WORKSPACES THOSE SCREENS BELONG TO. Relaying devices without them left a screen
+ * arriving upstream carrying a workspace_id the receiving node had never heard of — so it could not
+ * be filed under a customer, did not appear in the switcher, and showed as belonging to nothing.
+ * A screen is only meaningful as somebody's screen.
+ */
+function relayedWorkspaceProjections(db) {
+  try {
+    return db.prepare(`
+      SELECT w.origin_node_id, w.workspace_id, w.name, w.organization_name, w.device_count
+        FROM mesh_mirror_workspaces w
+        JOIN mesh_edges e ON e.peer_node_id = w.origin_node_id
+                         AND e.direction = 'down' AND e.revoked_at IS NULL
+       WHERE e.peer_shares_upward = 1
+         AND w.deleted_at IS NULL`).all().map((r) => ({
+      id: r.workspace_id,
+      name: r.name || null,
+      organization_name: r.organization_name || null,
+      device_count: r.device_count ?? null,
+      origin_node_id: r.origin_node_id,
+    }));
+  } catch (e) {
+    return [];
+  }
+}
+
 function relayedDeviceProjections(db, grantCategories) {
   let rows = [];
   try {
@@ -503,6 +529,7 @@ function answerRead(db, edge, req) {
 
 module.exports = {
   scopeClause, deviceProjections, relayedDeviceProjections, relayedNodeProjections,
+  relayedWorkspaceProjections,
   workspaceProjections, deviceDetail,
   nodeHealth, openAlerts, answerRead,
 };

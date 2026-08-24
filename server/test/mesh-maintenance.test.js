@@ -106,3 +106,43 @@ test('a sweep on an empty database removes nothing and throws nothing', () => {
   const r = sweepOnce(db, { warn() {}, log() {} });
   assert.equal(typeof r.writeOps, 'number');
 });
+
+/*
+ * ⚠️ A MAP THAT ONLY EVER GAINS ENTRIES STOPS BEING A MAP.
+ *
+ * mesh_node_paths is learned from relayed payloads and nothing removed a row when they stopped, so
+ * a decommissioned site — or one whose owner withdrew consent to being passed further up — stayed
+ * on the topology page for ever, and an operator could not tell which of those servers still exist.
+ */
+test('⚠️ a route whose edge is gone is dropped', () => {
+  const gone = id();
+  db.prepare(`INSERT INTO mesh_node_paths (node_id, via_edge_id, path, hops, first_seen_at, last_seen_at)
+              VALUES (?,?,?,?,?,?)`).run(gone, 'edge-that-never-existed', '["x"]', 2, nowSec(), nowSec());
+  sweepOnce(db, { warn() {}, log() {} });
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM mesh_node_paths WHERE node_id = ?').get(gone).n, 0);
+});
+
+test('⚠️ a route that has gone quiet for a fortnight is dropped; a week is NOT', () => {
+  /*
+   * The age floor has to stay well clear of an ordinary outage. A site off the air for a week is a
+   * site with a problem, not a site that has been removed — and dropping it from the map mid-incident
+   * is precisely when somebody is looking for it.
+   */
+  const stale = id(); const recent = id();
+  for (const [node, age] of [[stale, 20 * DAY], [recent, 7 * DAY]]) {
+    db.prepare(`INSERT INTO mesh_node_paths (node_id, via_edge_id, path, hops, first_seen_at, last_seen_at)
+                VALUES (?,?,?,?,?,?)`).run(node, edge, '["x"]', 2, nowSec() - age, nowSec() - age);
+  }
+  sweepOnce(db, { warn() {}, log() {} });
+  const left = db.prepare('SELECT node_id FROM mesh_node_paths').all().map((r) => r.node_id);
+  assert.ok(!left.includes(stale), 'a route silent for 20 days is gone');
+  assert.ok(left.includes(recent), 'a site down for a week is a site with a problem, not a removed one');
+});
+
+test('a live route survives the sweep', () => {
+  const live = id();
+  db.prepare(`INSERT INTO mesh_node_paths (node_id, via_edge_id, path, hops, first_seen_at, last_seen_at)
+              VALUES (?,?,?,?,?,?)`).run(live, edge, '["x"]', 2, nowSec(), nowSec());
+  sweepOnce(db, { warn() {}, log() {} });
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM mesh_node_paths WHERE node_id = ?').get(live).n, 1);
+});

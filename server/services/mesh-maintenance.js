@@ -42,7 +42,7 @@ const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 function sweepOnce(db, logger = console) {
   const nowSec = Math.floor(Date.now() / 1000);
-  const out = { alerts: 0, playLogs: 0, tombstoned: 0, writeOps: 0, tickets: 0, stagedParts: 0, staleTokens: 0 };
+  const out = { alerts: 0, playLogs: 0, tombstoned: 0, writeOps: 0, tickets: 0, stagedParts: 0, staleTokens: 0, nodePaths: 0 };
 
   /*
    * Mirrored data, per edge, against that edge's OWN retention. Per edge rather than one global
@@ -94,6 +94,31 @@ function sweepOnce(db, logger = console) {
    * unwinnable. The `mesh-` prefix keeps this off ordinary uploads, which use their own `.part`.
    */
   /*
+   * ⚠️ ROUTES TO SERVERS THAT ARE NO LONGER THERE.
+   *
+   * mesh_node_paths is learned from relayed payloads and nothing removed a row when the payloads
+   * stopped — so a decommissioned site, or one whose owner withdrew consent to being passed
+   * further up, stayed on the topology page for ever. A map that only ever gains entries stops
+   * being a map: the operator cannot tell which of those servers still exist.
+   *
+   * Two ways a route dies, and both are handled: the edge it came over is gone or revoked, which is
+   * immediate and certain; or nothing has arrived by that route in a fortnight, which is the
+   * gentler signal and needs to stay well clear of an ordinary outage. A site off the air for a
+   * week is a site with a problem, not a site that has been removed, and dropping it from the map
+   * mid-incident is exactly when somebody is looking for it.
+   */
+  try {
+    const orphaned = db.prepare(`
+      DELETE FROM mesh_node_paths
+       WHERE via_edge_id NOT IN (SELECT id FROM mesh_edges WHERE revoked_at IS NULL)`).run().changes;
+    const silent = db.prepare(
+      'DELETE FROM mesh_node_paths WHERE last_seen_at < ?').run(nowSec - 14 * 86400).changes;
+    out.nodePaths = orphaned + silent;
+  } catch (e) {
+    logger.warn(`[mesh] could not prune node paths: ${e && e.message}`);
+  }
+
+  /*
    * ⚠️ ABANDONED MESH TOKENS. local-apply mints a workspace-bound token per write and revokes it in
    * a `finally` — which covers a throw and a normal return, and does NOT cover SIGKILL, an OOM, or
    * the power going out mid-request. The row then survives as an un-revoked credential.
@@ -137,12 +162,14 @@ function startMeshMaintenance(db, { logger = console } = {}) {
   const timer = setInterval(() => {
     try {
       const r = sweepOnce(db, logger);
-      const total = r.alerts + r.playLogs + r.tombstoned + r.writeOps + r.tickets + r.stagedParts + r.staleTokens;
+      const total = r.alerts + r.playLogs + r.tombstoned + r.writeOps + r.tickets + r.stagedParts +
+                    r.staleTokens + r.nodePaths;
       if (total > 0) {
         logger.log(`[mesh] housekeeping removed ${total} row(s): ` +
                    `${r.alerts} alerts, ${r.playLogs} play logs, ${r.tombstoned} tombstoned devices, ` +
                    `${r.writeOps} write ops, ${r.tickets} expired tickets, ` +
-                   `${r.stagedParts} abandoned transfers, ${r.staleTokens} stale write tokens`);
+                   `${r.stagedParts} abandoned transfers, ${r.staleTokens} stale write tokens, ` +
+                   `${r.nodePaths} dead routes`);
       }
     } catch (e) {
       logger.warn(`[mesh] housekeeping failed: ${e && e.message}`);
