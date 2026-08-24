@@ -179,8 +179,27 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
   }
 
   function refresh() {
+    /*
+     * ⚠️ AN EXISTING LINK IS TOLD AT ONCE, not at the next tick.
+     *
+     * This only ever created links for NEW edges, so a change to an existing one — granting write
+     * access, widening a workspace scope, raising a storage budget — reached the parent whenever
+     * the 60-second report next happened to fire. For up to a minute the hub's UI still said
+     * read-only, the Send button stayed hidden, and the operator who had just granted it reasonably
+     * concluded it had not worked and tried again.
+     *
+     * The grant itself was always live — it is re-read per request — so this was never a
+     * permissions gap. It was the parent being told late about a decision already in force, which
+     * is its own kind of wrong: consent that takes a minute to become visible looks broken.
+     */
     for (const edge of activeUpEdges(db)) {
-      if (links.has(edge.id)) continue;
+      const existing = links.get(edge.id);
+      if (existing) {
+        try { send(edge, existing); } catch (e) {
+          logger.warn(`[mesh] could not re-report to ${edge.peer_node_id}: ${e && e.message}`);
+        }
+        continue;
+      }
       try {
         const link = new Uplink({
           parentUrl: edge.peer_url,

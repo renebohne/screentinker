@@ -751,8 +751,15 @@ module.exports = function meshRoutes(db, { requireAuth }) {
       });
     }
 
+    /*
+     * ⚠️ `relayable` is THIS operator's consent that the files may be passed on by the receiving
+     * server to servers below it. Their content, their call — and it is opt-in per push rather
+     * than a property of the link, because "you may send me things" and "you may hand what I sent
+     * you to someone else" are different agreements.
+     */
     const built = contentOffer.buildOffer(db, edge, (req.body && req.body.content_ids) || [],
-                                          { contentDir: config.contentDir });
+                                          { contentDir: config.contentDir,
+                                            relayable: !!(req.body && req.body.relayable) });
     if (!built.ok) return res.status(400).json({ error: built.reason, skipped: built.skipped });
 
     const answer = await offerTo(req.params.nodeId, {
@@ -842,7 +849,8 @@ module.exports = function meshRoutes(db, { requireAuth }) {
        * reusing one batch's tickets across children would hand every child a credential minted for
        * a different relationship — and make revoking one edge stop transfers on another.
        */
-      const built = contentOffer.buildOffer(db, edge, contentIds, { contentDir: config.contentDir });
+      const built = contentOffer.buildOffer(db, edge, contentIds,
+        { contentDir: config.contentDir, relayable: !!(req.body && req.body.relayable) });
       if (!built.ok) return { ...label, ok: false, reason: built.reason };
 
       const answer = await offerTo(nodeId, {
