@@ -967,9 +967,31 @@ const { requireAuth } = require('./middleware/auth');
  * routes. Same reasoning as the /mesh socket namespace: "a user who never sets the flag cannot tell
  * the mesh exists" is only true if there is nothing to discover.
  *
- * It is READ-ONLY by construction. There is no write route here because 2.0 has no downward channel
- * to write over (I2) — the absence of a mechanism, not restraint being exercised.
+ * ⚠️ It is no longer read-only. There IS a downward channel now, and I2 was amended openly from
+ * "upward only" to "the child is the last word": this hub may ASK a child to change something, and
+ * the child grants, enforces and revokes. The comment here used to say the absence of a write route
+ * was the absence of a mechanism rather than restraint — true when written, and left uncorrected
+ * for a commit longer than it should have been.
  */
+/*
+ * activityLogger wraps res.json on every SUBSEQUENT route to auto-log successful POST/PUT/DELETE
+ * mutations. Auth / subscription / stripe stay opt-out — they are mounted above (login has its own
+ * inline writers; payment webhooks do not belong in activity_log).
+ *
+ * ⚠️ MOVED ABOVE THE MESH ROUTERS, AND THAT IS THE WHOLE FIX. It already carried a note saying it
+ * had once been mounted after the workspace routes and silently never fired — and then the mesh
+ * routers were mounted above the corrected position and inherited exactly the same bug. Nothing
+ * mesh-related was ever written to activity_log: not granting another server write access to your
+ * screens, not revoking it, not minting a pairing code, not severing a link. The single most
+ * consequential thing an operator can do on this page left no trace, on either side.
+ *
+ * "Mount it before the routes you want logged" is evidently a rule that does not survive somebody
+ * adding a router later, so mesh-servers-view.test.js now asserts the ordering rather than trusting
+ * this comment to be read.
+ */
+const { activityLogger } = require('./services/activity');
+app.use(activityLogger);
+
 if (require('./config').meshAcceptEnrollment) {
   try {
     app.use('/api/mesh',
@@ -1020,14 +1042,6 @@ const { resolveTenancy, accessContext } = require('./lib/tenancy');
 // Public API token front door (Phase 1). Attached ONLY to the public routers below.
 const { bearerAuth, tokenScopeGate, agencyGate } = require('./middleware/apiToken');
 
-// activityLogger wraps res.json on every subsequent route to auto-log
-// successful POST/PUT/DELETE mutations. Mount it BEFORE the workspace routes
-// (this fix corrects a pre-existing bug where it was mounted after them and
-// silently never fired). Auth / subscription / stripe routes are already
-// mounted above and stay opt-out from the auto-logger (login has its own
-// inline writers; payment webhooks don't belong in activity_log).
-const { activityLogger } = require('./services/activity');
-app.use(activityLogger);
 
 // #public-api Phase 1: the router partition is data-driven from config/api-surface.js
 // so server.js and the partition firewall test (test/api.test.js) read the SAME list

@@ -310,3 +310,123 @@ test('⚠️ a dot segment cannot authorise against one playlist and write to an
   // And if it were ever permitted, it must at least never touch the ungranted playlist.
   for (const call of applied) assert.ok(!call.path.includes(plB));
 });
+
+/*
+ * ⚠️ THE RETRY THE DESIGN MANDATES USED TO DOUBLE-APPLY.
+ *
+ * The idempotency record was written AFTER apply() returned, with nothing in between, so two
+ * arrivals carrying the same op id both found no row and both applied. Not theoretical: writeTo
+ * times out an ack at 15s, POST /items re-probes video duration with a 15s ffprobe timeout, and the
+ * route then answers 504 telling the operator to retry with the SAME id. A slow probe produces
+ * exactly the duplicate playlist item this table exists to prevent.
+ */
+test('⚠️ two arrivals of the same opId apply ONCE, even fully concurrently', async () => {
+  applied = [];
+  const edge = mkEdge(['content-push'], [wsA]);
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const slowApply = async (call) => { applied.push(call); await gate; return { ok: true }; };
+
+  const both = Promise.all([
+    applyWrite(db, edge, req({ opId: 'op-concurrent' }), { apply: slowApply }),
+    applyWrite(db, edge, req({ opId: 'op-concurrent' }), { apply: slowApply }),
+  ]);
+  release();
+  const [a, b] = await both;
+
+  assert.equal(applied.length, 1, 'the executor must run exactly once');
+  const outcomes = [a, b];
+  assert.equal(outcomes.filter((r) => r.ok).length + outcomes.filter((r) => r.indeterminate).length, 2,
+    'the loser is told the truth — applied, or still running — never "refused"');
+  assert.equal(outcomes.filter((r) => r.ok === false && !r.indeterminate).length, 0);
+});
+
+/*
+ * ⚠️ A REFUSAL AND A FAILURE ARE DIFFERENT OUTCOMES.
+ *
+ * Both used to be recorded as a permanent ok=0, and the route reports that as 403 — whose text says
+ * no retry will help. So a momentary 503, a restart mid-write or a dropped loopback connection
+ * poisoned the op id for ever, while the 504 branch four lines above told the operator to retry
+ * with that same id. The only escape was a fresh id, which is what the design forbids.
+ */
+test('⚠️ a transient failure can be retried; the op id is not poisoned', async () => {
+  const edge = mkEdge(['content-push'], [wsA]);
+  let attempt = 0;
+  const flaky = async () => {
+    attempt += 1;
+    if (attempt === 1) { const e = new Error('local API returned 503'); e.status = 503; throw e; }
+    return { ok: true, id: 'landed' };
+  };
+
+  const first = await applyWrite(db, edge, req({ opId: 'op-transient' }), { apply: flaky });
+  assert.equal(first.ok, false);
+  assert.equal(first.indeterminate, true, 'a 5xx is not an answer, so it must be retryable');
+
+  const second = await applyWrite(db, edge, req({ opId: 'op-transient' }), { apply: flaky });
+  assert.equal(second.ok, true, 'the same op id must be usable again after a transient failure');
+  assert.equal(attempt, 2);
+});
+
+test('a transport error with no status at all is treated as transient too', async () => {
+  const edge = mkEdge(['content-push'], [wsA]);
+  const dead = async () => { throw new Error('ECONNRESET'); };
+  const r = await applyWrite(db, edge, req({ opId: 'op-noconn' }), { apply: dead });
+  assert.equal(r.indeterminate, true);
+  const row = db.prepare('SELECT * FROM mesh_write_ops WHERE edge_id = ? AND op_id = ?').get(edge.id, 'op-noconn');
+  assert.equal(row, undefined, 'no permanent record may survive an outcome nobody knows');
+});
+
+test("a 4xx from this node's own API IS deterministic and stays refused", async () => {
+  const edge = mkEdge(['content-push'], [wsA]);
+  let calls = 0;
+  const refuse = async () => {
+    calls += 1;
+    const e = new Error('That zone does not exist on this layout'); e.status = 400; throw e;
+  };
+  const first = await applyWrite(db, edge, req({ opId: 'op-deterministic' }), { apply: refuse });
+  assert.equal(first.ok, false);
+  assert.ok(!first.indeterminate, 'the API saw it and said no — it will say no again');
+
+  const second = await applyWrite(db, edge, req({ opId: 'op-deterministic' }), { apply: refuse });
+  assert.equal(second.replayed, true);
+  assert.equal(calls, 1, 'a settled refusal must not be re-attempted against different state');
+});
+
+test('⚠️ a parent may never be pointed at the screen the host server itself is', async () => {
+  /*
+   * mesh_node.self_device_id marks the case where one box is both the server and the panel in
+   * reception. That device sits in a workspace like any other, so an ordinary content-push grant
+   * covering the workspace covers the host too — every other guard here reasons about workspaces
+   * and none of them can see the difference. The column had zero readers anywhere before this.
+   */
+  applied = [];
+  const selfDevice = id();
+  db.prepare('INSERT INTO devices (id, name, workspace_id) VALUES (?,?,?)')
+    .run(selfDevice, 'Reception (this server)', wsA);
+  const ordinary = id();
+  db.prepare('INSERT INTO devices (id, name, workspace_id) VALUES (?,?,?)').run(ordinary, 'Lobby', wsA);
+  // The singleton identity row may not exist yet in this fixture; an UPDATE against no rows is a
+  // silent no-op, which would leave the guard unarmed and this test asserting nothing.
+  db.prepare(`INSERT INTO mesh_node (singleton, node_id, created_at, self_device_id)
+              VALUES (1, ?, strftime('%s','now'), ?)
+              ON CONFLICT(singleton) DO UPDATE SET self_device_id = excluded.self_device_id`)
+    .run(id(), selfDevice);
+  const armed = db.prepare('SELECT self_device_id FROM mesh_node LIMIT 1').get();
+  assert.equal(armed && armed.self_device_id, selfDevice, 'the guard must actually be armed');
+
+  const edge = mkEdge(['content-push'], [wsA]);
+  const blocked = await applyWrite(db, edge, req({
+    path: `/api/playlists/${plA}/assign`, method: 'POST',
+    body: { device_id: selfDevice }, opId: 'op-self-device',
+  }), { apply });
+  assert.equal(blocked.ok, false, 'the host may not be retargeted by a parent');
+  assert.equal(applied.length, 0);
+
+  // ...and an ordinary screen in the same workspace is still perfectly assignable.
+  const allowed = await applyWrite(db, edge, req({
+    path: `/api/playlists/${plA}/assign`, method: 'POST',
+    body: { device_id: ordinary }, opId: 'op-ordinary-device',
+  }), { apply });
+  assert.equal(allowed.ok, true, 'the guard must be about the HOST, not about assignment');
+  db.prepare('UPDATE mesh_node SET self_device_id = NULL').run();
+});

@@ -478,3 +478,30 @@ test('⚠️ a view NEVER re-renders itself into document.body', () => {
   assert.match(src, /if \(state\._container\) render\(state\._container\)/,
     'and re-renders address it explicitly');
 });
+
+/*
+ * ⚠️ THE AUTO-LOGGER MUST BE MOUNTED ABOVE THE MESH ROUTERS.
+ *
+ * activityLogger wraps res.json for every SUBSEQUENT route, so anything mounted above it is
+ * invisible to the audit log. It already carried a comment recording that it had once been mounted
+ * after the workspace routes and silently never fired — and the mesh routers were then added above
+ * the corrected position and inherited the identical bug. The result: nothing mesh-related was ever
+ * written to activity_log. Not granting another server the right to change your screens, not
+ * revoking it, not minting a pairing code, not severing a link.
+ *
+ * Asserted rather than commented, because a comment saying "mount this first" is exactly what
+ * failed twice. This is an ordering property of one file, so it is checked as one.
+ */
+test('⚠️ activityLogger is mounted BEFORE the mesh routers, or the mesh is unauditable', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const logger = src.indexOf('app.use(activityLogger)');
+  assert.ok(logger > 0, 'the auto-logger must still be mounted at all');
+
+  const meshMounts = [...src.matchAll(/app\.use\('\/api\/mesh'/g)].map((m) => m.index);
+  assert.ok(meshMounts.length >= 1, 'the mesh routers must still be mounted here');
+  for (const at of meshMounts) {
+    assert.ok(logger < at,
+      'a mesh router is mounted above activityLogger, so nothing it does will ever be logged — ' +
+      'move the mount below app.use(activityLogger)');
+  }
+});

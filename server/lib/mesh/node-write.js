@@ -57,6 +57,12 @@ function resolveTargetWorkspace(db, path) {
  * It was green, because the test stubbed `apply` synchronously. The lesson is the one this codebase
  * keeps relearning: a stub that is simpler than the real collaborator tests the stub.
  */
+/*
+ * `ok` is a tri-state in mesh_write_ops: 1 applied, 0 refused, -1 claimed and still running.
+ * -1 rather than a separate column so the primary key alone serialises duplicates.
+ */
+const IN_FLIGHT = -1;
+
 async function applyWrite(db, edge, req, deps = {}) {
   const now = typeof deps.now === 'function' ? deps.now() : Date.now();
   const method = req && req.method;
@@ -117,6 +123,36 @@ async function applyWrite(db, edge, req, deps = {}) {
   if (!auth.ok) return auth;
 
   /*
+   * ⚠️ A NODE CAN BE ONE OF ITS OWN SCREENS, AND NOTHING MAY EVER POINT A PARENT AT THAT ONE.
+   *
+   * mesh_node.self_device_id exists because a single box is often both the server and the panel
+   * hanging on the wall in reception. Every other guard here reasons about workspaces, and that one
+   * device is inside a workspace like any other — so a perfectly valid content-push grant covering
+   * the workspace also covers the host itself, and a parent could retarget the screen belonging to
+   * the machine running the server.
+   *
+   * The column had ZERO readers anywhere in the tree before this: it was added for the rollup
+   * double-count in #288 and never wired to anything, so the trap was open on every install that
+   * had ever set it.
+   *
+   * Refused with the standard string — a parent has no business learning which device the host is.
+   */
+  const selfDeviceId = (() => {
+    try {
+      const row = db.prepare('SELECT self_device_id FROM mesh_node LIMIT 1').get();
+      return (row && row.self_device_id) || null;
+    } catch (e) {
+      return null;   // no mesh_node row yet: nothing to protect
+    }
+  })();
+  if (selfDeviceId && req.body && typeof req.body === 'object') {
+    const named = [req.body.device_id, ...(Array.isArray(req.body.device_ids) ? req.body.device_ids : [])];
+    if (named.some((d) => d && String(d) === String(selfDeviceId))) {
+      return { ok: false, reason: writeProxy.REFUSED };
+    }
+  }
+
+  /*
    * ⚠️ IDEMPOTENCY, and it returns the RECORDED OUTCOME rather than re-applying. The uplink
    * re-queues on ack timeout, so a link that drops mid-write will send the same intent again as a
    * matter of course. Without this, "the network hiccuped" and "the operator asked twice" are
@@ -126,15 +162,28 @@ async function applyWrite(db, edge, req, deps = {}) {
   if (!opId) {
     return { ok: false, reason: 'A write must carry an operation id, so that retrying it is safe.' };
   }
-  const seen = db.prepare('SELECT ok, outcome FROM mesh_write_ops WHERE edge_id = ? AND op_id = ?')
-    .get(edge.id, opId);
-  if (seen) {
+  const readRecorded = () => {
+    const seen = db.prepare('SELECT ok, outcome FROM mesh_write_ops WHERE edge_id = ? AND op_id = ?')
+      .get(edge.id, opId);
+    if (!seen) return null;
     let outcome = null;
     try { outcome = seen.outcome ? JSON.parse(seen.outcome) : null; } catch (e) { outcome = null; }
+    if (seen.ok === IN_FLIGHT) {
+      /*
+       * ⚠️ A DUPLICATE THAT ARRIVED WHILE THE FIRST IS STILL RUNNING. Answering "already refused"
+       * would be a lie and answering "applied" would be a guess; indeterminate is the truth, and it
+       * is the one answer the caller already knows how to handle — retry with the SAME op id.
+       */
+      return { ok: false, reason: 'That change is already being applied. Retry with the same ' +
+                                  'operation id to learn how it finished.', indeterminate: true };
+    }
     return seen.ok
       ? { ok: true, outcome, replayed: true }
       : { ok: false, reason: 'That write was already refused.', replayed: true };
-  }
+  };
+
+  const already = readRecorded();
+  if (already) return already;
 
   /*
    * ⚠️ ORDERING. A stale intent for the same target must not win by arriving last. Dropped rather
@@ -156,29 +205,74 @@ async function applyWrite(db, edge, req, deps = {}) {
     return { ok: false, reason: 'This server cannot apply writes right now.' };
   }
 
+  /*
+   * ⚠️ CLAIM THE OPERATION *BEFORE* APPLYING IT, OR THE RETRY THE DESIGN MANDATES DOUBLE-APPLIES.
+   *
+   * The record used to be written after apply() returned, with nothing in between — so two
+   * requests carrying the same op id both found no row and both applied. That is not a theoretical
+   * race: writeTo times out an ack at 15s, POST /items re-probes video duration with a 15s ffprobe
+   * timeout, and the route answers 504 telling the operator to retry with the SAME id. A slow probe
+   * therefore produces exactly the duplicate playlist item this table exists to prevent.
+   *
+   * The primary key on (edge_id, op_id) does the work: the INSERT is the lock. A second arrival
+   * conflicts and reads the claim instead of racing past it.
+   */
+  try {
+    db.prepare(`INSERT INTO mesh_write_ops (edge_id, op_id, target, intent_seq, ok, outcome, applied_at)
+                VALUES (?,?,?,?,?,NULL,?)`)
+      .run(edge.id, opId, targetKey,
+           typeof req.intentSeq === 'number' ? req.intentSeq : null,
+           IN_FLIGHT, Math.floor(now / 1000));
+  } catch (e) {
+    // Lost the race, or a replay slipped in between the read above and here. Either way the other
+    // arrival owns the outcome; report whatever it recorded.
+    return readRecorded() || { ok: false, reason: writeProxy.REFUSED };
+  }
+
+  const finish = (okFlag, outcome) => {
+    db.prepare('UPDATE mesh_write_ops SET ok = ?, outcome = ?, applied_at = ? WHERE edge_id = ? AND op_id = ?')
+      .run(okFlag, JSON.stringify(outcome ?? null), Math.floor(now / 1000), edge.id, opId);
+  };
+
   let result;
   try {
     // ⚠️ auth.path, not `path`: the executor sends precisely the string that was authorised.
     result = await apply({ path: auth.path, method, body: req.body, workspaceId, rule: auth.rule, edge });
   } catch (e) {
-    // Record the refusal too: a retry of a write that genuinely failed must not silently succeed
-    // on the second attempt against different state.
-    db.prepare(`INSERT OR REPLACE INTO mesh_write_ops
-                (edge_id, op_id, target, intent_seq, ok, outcome, applied_at)
-                VALUES (?,?,?,?,0,?,?)`)
-      .run(edge.id, opId, targetKey,
-           typeof req.intentSeq === 'number' ? req.intentSeq : null,
-           JSON.stringify({ error: String((e && e.message) || e) }), Math.floor(now / 1000));
-    return { ok: false, reason: 'That change could not be applied.' };
+    /*
+     * ⚠️ A REFUSAL AND A FAILURE ARE NOT THE SAME OUTCOME, AND RECORDING BOTH AS `ok=0` MADE THE
+     * MANDATED RETRY IMPOSSIBLE.
+     *
+     * Everything used to be written as a permanent refusal, so a restart mid-write, a momentary
+     * 503, or a dropped loopback connection was remembered for ever — and the route reports a
+     * recorded refusal as 403, whose text tells the operator that no retry will help. Four lines
+     * above it, the 504 branch instructs them to retry with the same op id. The only escape was a
+     * fresh op id, which is precisely what the design forbids.
+     *
+     * A 4xx from this node's own API is deterministic: it saw the request and said no, and it will
+     * say no again. Anything else — 5xx, a transport error, no status at all — is not an answer,
+     * so the claim is released and the caller may genuinely try again.
+     *
+     * ⚠️ The honest cost: a connection error that dropped AFTER the write landed will re-apply on
+     * retry. That risk is real and is accepted deliberately, because the alternative on the table
+     * was a write that can never be retried at all — and the local routes are transactional, so
+     * the ambiguous window is a dropped response rather than a partial change.
+     */
+    const status = e && e.status;
+    const deterministic = typeof status === 'number' && status >= 400 && status < 500;
+    if (deterministic) {
+      finish(0, { error: String((e && e.message) || e), status });
+      return { ok: false, reason: 'That change could not be applied.' };
+    }
+    db.prepare('DELETE FROM mesh_write_ops WHERE edge_id = ? AND op_id = ?').run(edge.id, opId);
+    return {
+      ok: false,
+      indeterminate: true,
+      reason: 'This server could not complete that change just now. Retry with the same operation id.',
+    };
   }
 
-  db.prepare(`INSERT OR REPLACE INTO mesh_write_ops
-              (edge_id, op_id, target, intent_seq, ok, outcome, applied_at)
-              VALUES (?,?,?,?,1,?,?)`)
-    .run(edge.id, opId, targetKey,
-         typeof req.intentSeq === 'number' ? req.intentSeq : null,
-         JSON.stringify(result || null), Math.floor(now / 1000));
-
+  finish(1, result || null);
   return { ok: true, outcome: result || null };
 }
 
