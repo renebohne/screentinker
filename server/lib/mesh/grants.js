@@ -105,7 +105,13 @@ const READ_CATEGORIES = Object.freeze({
 const WRITE_CATEGORIES = Object.freeze({
   'content-push': {
     summary: 'Send content and playlists downward',
-    consequence: 'This hub will be able to change what plays on your screens.',
+    /*
+     * ⚠️ Says BOTH things it costs, because the second one is easy to miss. Changing what plays is
+     * the obvious consequence; storing the files that play is the one an operator only discovers
+     * when a disk fills. The specific byte figure is appended by the consent route, which knows it.
+     */
+    consequence: 'This hub will be able to change what plays on your screens, and to store files ' +
+                 'on this server up to the limit you set.',
   },
   'device-command': {
     summary: 'Reboot, reload, change settings on screens',
@@ -231,6 +237,34 @@ function writeAllows(writeGrant, writeScope, category, workspaceId) {
   return writeScope.includes(workspaceId);
 }
 
+/**
+ * Would accepting `incomingBytes` stay inside what this edge was granted?
+ *
+ * ⚠️ Checked BEFORE any bytes move, never after four files of six are on disk. A transfer that
+ * discovers the limit halfway has already spent the disk it was supposed to protect, and left the
+ * operator with a half-populated playlist to reason about.
+ *
+ * ⚠️ An absent budget denies. NULL is not "unlimited" here for the same reason `write_scope` NULL is
+ * not "everywhere": a permission that becomes total by being unset is the failure this whole design
+ * is built against.
+ */
+function budgetAllows(budgetBytes, usedBytes, incomingBytes) {
+  if (typeof budgetBytes !== 'number' || !Number.isFinite(budgetBytes) || budgetBytes <= 0) return false;
+  const used = typeof usedBytes === 'number' && Number.isFinite(usedBytes) && usedBytes > 0 ? usedBytes : 0;
+  const want = typeof incomingBytes === 'number' && Number.isFinite(incomingBytes) && incomingBytes > 0
+    ? incomingBytes : 0;
+  return used + want <= budgetBytes;
+}
+
+/** Bytes as something an operator reads without counting zeroes. */
+function describeBytes(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) return 'nothing';
+  const u = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0; let v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i += 1; }
+  return `${i === 0 ? v : v.toFixed(v < 10 && i > 1 ? 1 : 0)} ${u[i]}`;
+}
+
 /** Plain-language consequences, for the confirmation UI on the GRANTING node. */
 function describeGrant(categories) {
   if (!Array.isArray(categories) || categories.length === 0) {
@@ -252,5 +286,7 @@ module.exports = {
   validateWriteConsent,
   grantAllows,
   writeAllows,
+  budgetAllows,
+  describeBytes,
   describeGrant,
 };

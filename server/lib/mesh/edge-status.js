@@ -78,6 +78,17 @@ function consentView(edge, now) {
     writeGrant: writeCategories,
     writeGrantExplained: grants.describeGrant(writeCategories),
     writeWorkspaces: writeWorkspaces,
+    /*
+     * ⚠️ Used and remaining, on the page where the grant was given. An operator who granted 20 GB
+     * six months ago has no other way to find out they are at 19.8 — and the moment they need to
+     * know is the moment a transfer starts failing, which is exactly when a number they cannot see
+     * is useless.
+     */
+    writeBytesBudget: typeof edge.write_bytes_budget === 'number' ? edge.write_bytes_budget : null,
+    writeBytesUsed: Number(edge.write_bytes_used) || 0,
+    writeBytesRemaining: typeof edge.write_bytes_budget === 'number'
+      ? Math.max(0, edge.write_bytes_budget - (Number(edge.write_bytes_used) || 0))
+      : 0,
   };
 }
 

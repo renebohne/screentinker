@@ -841,6 +841,29 @@ const migrations = [
   'ALTER TABLE mesh_edges ADD COLUMN write_grant TEXT',
   'ALTER TABLE mesh_edges ADD COLUMN write_scope TEXT',
 
+  /* How much disk a hub may consume here, and how much of it it has used.
+   *
+   * ⚠️ SCOPE ANSWERS "WHOSE SCREENS", THIS ANSWERS "HOW MUCH OF MY DISK". They are different
+   * questions and an operator only ever gets asked the first one, so the second has to be asked
+   * explicitly or it is answered by default — and the default would be "all of it".
+   *
+   * The consent line for content-push says the hub may send content downward. Somebody granting
+   * "you may write to my Lobby workspace" is agreeing about what appears on the Lobby screens; they
+   * have not agreed to unbounded storage on a machine they pay for. On a self-hosted box that
+   * matters more than it sounds: a full disk on a signage server is a cross-tenant outage, and
+   * routes/media.js already refuses rather than fill one.
+   *
+   * ⚠️ NULL means NOTHING, exactly as write_scope does — never "unlimited". Required whenever
+   * content-push is granted, refused when absent, so a byte permission cannot become total by
+   * being left blank. The mesh already treats "how much may you send me" as first-class and
+   * refusable in the other direction (lib/mesh/backpressure.js); this is the same question pointed
+   * downward.
+   *
+   * Bytes, not megabytes — the UI converts. A unit that has to be remembered is a unit that gets
+   * confused, and being wrong by 1000x here means a filled disk. */
+  'ALTER TABLE mesh_edges ADD COLUMN write_bytes_budget INTEGER',
+  'ALTER TABLE mesh_edges ADD COLUMN write_bytes_used INTEGER NOT NULL DEFAULT 0',
+
   /* Applied mesh writes, so a retry cannot apply twice.
    *
    * ⚠️ THE READ PATH NEEDS NOTHING LIKE THIS AND THAT IS EXACTLY WHY IT IS EASY TO FORGET. A

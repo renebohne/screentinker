@@ -133,3 +133,68 @@ test('revoking write leaves the connection and its reporting intact', () => {
   assert.equal(view.parentCanControlThisNode, false);
   assert.equal(view.canRevoke, true);
 });
+
+/*
+ * ─── The byte budget ───────────────────────────────────────────────────────────────────────
+ *
+ * ⚠️ Scope answers "whose screens". The budget answers "how much of my disk". An operator is only
+ * ever asked the first question, so unless the second is asked out loud it gets answered by
+ * default — and the default would be "all of it". A full disk on a signage server is a
+ * cross-tenant outage, and it is the customer's disk.
+ */
+const GB = 1024 ** 3;
+
+test('⚠️ an absent budget denies — NULL is not "unlimited"', () => {
+  // Deliberately the same rule as write_scope. A permission that becomes total by being left blank
+  // is the failure this whole design is built against.
+  assert.equal(grants.budgetAllows(null, 0, 1), false);
+  assert.equal(grants.budgetAllows(undefined, 0, 1), false);
+  assert.equal(grants.budgetAllows(0, 0, 1), false);
+  assert.equal(grants.budgetAllows(-1, 0, 1), false);
+});
+
+test('the budget is checked against what is ALREADY used, not just the incoming size', () => {
+  assert.equal(grants.budgetAllows(20 * GB, 5 * GB, 1 * GB), true);
+  assert.equal(grants.budgetAllows(20 * GB, 19 * GB, 2 * GB), false, 'used + incoming must fit');
+  assert.equal(grants.budgetAllows(20 * GB, 19 * GB, 1 * GB), true, 'exactly at the limit is allowed');
+});
+
+test('a malformed used/incoming value cannot widen the budget', () => {
+  assert.equal(grants.budgetAllows(10, NaN, 5), true, 'NaN used counts as zero, not as negative');
+  assert.equal(grants.budgetAllows(10, -100, 5), true, 'a negative used must not buy extra room');
+  assert.equal(grants.budgetAllows(10, 8, NaN), true);
+  assert.equal(grants.budgetAllows(NaN, 0, 1), false, 'a NaN budget denies');
+});
+
+test('⚠️ the consent view shows used and remaining, not just the limit', () => {
+  const edge = mkEdge({ write_grant: ['content-push'], write_scope: [wsA] });
+  db.prepare('UPDATE mesh_edges SET write_bytes_budget = ?, write_bytes_used = ? WHERE id = ?')
+    .run(20 * GB, 19 * GB, edge.id);
+  const row = db.prepare('SELECT * FROM mesh_edges WHERE id = ?').get(edge.id);
+  const view = consentView({ ...row, grant_categories: ['health'] }, Date.now());
+
+  assert.equal(view.writeBytesBudget, 20 * GB);
+  assert.equal(view.writeBytesUsed, 19 * GB);
+  assert.equal(view.writeBytesRemaining, 1 * GB,
+    'an operator who granted 20GB months ago has no other way to learn they are nearly full');
+});
+
+test('an edge with no budget reports no headroom rather than infinite', () => {
+  const edge = mkEdge({ write_grant: ['content-push'], write_scope: [wsA] });
+  const view = consentView({ ...edge, grant_categories: [] }, Date.now());
+  assert.equal(view.writeBytesBudget, null);
+  assert.equal(view.writeBytesRemaining, 0, 'no budget must never read as unlimited headroom');
+});
+
+test('the content-push consequence mentions storage, not only the screens', () => {
+  const said = grants.describeGrant(['content-push']).join(' ');
+  assert.match(said, /change what plays/i);
+  assert.match(said, /store files|storage/i,
+    'sending content means storing it — an operator finding that out via a full disk is too late');
+});
+
+test('bytes are described in units an operator reads without counting zeroes', () => {
+  assert.equal(grants.describeBytes(20 * GB), '20 GB');
+  assert.equal(grants.describeBytes(0), 'nothing');
+  assert.equal(grants.describeBytes(null), 'nothing');
+});

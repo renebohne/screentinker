@@ -563,7 +563,8 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
     // Revoking: no scope needed, and the scope is cleared with it so a later re-grant cannot
     // silently inherit workspaces the operator picked months ago for a different arrangement.
     if (check.categories.length === 0) {
-      db.prepare('UPDATE mesh_edges SET write_grant = NULL, write_scope = NULL WHERE id = ?').run(edge.id);
+      db.prepare(`UPDATE mesh_edges SET write_grant = NULL, write_scope = NULL,
+                  write_bytes_budget = NULL WHERE id = ?`).run(edge.id);
       if (typeof onUplinkChanged === 'function') onUplinkChanged();
       return res.json({
         ok: true, categories: [], workspaces: [],
@@ -593,15 +594,50 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
       });
     }
 
-    db.prepare('UPDATE mesh_edges SET write_grant = ?, write_scope = ? WHERE id = ?')
-      .run(JSON.stringify(check.categories), JSON.stringify([...new Set(wanted)]), edge.id);
+    /*
+     * ⚠️ A BYTE BUDGET IS REQUIRED FOR content-push, and refused when absent — the same rule as
+     * scope, for the same reason.
+     *
+     * Scope answers "whose screens"; this answers "how much of my disk". An operator is only ever
+     * asked the first question, so the second gets answered by default unless it is asked out loud
+     * — and the default is "all of it". A full disk on a signage server is a cross-tenant outage,
+     * and it is the customer's disk, not the hub's.
+     */
+    let budget = null;
+    if (check.categories.includes('content-push')) {
+      budget = Number(req.body.bytes_budget);
+      if (!Number.isFinite(budget) || budget <= 0) {
+        return res.status(400).json({
+          error: 'Set how much space this server may use for content it sends you. Sending content ' +
+                 'means storing it here, and a limit with no number is not a limit.',
+        });
+      }
+      const used = Number(edge.write_bytes_used) || 0;
+      if (budget < used) {
+        return res.status(400).json({
+          error: `That is less than the ${grants.describeBytes(used)} already stored from this ` +
+                 'connection. Remove some of it first, or set a larger limit — lowering the number ' +
+                 'does not delete anything on its own.',
+        });
+      }
+    }
+
+    db.prepare(`UPDATE mesh_edges SET write_grant = ?, write_scope = ?, write_bytes_budget = ?
+                WHERE id = ?`)
+      .run(JSON.stringify(check.categories), JSON.stringify([...new Set(wanted)]), budget, edge.id);
     if (typeof onUplinkChanged === 'function') onUplinkChanged();
     res.json({
       ok: true,
       categories: check.categories,
       workspaces: [...new Set(wanted)],
-      // The consequence text belongs to whoever is giving something up, which is this operator.
-      consequences: grants.describeGrant(check.categories),
+      bytesBudget: budget,
+      // The consequence text belongs to whoever is giving something up, which is this operator —
+      // with the byte figure spelled out, because "up to the limit you set" is only meaningful if
+      // the number is shown next to it.
+      consequences: [
+        ...grants.describeGrant(check.categories),
+        ...(budget ? [`It may use up to ${grants.describeBytes(budget)} of storage on this server.`] : []),
+      ],
       note: 'You can narrow or revoke this at any time without disconnecting.',
     });
   });

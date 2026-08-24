@@ -41,7 +41,11 @@ function freshDb() {
       -- Phase 5 write consent. ⚠️ Set ONLY by the child's own operator; the wire may never write
       -- these, which is why they are absent from the enrollment INSERT and its ON CONFLICT clause.
       write_grant TEXT,
-      write_scope TEXT);
+      write_scope TEXT,
+      -- How much disk this edge may consume, and how much it has. ⚠️ NULL is NOTHING, never
+      -- unlimited — the same rule as write_scope, and for the same reason.
+      write_bytes_budget INTEGER,
+      write_bytes_used INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE mesh_mirror_nodes (
       origin_node_id TEXT PRIMARY KEY, via_edge_id TEXT NOT NULL, node_version TEXT,
       device_count INTEGER, devices_online INTEGER, origin_ts INTEGER,
