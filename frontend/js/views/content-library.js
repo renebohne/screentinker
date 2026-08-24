@@ -1,4 +1,4 @@
-import { api } from '../api.js';
+import { api, assertLocalCallAllowed } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { esc, hydrateAuthImages } from '../utils.js';
 import { t } from '../i18n.js';
@@ -842,6 +842,7 @@ function showEditModal(contentItem, onSave) {
       }
 
       if (Object.keys(updateData).length > 0) {
+        assertLocalCallAllowed('/content', 'PUT');
         await fetch('/api/content/' + contentItem.id, {
           method: 'PUT',
           headers: { ...headers, 'Content-Type': 'application/json' },
@@ -853,6 +854,7 @@ function showEditModal(contentItem, onSave) {
       if (replaceFile) {
         const formData = new FormData();
         formData.append('file', replaceFile);
+        assertLocalCallAllowed('/content', 'POST');
         await fetch('/api/content/' + contentItem.id + '/replace', {
           method: 'PUT',
           headers,
@@ -865,6 +867,7 @@ function showEditModal(contentItem, onSave) {
         const subForm = new FormData();
         subForm.append('subtitle', subtitleFile);
         if (subLangEl?.value) subForm.append('subtitle_lang', subLangEl.value);
+        assertLocalCallAllowed('/content', 'POST');
         await fetch('/api/content/' + contentItem.id + '/subtitle', {
           method: 'POST',
           headers,

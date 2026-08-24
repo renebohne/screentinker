@@ -1,4 +1,4 @@
-import { api } from '../api.js';
+import { api, assertLocalCallAllowed } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { t } from '../i18n.js';
 import {
@@ -17,11 +17,15 @@ import {
 // updated" while the dropdown kept displaying a value the server refused (its revert lives only in
 // the dead catch). The shared client in api.js has always thrown on !res.ok; these local copies did
 // not. Same contract now, including the 401 session-expiry reload.
-const API = (url, opts = {}) => fetch('/api' + url, { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}`, ...opts.headers }, ...opts }).then(async (r) => {
+const API = (url, opts = {}) => {
+  // ⚠️ This helper bypasses api.js's routing, so it must ask the same question itself.
+  assertLocalCallAllowed(url, opts.method);
+  return fetch('/api' + url, { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}`, ...opts.headers }, ...opts }).then(async (r) => {
   if (r.status === 401) { localStorage.removeItem('token'); window.location.reload(); throw new Error('Session expired'); }
   if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || `Request failed (${r.status})`); }
   return r.json();
-});
+  });
+};
 
 // Teardown registered during render (resize listener, etc). Declared here rather than beside
 // cleanup() so it is initialised before any render can push to it.

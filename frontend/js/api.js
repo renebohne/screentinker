@@ -13,8 +13,9 @@ function getAuthHeaders() {
  *
  * ⚠️ ONLY DATA PATHS ARE REDIRECTED. Anything about THIS server or THIS session — signing in, the
  * account, the workspace list, the mesh routes themselves — must stay local, or selecting a
- * customer would log you into their server. The list is therefore an allowlist of prefixes, not a
- * blocklist: a route added later is local until somebody deliberately says otherwise.
+ * customer would log you into their server. Those live in ALWAYS_LOCAL below, and that list is
+ * exhaustive: anything not on it is either routed to the customer or refused, never quietly served
+ * from here.
  *
  * ⚠️ WRITES ARE NEVER REDIRECTED, and are refused outright while a remote org is selected. Sending
  * them locally would be far worse than failing: an edit meant for a customer's screen would land
@@ -35,22 +36,87 @@ const REMOTE_READABLE = ['/devices', '/assignments/device/', '/groups', '/playli
  */
 const REMOTE_UNAVAILABLE = ['/content', '/walls', '/schedules', '/widgets', '/layouts'];
 
+/*
+ * ⚠️ PATHS ABOUT *THIS* SERVER AND *THIS* SESSION — always local, whatever is selected.
+ *
+ * Signing in, the account, the workspace list, billing, and the mesh routes themselves. Routing any
+ * of these at a customer's server would try to log you into it; refusing them would lock you out of
+ * your own session the moment you looked at a customer. They are neither remote data nor forbidden
+ * — they are simply not about the org being viewed.
+ *
+ * ⚠️ THIS LIST IS THE ONLY WAY A WRITE STAYS LOCAL while a remote org is selected. Everything else
+ * is refused (see remoteRoute), so adding a prefix here is granting it the right to be written on
+ * your own server while your screen says you are looking at someone else's. Add only session and
+ * server-scoped routes, never org data.
+ */
+const ALWAYS_LOCAL = ['/auth', '/admin', '/workspaces', '/tokens', '/subscription', '/provision', '/ai', '/mesh'];
+
+/*
+ * Segment-exact: '/devices' matches '/devices' and '/devices/x', never '/devices-archive'. The
+ * original used a bare startsWith, so a route named as a superstring of an allowlisted one would
+ * have been routed remotely by accident.
+ */
+function underPrefix(path, prefix) {
+  return path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : prefix + '/');
+}
+
 function remoteOrg() {
   try { return JSON.parse(localStorage.getItem('st_remote_org') || 'null'); } catch (e) { return null; }
 }
 
+/*
+ * ⚠️ THE DEFAULT IS "NOT AVAILABLE", NOT "LOCAL". THIS INVERSION IS THE WHOLE POINT.
+ *
+ * It used to read: anything unlisted falls through to the local server. That is safe only for the
+ * four prefixes somebody remembered to list, and every route added afterwards inherited the wrong
+ * default — silently, because a local answer always looks like a real one. Three live consequences,
+ * all found in review of shipped code:
+ *
+ *   - GET /folders was in neither list, so a customer's content library rendered YOUR folder tree.
+ *   - POST/DELETE /folders created and DELETED folders on YOUR OWN server while the screen said
+ *     you were looking at a customer. Destructive, silent, wrong server.
+ *   - Writes to an UNAVAILABLE path returned {empty:true} BEFORE the method was examined, so
+ *     deleting a customer's content resolved as [] — the UI reported success and nothing happened
+ *     on any server at all.
+ *
+ * So: session routes stay local, every other write is refused, and every unrouted read is empty.
+ * A route added later is now unavailable-until-routed instead of local-until-noticed, which fails
+ * towards an empty panel rather than towards someone else's data.
+ */
 function remoteRoute(url, method) {
   const org = remoteOrg();
   if (!org) return null;
   const path = String(url).split('?')[0];
-  if (REMOTE_UNAVAILABLE.some((p) => path === p || path.startsWith(p + '/'))) {
-    return { empty: true };
-  }
-  if (!REMOTE_READABLE.some((p) => path === p || path.startsWith(p))) return null;
-  if ((method || 'GET').toUpperCase() !== 'GET') {
+  const verb = (method || 'GET').toUpperCase();
+
+  if (ALWAYS_LOCAL.some((p) => underPrefix(path, p))) return null;
+
+  if (verb !== 'GET') {
     return { refuse: 'This server is being viewed read-only. Switch back to make changes.' };
   }
+
+  if (REMOTE_UNAVAILABLE.some((p) => underPrefix(path, p))) return { empty: true };
+  if (!REMOTE_READABLE.some((p) => underPrefix(path, p))) return { empty: true };
   return { url: `/mesh/read/${encodeURIComponent(org.nodeId)}?path=${encodeURIComponent('/api' + url)}` };
+}
+
+/*
+ * ⚠️ FOR CALLERS THAT DO NOT GO THROUGH request().
+ *
+ * Several views (designer, widgets, video-wall, schedule, layout-editor) define their own fetch
+ * helper straight to /api, and the content library reaches for bare fetch in three places. Those
+ * bypass every rule above, which is how they stayed pointed at the LOCAL server while the screen
+ * said a customer's — reading your data under their heading and writing your data on their behalf.
+ *
+ * Throws rather than resolving empty: request() can return [] because it feeds pickers that cope
+ * with an empty list, but a raw caller has no such contract and would treat a silent [] as a real
+ * answer. A visible error is the honest outcome for a view that cannot work remotely yet.
+ */
+export function assertLocalCallAllowed(url, method) {
+  const routed = remoteRoute(url, method);
+  if (!routed) return;
+  throw new Error(routed.refuse
+    || 'That is not available while you are viewing a linked server. Switch back to your own.');
 }
 
 async function request(url, options = {}) {
@@ -199,6 +265,17 @@ export const api = {
   // onProgress reports aggregate percent across the whole batch. Resolves to the content
   // object for a single file, or an array of them for a batch.
   uploadContent: async (file, onProgress, folderId) => {
+    /*
+     * ⚠️ THIS ONE DOES NOT GO THROUGH request(), SO IT NEEDS ITS OWN GUARD.
+     *
+     * It is a raw XHR because it needs upload progress events, which fetch cannot give. That also
+     * means it bypasses remoteRoute entirely — so before this check, every upload made while
+     * viewing a customer landed silently in YOUR OWN library, under a heading that said theirs.
+     * Any other helper that reaches for XHR or bare fetch inherits the same duty.
+     */
+    const routed = remoteRoute('/content', 'POST');
+    if (routed && routed.refuse) throw new Error(routed.refuse);
+
     const files = (file instanceof FileList || Array.isArray(file)) ? Array.from(file) : [file];
     const formData = new FormData();
     for (const f of files) formData.append('files', f);

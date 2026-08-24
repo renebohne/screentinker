@@ -1,4 +1,4 @@
-import { api } from '../api.js';
+import { api, assertLocalCallAllowed } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { esc } from '../utils.js';
 import { t } from '../i18n.js';
@@ -218,8 +218,11 @@ export function render(container, widgetId) {
       if (targetId) {
         const body = { config };
         if (editingWidgetName) body.name = editingWidgetName; // preserve the name; server keeps it if omitted
+        // ⚠️ raw fetch — bypasses api.js routing, so it asks the same question itself.
+        assertLocalCallAllowed('/widgets', 'PUT');
         res = await fetch('/api/widgets/' + targetId, { method: 'PUT', headers: auth, body: JSON.stringify(body) });
       } else {
+        assertLocalCallAllowed('/widgets', 'POST');
         res = await fetch('/api/widgets', { method: 'POST', headers: auth, body: JSON.stringify({ widget_type: 'text', name: t('designer.widget_name', { date: new Date().toLocaleDateString() }), config }) });
       }
       if (res.ok) showToast(t('designer.toast.published'), 'success');
