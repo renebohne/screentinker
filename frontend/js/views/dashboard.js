@@ -35,9 +35,9 @@ let progressTickInterval = null;
 let wallChangedHandler = null;
 // device_id -> { content_name, duration_sec, started_at }
 const playbackByDevice = new Map();
-// Multi-select state for the "Create Video Wall" gesture. Holds device_ids
-// the user has ticked via checkboxes on the dashboard cards.
+// Multi-select state for actions on the dashboard cards.
 const selectedDeviceIds = new Set();
+let selectableGroups = [];
 
 function formatTimeAgo(timestamp) {
   if (!timestamp) return t('common.never');
@@ -283,13 +283,36 @@ function renderGroupSection(group, devices, playlists) {
                 title="${esc(group.sync_reason || '')}">${group.sync_downgraded ? '&#9888; ' : ''}${esc(group.sync_effective)}${group.sync_reason ? ' — ' + esc(group.sync_reason) : ''}</span>` : ''}
           <button class="btn group-resync-btn" data-group-id="${group.id}" style="padding:4px 10px;font-size:12px" title="${esc(t('dashboard.group_sync.resync_hint'))}">${t('dashboard.group_sync.resync')}</button>` : ''}
           ` : ''}
-          <button class="btn" data-group-manage="${group.id}" style="padding:4px 10px;font-size:12px" title="${t('dashboard.manage_tooltip')}">${t('dashboard.manage')}</button>
           <button class="btn" data-group-delete="${group.id}" style="padding:4px 8px;font-size:12px;color:var(--danger)" title="${t('dashboard.delete_group_tooltip')}">&#x2715;</button>
         </div>
       </div>
+      ${renderSelectionBar(group.id, group.id)}
       <div class="device-grid">
         ${devices.length > 0 ? devices.map(renderDeviceCard).join('') : `<div style="color:var(--text-muted);font-size:13px;padding:8px 12px">${t('dashboard.no_devices_in_group')}</div>`}
       </div>
+    </div>
+  `;
+}
+
+function renderSelectionBar(scope, groupId = null) {
+  return `
+    <div class="selection-bar" data-selection-scope="${esc(scope)}"${groupId ? ` data-group-id="${esc(groupId)}"` : ''} style="display:none;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 12px;margin:0 0 10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px">
+      <span class="selection-count" style="font-weight:500;font-size:13px;margin-right:4px"></span>
+      <button class="btn btn-primary btn-sm" data-selection-action="all">${t('dashboard.select_all')}</button>
+      <button class="btn btn-primary btn-sm" data-selection-action="invert">${t('dashboard.invert_selection')}</button>
+      <button class="btn btn-primary btn-sm" data-selection-action="cancel">${t('dashboard.cancel_selection')}</button>
+      <span class="selection-bar-divider" aria-hidden="true"></span>
+      ${groupId
+        ? `<button class="btn btn-primary btn-sm" data-selection-action="remove"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"></line></svg>${t('dashboard.remove_from_group')}</button>`
+        : `<details class="selection-group-menu">
+            <summary class="btn btn-primary btn-sm"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>${t('dashboard.add_to_group')} <span aria-hidden="true">&#x25BE;</span></summary>
+            <div class="selection-group-menu-panel">
+              ${selectableGroups.map(g => `<button type="button" data-selection-group-id="${esc(g.id)}">${esc(g.name)}</button>`).join('')}
+              <div class="selection-group-menu-divider"></div>
+              <button type="button" class="selection-group-menu-create" data-selection-create-group>${t('dashboard.create_group_and_add')}</button>
+            </div>
+          </details>`}
+      <button class="btn btn-primary btn-sm" data-selection-action="wall">${t('dashboard.create_wall')}</button>
     </div>
   `;
 }
@@ -343,7 +366,6 @@ export function render(container) {
         <div class="subtitle">${t('dashboard.subtitle')}</div>
       </div>
       <div style="display:flex;gap:8px">
-        <button class="btn" id="createGroupBtn">${t('dashboard.create_group')}</button>
         <button class="btn btn-primary" id="addDeviceBtn">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
@@ -351,16 +373,6 @@ export function render(container) {
           ${t('dashboard.add')}
         </button>
       </div>
-    </div>
-    <div id="selectionBar" style="display:none;align-items:center;gap:10px;padding:8px 12px;margin-bottom:12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px">
-      <span id="selectionCount" style="font-weight:500;font-size:13px"></span>
-      <button class="btn btn-primary btn-sm" id="createWallBtn">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px">
-          <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="12" y1="3" x2="12" y2="21"/>
-        </svg>
-        Create Video Wall
-      </button>
-      <button class="btn btn-sm" id="clearSelectionBtn">Clear</button>
     </div>
     <div id="gettingStarted"></div>
       <div id="dashStats" class="dash-stats-row" style="display:flex;gap:12px;margin-bottom:16px"></div>
@@ -420,6 +432,7 @@ export function render(container) {
         : (!filter || cardState === filter);                         // existing three-state filter — unchanged
       card.style.display = (matchSearch && matchState) ? '' : 'none';
     });
+    refreshSelectionBar();
   }
 
   // Setup pairing
@@ -441,17 +454,6 @@ export function render(container) {
     }
   };
 
-  // Create group
-  container.querySelector('#createGroupBtn').addEventListener('click', async () => {
-    const name = prompt(t('dashboard.prompt_group_name'));
-    if (!name) return;
-    try {
-      await api.createGroup(name);
-      showToast(t('dashboard.toast.group_created'), 'success');
-      loadDashboard();
-    } catch (e) { showToast(e.message, 'error'); }
-  });
-
   // Multi-select: a checkbox on each device card adds to selectedDeviceIds.
   // The selection bar shows when 1+ are selected; "Create Video Wall" is the
   // primary action — it creates the wall, removes devices from any group,
@@ -465,14 +467,65 @@ export function render(container) {
     refreshSelectionBar();
   });
 
-  document.getElementById('clearSelectionBtn').addEventListener('click', () => {
-    selectedDeviceIds.clear();
-    document.querySelectorAll('.device-select-cb').forEach(cb => { cb.checked = false; });
-    document.querySelectorAll('.device-card.selected').forEach(c => c.classList.remove('selected'));
+  const visibleDeviceCards = (bar) => [...bar.parentElement.querySelectorAll('.device-card[data-device-id]')]
+    .filter(card => card.style.display !== 'none');
+  const syncVisibleSelection = () => {
+    document.querySelectorAll('.device-select-cb').forEach(cb => {
+      const selected = selectedDeviceIds.has(cb.dataset.deviceId);
+      cb.checked = selected;
+      cb.closest('.device-card')?.classList.toggle('selected', selected);
+    });
     refreshSelectionBar();
+  };
+  container.addEventListener('click', async (e) => {
+    const action = e.target.closest('[data-selection-action]');
+    if (!action) return;
+    const bar = action.closest('.selection-bar');
+    const visible = visibleDeviceCards(bar);
+    if (action.dataset.selectionAction === 'all') {
+      visible.forEach(card => selectedDeviceIds.add(card.dataset.deviceId));
+      syncVisibleSelection();
+    } else if (action.dataset.selectionAction === 'invert') {
+      visible.forEach(card => {
+        const id = card.dataset.deviceId;
+        if (selectedDeviceIds.has(id)) selectedDeviceIds.delete(id); else selectedDeviceIds.add(id);
+      });
+      syncVisibleSelection();
+    } else if (action.dataset.selectionAction === 'cancel') {
+      visible.forEach(card => selectedDeviceIds.delete(card.dataset.deviceId));
+      syncVisibleSelection();
+    } else if (action.dataset.selectionAction === 'remove') {
+      const ids = visible.map(card => card.dataset.deviceId).filter(id => selectedDeviceIds.has(id));
+      try {
+        await Promise.all(ids.map(deviceId => api.removeDeviceFromGroup(bar.dataset.groupId, deviceId)));
+        showToast(tn('dashboard.toast.removed_from_group', ids.length), 'success');
+        loadDashboard();
+      } catch (err) { showToast(err.message, 'error'); }
+    } else if (action.dataset.selectionAction === 'wall') {
+      createWallFromSelection();
+    }
   });
-
-  document.getElementById('createWallBtn').addEventListener('click', () => createWallFromSelection());
+  container.addEventListener('click', async (e) => {
+    const groupItem = e.target.closest('[data-selection-group-id], [data-selection-create-group]');
+    if (!groupItem) return;
+    const menu = groupItem.closest('.selection-group-menu');
+    const bar = menu.closest('.selection-bar');
+    let groupId = groupItem.dataset.selectionGroupId;
+    const ids = visibleDeviceCards(bar)
+      .map(card => card.dataset.deviceId).filter(id => selectedDeviceIds.has(id));
+    try {
+      if (groupItem.hasAttribute('data-selection-create-group')) {
+        const name = prompt(t('dashboard.prompt_group_name'))?.trim();
+        if (!name) { menu.removeAttribute('open'); return; }
+        const group = await api.createGroup(name);
+        groupId = group.id;
+      }
+      await Promise.all(ids.map(deviceId => api.addDeviceToGroup(groupId, deviceId)));
+      showToast(tn('dashboard.toast.added_to_group', ids.length), 'success');
+      loadDashboard();
+    } catch (err) { showToast(err.message, 'error'); }
+    menu.removeAttribute('open');
+  });
 
   // Load everything
   loadDashboard();
@@ -550,20 +603,18 @@ export function render(container) {
 }
 
 function refreshSelectionBar() {
-  const bar = document.getElementById('selectionBar');
-  const count = document.getElementById('selectionCount');
-  if (!bar || !count) return;
-  const n = selectedDeviceIds.size;
-  if (n === 0) { bar.style.display = 'none'; return; }
-  bar.style.display = 'flex';
-  // Need at least 2 to make a wall - surface the constraint inline so the
-  // greyed-out button isn't just silently unresponsive.
-  count.textContent = n < 2
-    ? `${n} display selected - pick 1 more to create a wall`
-    : `${n} displays selected`;
-  const btn = document.getElementById('createWallBtn');
-  btn.disabled = n < 2;
-  btn.title = n < 2 ? 'Select at least 2 displays to create a video wall' : '';
+  document.querySelectorAll('.selection-bar').forEach(bar => {
+    const visible = [...bar.parentElement.querySelectorAll('.device-card[data-device-id]')]
+      .filter(card => card.style.display !== 'none');
+    const n = visible.filter(card => selectedDeviceIds.has(card.dataset.deviceId)).length;
+    bar.style.display = n > 0 ? 'flex' : 'none';
+    const count = bar.querySelector('.selection-count');
+    if (count) count.textContent = t('dashboard.selection_count_other', { n });
+    const wall = bar.querySelector('[data-selection-action="wall"]');
+    if (wall) {
+      wall.style.display = n >= 2 ? '' : 'none';
+    }
+  });
 }
 
 // Pick a sensible default grid for n devices: prefer near-square layouts,
@@ -724,6 +775,7 @@ async function loadDashboard() {
     const [rawDevices, groups, playlists, walls] = await Promise.all([
       api.getDevices(), api.getGroups(), api.getPlaylists(), api.getWalls(),
     ]);
+    selectableGroups = groups || [];
 
     // Deduplicate devices by id — a stale reconnect race can briefly cause the same
     // device to appear twice in the list. Last-write-wins keeps the freshest state.
@@ -850,6 +902,7 @@ async function loadDashboard() {
             <strong style="font-size:15px;color:var(--text-muted)">${t('dashboard.ungrouped')}</strong>
             <span style="color:var(--text-muted);font-size:12px;margin-left:10px">${tn('dashboard.devices_count', ungrouped.length)}</span>
           </div>` : ''}
+          ${renderSelectionBar('ungrouped')}
           <div class="device-grid">
             ${ungrouped.map(renderDeviceCard).join('')}
           </div>
@@ -859,7 +912,7 @@ async function loadDashboard() {
 
     main.innerHTML = html;
     frameCardScreenshots();
-    attachGroupHandlers(groupsWithDevices, dashboardDevices);
+    attachGroupHandlers(groupsWithDevices);
 
     // Drop any selections for devices that have since been absorbed into a
     // wall, and update the toolbar.
@@ -873,7 +926,7 @@ async function loadDashboard() {
   }
 }
 
-function attachGroupHandlers(groupsWithDevices, allDevices) {
+function attachGroupHandlers(groupsWithDevices) {
   // Drag-and-drop: device cards are draggable; group sections + the Ungrouped
   // wrapper are drop targets. Drop on a group adds membership (mirrors the
   // Manage modal). Drop on Ungrouped removes the device from every group it's
@@ -1159,71 +1212,6 @@ function attachGroupHandlers(groupsWithDevices, allDevices) {
     });
   });
 
-  // Manage group (add/remove devices)
-  document.querySelectorAll('[data-group-manage]').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const groupId = btn.dataset.groupManage;
-      const group = groupsWithDevices.find(g => g.id === groupId);
-      const memberIds = new Set(group.devices.map(d => d.id));
-
-      // Get all groups for multi-group warning
-      const otherGroups = groupsWithDevices.filter(g => g.id !== groupId);
-
-      const modal = document.createElement('div');
-      modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000';
-      modal.innerHTML = `
-        <div style="background:var(--bg-card);border-radius:12px;padding:24px;max-width:400px;width:90%;max-height:70vh;overflow-y:auto">
-          <h3 style="margin:0 0 4px">${esc(group.name)}</h3>
-          <p style="margin:0 0 16px;font-size:12px;color:var(--text-muted)">${t('dashboard.manage_group_subtitle')}</p>
-          <div style="display:flex;flex-direction:column;gap:6px">
-            ${allDevices.filter(d => d.status !== 'provisioning').map(d => {
-              const inOther = otherGroups.filter(g => g.memberIds.has(d.id)).map(g => g.name);
-              return `
-                <label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;background:var(--bg-secondary)">
-                  <input type="checkbox" data-device-id="${d.id}" data-in-groups="${inOther.join(',')}" ${memberIds.has(d.id) ? 'checked' : ''}>
-                  <span class="status-dot ${d.status}" style="width:8px;height:8px"></span>
-                  <span style="font-size:13px;flex:1">${esc(d.name)}</span>
-                  ${inOther.length > 0 ? `<span style="font-size:10px;color:var(--text-muted);background:var(--bg-primary);padding:1px 6px;border-radius:8px">${esc(inOther.join(', '))}</span>` : ''}
-                </label>
-              `;
-            }).join('')}
-          </div>
-          <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
-            <button class="btn" id="manageGroupClose">${t('common.done')}</button>
-          </div>
-        </div>
-      `;
-      document.body.appendChild(modal);
-
-      modal.querySelector('#manageGroupClose').onclick = () => { modal.remove(); loadDashboard(); };
-      modal.addEventListener('click', (ev) => { if (ev.target === modal) { modal.remove(); loadDashboard(); } });
-
-      modal.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-        cb.addEventListener('change', async () => {
-          const deviceId = cb.dataset.deviceId;
-          const existingGroups = cb.dataset.inGroups;
-          const cbName = cb.closest('label')?.querySelector('span:not(.status-dot)')?.textContent || '';
-          try {
-            if (cb.checked && existingGroups) {
-              if (!confirm(t('dashboard.confirm_add_to_group', { name: cbName, groups: existingGroups, target: group.name }))) {
-                cb.checked = false;
-                return;
-              }
-            }
-            if (cb.checked) {
-              await api.addDeviceToGroup(groupId, deviceId);
-            } else {
-              await api.removeDeviceFromGroup(groupId, deviceId);
-            }
-          } catch (err) {
-            showToast(err.message, 'error');
-            cb.checked = !cb.checked;
-          }
-        });
-      });
-    });
-  });
 }
 
 export function cleanup() {
