@@ -55,7 +55,7 @@ class Uplink extends EventEmitter {
    */
   constructor({ parentUrl, edgeToken, nodeId, connect, tlsVerify = true,
                 bufferMax = DEFAULT_BUFFER_MAX, rand = Math.random, logger = console,
-                onRead = null }) {
+                onRead = null, onWrite = null }) {
     super();
     if (!parentUrl) throw new Error('An uplink needs a parent URL. There is no default address.');
     if (!edgeToken) throw new Error('An uplink needs an edge token.');
@@ -72,6 +72,9 @@ class Uplink extends EventEmitter {
     // Optional: with no handler the child simply refuses every read, which is the correct default
     // for a node that has not opted into being readable.
     this.onRead = onRead;
+    // Same default and same reason: with no handler the child refuses every write, which is correct
+    // for a node whose operator has not granted one.
+    this.onWrite = onWrite;
 
     this.socket = null;
     this.connected = false;
@@ -135,6 +138,31 @@ class Uplink extends EventEmitter {
           .catch(() => ack({ ok: false, reason: 'Could not read that.' }));
       } catch (e) {
         ack({ ok: false, reason: 'Could not read that.' });
+      }
+    });
+
+    /*
+     * ⚠️ THE SECOND — AND ONLY OTHER — INBOUND HANDLER. Same shape as mesh:read above and for the
+     * same reason: this file stays ignorant of the policy. It does not know what a playlist is,
+     * whether the parent holds a grant, or which workspace anything belongs to. It hands the
+     * request to the owner of the data (services/mesh-uplink.js -> lib/mesh/node-write.js) and
+     * returns whatever that decides.
+     *
+     * The default when no handler is wired is a REFUSAL, not silence — a node that has not been
+     * configured to accept writes must say so, because "no response" and "applied" are
+     * indistinguishable to a parent holding a timeout.
+     */
+    this.socket.on('mesh:write', (req, ack) => {
+      if (typeof ack !== 'function') return;
+      if (!this.onWrite) {
+        return ack({ ok: false, reason: 'This server does not accept changes from another server.' });
+      }
+      try {
+        Promise.resolve(this.onWrite(req || {}))
+          .then((r) => ack(r))
+          .catch(() => ack({ ok: false, reason: 'That change could not be applied.' }));
+      } catch (e) {
+        ack({ ok: false, reason: 'That change could not be applied.' });
       }
     });
 

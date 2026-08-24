@@ -461,6 +461,66 @@ module.exports = function meshRoutes(db, { requireAuth }) {
    * ⚠️ SCOPED BEFORE IT ASKS. A caller may only read through to a node they can already see, so the
    * proxy cannot become a way around the client scoping that governs everything else here.
    */
+  /**
+   * POST /api/mesh/write/:nodeId — ask a child to change something.
+   *
+   * ⚠️ ASK. Everything that decides whether it happens lives on the child: its own allowlist, a
+   * write grant its own operator set, and the target's workspace resolved from its own rows. This
+   * route does no allowlisting of its own for the same reason the read route does not — a second
+   * copy of the list would drift, and the copy that matters is the one on the machine that owns the
+   * screens.
+   *
+   * ⚠️ THE opId IS MINTED HERE AND MUST SURVIVE A RETRY. If the child answers `indeterminate` the
+   * caller should send the SAME body again: the child recorded the first outcome and will return it
+   * rather than applying twice. Minting a fresh id on retry would defeat that entirely, which is
+   * why it is generated per request body and echoed back in the response.
+   */
+  router.post('/write/:nodeId', requireAuth, async (req, res) => {
+    const ids = visibleNodeIds(req.user);
+    if (!ids.includes(req.params.nodeId)) {
+      return res.status(404).json({ error: 'No such server.' });
+    }
+    const writeTo = global.__meshWriteTo;
+    if (!writeTo) {
+      return res.status(503).json({ error: 'This server is not accepting connections from others.' });
+    }
+    const path = String((req.body && req.body.path) || '');
+    const method = String((req.body && req.body.method) || '').toUpperCase();
+    if (!path || !method) {
+      return res.status(400).json({ error: 'A write needs a path and a method.' });
+    }
+
+    const opId = String((req.body && req.body.opId) || require('crypto').randomUUID());
+    const answer = await writeTo(req.params.nodeId, {
+      path,
+      method,
+      body: req.body && req.body.body,
+      opId,
+      sentAt: Date.now(),
+      /*
+       * A deadline, so a request that sat in a reconnect buffer cannot outrun a revocation. Short
+       * on purpose: an operator who waited two minutes has already retried.
+       */
+      notAfter: Date.now() + 120_000,
+      ...(typeof (req.body && req.body.intentSeq) === 'number' ? { intentSeq: req.body.intentSeq } : {}),
+    });
+
+    if (!answer || !answer.ok) {
+      /*
+       * ⚠️ Three outcomes, and they need three different responses from an operator: 503 the child
+       * is not connected and nothing happened; 504 it did not acknowledge and the change may or may
+       * not have landed — retry with this opId to find out; 403 it refused, and no retry will help.
+       * Collapsing them into one error is how somebody retries a write that already applied.
+       */
+      if (answer && answer.offline) return res.status(503).json({ error: answer.reason, opId });
+      if (answer && answer.indeterminate) {
+        return res.status(504).json({ error: answer.reason, opId, retryWithSameOpId: true });
+      }
+      return res.status(403).json({ error: (answer && answer.reason) || 'That server refused.', opId });
+    }
+    res.json({ ok: true, opId, replayed: !!answer.replayed, result: answer.outcome });
+  });
+
   router.get('/read/:nodeId', requireAuth, async (req, res) => {
     const ids = visibleNodeIds(req.user);
     if (!ids.includes(req.params.nodeId)) {

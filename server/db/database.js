@@ -841,6 +841,33 @@ const migrations = [
   'ALTER TABLE mesh_edges ADD COLUMN write_grant TEXT',
   'ALTER TABLE mesh_edges ADD COLUMN write_scope TEXT',
 
+  /* Applied mesh writes, so a retry cannot apply twice.
+   *
+   * ⚠️ THE READ PATH NEEDS NOTHING LIKE THIS AND THAT IS EXACTLY WHY IT IS EASY TO FORGET. A
+   * repeated read is harmless, so mesh correlates requests with nothing but socket.io's ack
+   * callback. A repeated WRITE is not harmless, and the uplink already re-queues on ack timeout —
+   * so the ordinary behaviour of a flaky link is to send the same intent again.
+   *
+   * op_id is minted by the parent and stable across its retries. The outcome is recorded, and a
+   * replay returns THE RECORDED OUTCOME rather than re-applying: the caller sees what happened the
+   * first time, which is both correct and what makes the retry safe to attempt at all.
+   *
+   * intent_seq is monotonic per (edge, target) and answers out-of-order delivery: a stale "set
+   * playlist A" arriving behind "set playlist B" is dropped rather than winning by arriving last.
+   */
+  `CREATE TABLE IF NOT EXISTS mesh_write_ops (
+     edge_id     TEXT    NOT NULL,
+     op_id       TEXT    NOT NULL,
+     target      TEXT    NOT NULL,
+     intent_seq  INTEGER,
+     ok          INTEGER NOT NULL,
+     outcome     TEXT,
+     applied_at  INTEGER NOT NULL,
+     PRIMARY KEY (edge_id, op_id)
+   )`,
+  'CREATE INDEX IF NOT EXISTS idx_mesh_write_ops_target ON mesh_write_ops(edge_id, target, intent_seq)',
+  'CREATE INDEX IF NOT EXISTS idx_mesh_write_ops_age ON mesh_write_ops(applied_at)',
+
   /* This server's OWN friendly name, which is what it declares when pairing. Defaults to the host
    * name because that is the thing an operator already recognises; editable, because hostnames are
    * frequently neither stable nor meaningful. */

@@ -336,7 +336,52 @@ function setupMeshSocket(io, deps) {
     };
   }
 
-  return { meshNs, backpressure, readFrom };
+  /*
+   * ⚠️ The PARENT side of a write, and it is deliberately as thin as readFrom. This file does not
+   * know what a playlist is and must not learn: it finds the child's socket and asks. Every
+   * decision — is this path writable, is the grant held, does the target belong to a workspace this
+   * edge may touch, has this op already been applied — is made on the CHILD, by the child, against
+   * its own rows. A conduit that started making judgements would be a conduit the child had to
+   * trust, and the whole point is that it does not.
+   *
+   * Depth 1 only, and that falls out of the implementation rather than being asserted: this scans
+   * directly-connected sockets, so a write can only ever reach a node this one is actually joined
+   * to. A relayed write would arrive on the relay's edge token, which would authenticate the relay
+   * rather than the grantee — and nothing signs payloads yet. Keeping it to one hop means that gap
+   * cannot be reached.
+   */
+  async function writeTo(childNodeId, request, timeoutMs = 15_000) {
+    for (const sock of meshNs.sockets.values()) {
+      if (sock.data && sock.data.childNodeId === childNodeId) {
+        return new Promise((resolve) => {
+          sock.timeout(timeoutMs).emit('mesh:write', request, (err, res) => {
+            /*
+             * ⚠️ A TIMEOUT IS NOT A FAILURE — it is an unknown, and saying so matters here in a way
+             * it does not for a read. The write may well have been applied; the acknowledgement is
+             * what went missing. The caller must retry with the SAME opId rather than re-issuing,
+             * which is exactly what the child's idempotency record is for.
+             */
+            if (err) {
+              return resolve({
+                ok: false,
+                indeterminate: true,
+                reason: 'That server did not acknowledge in time. The change may or may not have ' +
+                        'been applied — retrying the same request is safe and will tell you which.',
+              });
+            }
+            resolve(res || { ok: false, reason: 'That server returned nothing.' });
+          });
+        });
+      }
+    }
+    return {
+      ok: false,
+      offline: true,
+      reason: 'That server is not connected right now, so nothing was changed on it.',
+    };
+  }
+
+  return { meshNs, backpressure, readFrom, writeTo };
 }
 
 module.exports = setupMeshSocket;

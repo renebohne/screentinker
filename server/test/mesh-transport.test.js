@@ -278,6 +278,30 @@ test('the buffer is bounded and drops the OLDEST', async () => {
 test('an uplink refuses to exist without an operator-supplied address (I9)', () => {
   // ⚠️ There is no default parent and no fallback. This is how a peer architecture quietly becomes
   // hub-and-spoke, and it always arrives as a convenience.
+  /*
+   * ⚠️ AN UPLINK MUST SIMPLY CONSTRUCT — and this assertion exists because it once did not.
+   *
+   * Adding the write handler introduced `this.onWrite = opts.onWrite` into a constructor that
+   * DESTRUCTURES its parameter, so there was no `opts` binding and every `new Uplink(...)` threw a
+   * ReferenceError. services/mesh-uplink.js builds links inside a try/catch that logs one warn line
+   * per edge, so on any node with MESH_ALLOW_UPLINK the ENTIRE MESH would have been inert — no
+   * telemetry, no reads, no writes — behind `[mesh] uplink to <peer> not started`.
+   *
+   * The full suite stayed green. That is the config-gated-code-is-untested-code shape: the wiring
+   * line for a feature cannot be exercised by tests that never build the object in the shape the
+   * service builds it. So: build it plainly, both with and without the optional handlers.
+   */
+  const bare = new Uplink({ parentUrl: 'http://x', edgeToken: 't', nodeId: 'n', connect });
+  assert.equal(bare.onRead, null, 'no handler means the child refuses reads, which is the safe default');
+  assert.equal(bare.onWrite, null, 'and refuses writes, for the same reason');
+
+  const wired = new Uplink({
+    parentUrl: 'http://x', edgeToken: 't', nodeId: 'n', connect,
+    onRead: () => ({ ok: true }), onWrite: () => ({ ok: true }),
+  });
+  assert.equal(typeof wired.onRead, 'function');
+  assert.equal(typeof wired.onWrite, 'function', 'the write handler must actually be accepted');
+
   assert.throws(() => new Uplink({ edgeToken: 't', nodeId: 'n', connect }),
     /no default address/i);
   assert.throws(() => new Uplink({ parentUrl: 'http://x', nodeId: 'n', connect }), /edge token/i);

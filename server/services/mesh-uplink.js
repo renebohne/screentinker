@@ -19,6 +19,8 @@ const {
   deviceProjections, workspaceProjections, nodeHealth, openAlerts, answerRead, deviceDetail,
 } = nodeData;
 const { createReadRunner } = require('../lib/mesh/read-runner');
+const nodeWrite = require('../lib/mesh/node-write');
+const { createLocalApply } = require('../lib/mesh/local-apply');
 const envelope = require('../lib/mesh/envelope');
 const mirror = require('../lib/mesh/mirror');
 const store = require('../lib/mesh/store');
@@ -73,6 +75,11 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
    * answers every player's heartbeat: a parent's convenience paid for out of the child's own
    * responsiveness, which is what I1 forbids.
    */
+  // One executor for the whole service: it mints a short-lived, workspace-bound token per
+  // write and re-enters this server's own HTTP API, so a mesh write passes exactly the
+  // guards a local one does.
+  const applyLocally = createLocalApply(db, config);
+
   const reads = createReadRunner({
     dbPath: (config && config.dbPath) || require('../config').dbPath,
     db,
@@ -152,6 +159,31 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
             }
             return reads.run(fresh, req);
           },
+
+          /*
+           * ⚠️ Same live re-read as onRead, and it matters MORE here. For a read, a stale edge means
+           * a hub sees something it should no longer see. For a write it means a hub CHANGES
+           * something after its operator revoked the right to — so the grant is read inside the
+           * request, from the row, every time. Nothing is cached at handshake, because revocation
+           * that only takes effect at the next restart is not revocation.
+           */
+          onWrite: (req) => {
+            const fresh = db.prepare('SELECT * FROM mesh_edges WHERE id = ?').get(edge.id);
+            if (!fresh || fresh.revoked_at) {
+              return { ok: false, reason: 'This connection is no longer authorised.' };
+            }
+            /*
+             * ⚠️ Runs on THIS thread with the writable handle, unlike reads.
+             *
+             * The read path deliberately opens its own read-only connection on a worker, so "the
+             * read path cannot write" is a property of the file descriptor rather than of the code
+             * above it. A write cannot have that, so it gives up that guarantee — which is exactly
+             * why the allowlist in write-proxy.js is narrow and why nothing that touches bytes is
+             * on it. It also means a parent's convenience is paid out of this node's event loop,
+             * the one answering every player's heartbeat: keep the surface small.
+             */
+            return nodeWrite.applyWrite(db, fresh, req, { apply: applyLocally });
+          },
         }).start();
         /*
          * ⚠️ REPORT AS SOON AS THE SOCKET COMES UP, not at the next tick. Otherwise a node that was
@@ -181,8 +213,18 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
         links.set(edge.id, link);
         logger.log(`[mesh] reporting upward to ${edge.peer_node_id} at ${edge.peer_url}`);
       } catch (e) {
-        // A bad row must not stop the others, and must not stop the node.
-        logger.warn(`[mesh] uplink to ${edge.peer_node_id} not started: ${e && e.message}`);
+        /*
+         * A bad row must not stop the others, and must not stop the node (I6).
+         *
+         * ⚠️ But it must not be QUIET either. A ReferenceError in the constructor is a programming
+         * fault, not a malformed edge, and this handler once turned exactly that into one warn line
+         * per edge while the entire mesh sat inert — no telemetry, no reads, no writes, and a suite
+         * of 2,300 tests still green. Isolation is right; hiding the difference between "this row is
+         * bad" and "this build is broken" is not. The stack goes in the log, and the message says
+         * what is actually not happening.
+         */
+        logger.warn(`[mesh] NOT reporting to ${edge.peer_node_id} — its uplink could not start: ` +
+                    `${(e && e.stack) || e}`);
       }
     }
     // Anything revoked while we were not looking.

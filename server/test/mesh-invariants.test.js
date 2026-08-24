@@ -56,7 +56,20 @@ test('test_downward_handlers_are_an_allowlist (I2)', () => {
    * answered by an allowlist on the child, keyed to a grant the child's own operator chose. The
    * parent may ask; it may never tell.
    */
-  const ALLOWED_DOWNWARD = ['mesh:read', 'mesh:hello'];
+  /*
+   * ⚠️ EDITING THIS LIST IS THE REVIEW. Each entry is a thing a parent may cause to happen on a
+   * child, and each one must be answered by a grant check on the child:
+   *
+   *   mesh:hello  — the parent announces its batching limits. Carries no request and changes
+   *                 nothing; the child may ignore it entirely and does when there is no overlap.
+   *   mesh:read   — "may I see X?" Answered by lib/mesh/read-proxy.js: segment-exact allowlist,
+   *                 method pinned to GET, per-rule grant, workspace scope applied on the child.
+   *   mesh:write  — "may I change X?" Answered by lib/mesh/write-proxy.js + node-write.js: its own
+   *                 allowlist with the method pinned per rule, a write grant the CHILD's operator
+   *                 set (never one that arrived over the wire), and the target's workspace resolved
+   *                 from the child's own rows rather than taken from the request.
+   */
+  const ALLOWED_DOWNWARD = ['mesh:read', 'mesh:write', 'mesh:hello'];
 
   /*
    * Direction matters, and scanning both files for handlers gets it wrong: `mesh:envelope` is
@@ -202,10 +215,32 @@ test('test_no_phone_home (I7)', () => {
   /*
    * No license check, no activation, no usage beacon, no central registry. Air-gapped is a
    * first-class install, and it cannot be if identity or enrollment needs the internet.
+   *
+   * ⚠️ LOOPBACK IS THE ONE EXCEPTION, AND IT IS ASSERTED RATHER THAN WAIVED. local-apply.js calls
+   * this server's own HTTP API over 127.0.0.1 so that a mesh write passes exactly the guards a
+   * local request passes — the alternative was a second write implementation, which would drift.
+   * A call to yourself is not phoning home: it needs no internet, works air-gapped, and reaches
+   * nothing the operator does not already run.
+   *
+   * So the guard is now STRICTER, not looser: any URL appearing in lib/mesh must be a loopback
+   * address. A hardcoded external host still fails, and now so does a loopback call that someone
+   * later edits into a real one.
    */
+  const LOOPBACK = /^https?:\/\/(127\.0\.0\.1|\[::1\]|localhost)(:|\/|$)/;
   for (const { file, src } of meshSources()) {
-    assert.doesNotMatch(src, /fetch\s*\(|https?:\/\/(?!\s)/,
-      `${file} contains a network call or a hardcoded URL — mesh identity and pairing are local (I7)`);
+    for (const m of src.matchAll(/https?:\/\/[^\s'"`)]+/g)) {
+      assert.match(m[0], LOOPBACK,
+        `${file} contains the URL ${m[0]} — mesh identity and pairing are local, and the only ` +
+        'address that may appear here is this server\'s own loopback (I7)');
+    }
+    /*
+     * A network call is only acceptable next to a loopback URL. A file that fetches without one
+     * has taken its address from somewhere, and "somewhere" is what I9 exists to prevent.
+     */
+    if (/fetch\s*\(/.test(src)) {
+      assert.match(src, LOOPBACK.source ? /https?:\/\/(127\.0\.0\.1|\[::1\]|localhost)/ : /$^/,
+        `${file} makes a network call but names no loopback address — where is it dialling? (I7)`);
+    }
   }
 });
 
@@ -321,6 +356,9 @@ test('every existing install becomes a node with zero edges (migration is a no-o
       'mesh_client_access', 'mesh_clients', 'mesh_edges',
       'mesh_mirror_alerts', 'mesh_mirror_devices', 'mesh_mirror_nodes', 'mesh_mirror_play_logs',
       'mesh_mirror_workspaces', 'mesh_node', 'mesh_pairing_codes', 'mesh_tombstones',
+      // Phase 5: applied writes, so a retried write returns its first outcome instead of
+      // being applied twice. Empty on every install until a write is actually accepted.
+      'mesh_write_ops',
     ]);
 
     // Still empty on a fresh install: tables exist, nothing is mirrored until something is paired.

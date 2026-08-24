@@ -226,16 +226,34 @@ test('the node rollup hides the online count when the link is stale', async () =
   } finally { cleanup(db); }
 });
 
-test('⚠️ THERE IS NO WRITE ROUTE (I2)', () => {
+test('⚠️ THE HUB API HAS EXACTLY ONE WRITE ROUTE, AND IT ONLY ASKS (I2)', () => {
   /*
-   * Asserted against the SOURCE, because the value here is absence. A behavioural test can only show
-   * that the routes somebody thought to try did not write; this shows there is nothing to call.
+   * ⚠️ REPLACES "there is no write route". That test asserted ABSENCE, which was the right guard
+   * while there was no write channel and the wrong one to keep afterwards: deleting it to add the
+   * feature would have removed the only thing watching this file. What replaces it is the property
+   * that has to survive — the hub may ASK, and every decision is made on the child.
+   *
+   * Still asserted against the source, because the value is still about what exists rather than
+   * what a caller happened to try.
    */
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'mesh.js'), 'utf8');
-  for (const verb of ['router.post', 'router.put', 'router.patch', 'router.delete']) {
-    assert.ok(!src.includes(verb),
-      `${verb} exists in the hub API — 2.0 has no downward channel to write over`);
-  }
+  const mutating = [...src.matchAll(/router\.(post|put|patch|delete)\(\s*'([^']+)'/g)]
+    .map((m) => `${m[1].toUpperCase()} ${m[2]}`);
+  assert.deepEqual(mutating, ['POST /write/:nodeId'],
+    'the hub API grew a mutating route. There is exactly one, it proxies to the child, and the ' +
+    'child decides — anything else here would be a hub acting on its own authority.');
+
+  /*
+   * ...and it must not do its own allowlisting. A second copy of the child's list would drift, and
+   * the copy that matters is the one on the machine that owns the screens.
+   *
+   * Checked by IMPORT rather than by the word "WRITABLE", which appears in an unrelated comment in
+   * this file — a substring match here would fail on prose and teach the next person to weaken it.
+   */
+  assert.ok(!/require\([^)]*write-proxy[^)]*\)/.test(src),
+    'routes/mesh.js must not import the write allowlist — that list lives on the child');
+  assert.ok(src.includes('__meshWriteTo'),
+    'the write route must go through the socket layer to the child, never act locally');
 });
 
 test('the uptime report is bucketed in the ORIGIN zone and says so', async () => {

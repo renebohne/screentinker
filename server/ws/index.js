@@ -85,6 +85,9 @@ module.exports = function setupWebSockets(io) {
          */
         if (meshNs && meshNs.readFrom) {
           global.__meshReadFrom = meshNs.readFrom;
+          // Same publication as the read side: routes reach the live socket layer through this
+          // rather than importing it, because the sockets are constructed after routes are mounted.
+          global.__meshWriteTo = meshNs.writeTo;
         }
         console.log(`[mesh] listening for child nodes as ${thisNodeId}`);
       }
