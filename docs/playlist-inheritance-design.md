@@ -344,13 +344,29 @@ The two helpers now differ on purpose, and both say why.
 Forking breaks the live link, which is what "override" means; the badge says so, and **Use inherited**
 reverses it.
 
-**Left to do:**
+### The item-scoped half, too
 
-1. ⚠️ **Editing or deleting an existing item on an inheriting screen still edits the shared
-   playlist.** Those endpoints are *item*-scoped (`PUT/DELETE /api/assignments/:id`) and carry no
-   device context, so there is nothing to fork against without an API change. Unchanged from before,
-   and narrower than it was — the moment a screen forks, its items are its own — but it is the
-   remaining half of this decision and should not be assumed done.
+`PUT` / `DELETE /api/assignments/:id` are addressed by **item**, so they cannot know whose screen is
+being edited — a shared playlist has many. They now accept an optional **`device_id`** (body for PUT,
+query for DELETE) and the device page supplies it, so editing or removing an item on an inheriting
+screen forks exactly like adding one. Omitting it keeps the old meaning, which is what the playlist
+and group pages want: edit the item where it lives.
+
+`forkInheritedPlaylist` returns an **`itemIdMap`** for this — the caller was handed an id belonging
+to the shared playlist and has to be redirected to its copy, or it goes on mutating the shared one.
+
+⚠️ **Reorder was already broken and nobody had noticed.** `POST /assignments/device/:id/reorder`
+read `devices.playlist_id` directly, which is NULL for an inheriting screen once the copies were
+removed — so a drag-and-drop returned an empty list and reordered nothing, silently. It now resolves,
+forks, and translates the submitted ids; without the translation the `UPDATE` matches nothing
+(different playlist) and the reorder appears to succeed while doing nothing.
+
+⚠️ **One guard is deliberately not claimed as tested.** The `device_id` authorization check is
+defence in depth: mutation-testing showed no test could fail, because `checkItemWrite` already
+refuses a caller who cannot write the item, and the fork refuses to act unless the named device
+actually resolves to that item's playlist. It stays because it turns a nonsense `device_id` into a
+403 rather than a silent no-op — but claiming coverage would be a decorative test, and this project
+has shipped enough of those.
 
 ### The view SQL lives in one module, because a fixture pasted a schema
 

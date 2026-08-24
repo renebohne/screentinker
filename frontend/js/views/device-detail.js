@@ -2222,7 +2222,7 @@ function attachRemoveHandlers(device) {
         if (orphan) { select.style.borderColor = 'var(--danger)'; select.style.color = 'var(--danger)'; }
         select.onchange = async () => {
           try {
-            await api.updateAssignment(assignmentId, { zone_id: select.value || null });
+            await api.updateAssignment(assignmentId, { zone_id: select.value || null }, device.id);
             showToast(t('device.toast.zone_updated'), 'success');
             loadDevice(device.id, 'playlist');
           } catch (err) { showToast(err.message, 'error'); }
@@ -2252,7 +2252,7 @@ function attachRemoveHandlers(device) {
       const id = btn.dataset.muteAssignment;
       const currentlyMuted = btn.dataset.muted === '1';
       try {
-        await api.updateAssignment(id, { muted: !currentlyMuted });
+        await api.updateAssignment(id, { muted: !currentlyMuted }, device.id);
         showToast(currentlyMuted ? t('device.toast.unmuted') : t('device.toast.muted'), 'success');
         loadDevice(device.id, 'playlist');
       } catch (err) { showToast(err.message, 'error'); }
@@ -2265,7 +2265,7 @@ function attachRemoveHandlers(device) {
       e.stopPropagation();
       const id = btn.dataset.removeAssignment;
       try {
-        await api.deleteAssignment(id);
+        await api.deleteAssignment(id, device.id);
         showToast(t('device.toast.removed_from_playlist'), 'success');
         loadDevice(device.id, 'playlist');
       } catch (err) {

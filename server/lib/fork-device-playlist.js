@@ -25,6 +25,14 @@ const { resolveDevicePlaylist } = require('./resolve-device-playlist');
  * ⚠️ Forking breaks the live link on purpose. Later edits to the group's playlist no longer reach
  * this screen — that is what "override" means, and the badge now says so.
  */
+/**
+ * @returns {{playlistId: string, itemIdMap: Map<number, number>}|null}
+ *
+ * itemIdMap maps each SOURCE item id to its copy in the fork. Callers that were handed an item id
+ * belonging to the shared playlist — an edit, a delete, a reorder list — need it to point at the
+ * equivalent row in the fork instead; without it they would go on mutating the shared playlist,
+ * which is the whole thing being fixed.
+ */
 function forkInheritedPlaylist(deviceId, userId) {
   const resolved = resolveDevicePlaylist(deviceId);
   // Nothing to fork from: no playlist at all, or this screen already owns the one it plays.
@@ -36,6 +44,7 @@ function forkInheritedPlaylist(deviceId, userId) {
   if (!source) return null;
 
   const newId = uuidv4();
+  const itemIdMap = new Map();
   const run = db.transaction(() => {
     db.prepare(`INSERT INTO playlists (id, user_id, workspace_id, name, is_auto_generated, status,
                                        published_snapshot, published_structure)
@@ -61,6 +70,7 @@ function forkInheritedPlaylist(deviceId, userId) {
     for (const it of items) {
       const res = insItem.run(newId, it.content_id, it.widget_id, it.child_playlist_id, it.zone_id,
                               it.sort_order, it.duration_sec, it.muted ? 1 : 0);
+      itemIdMap.set(it.id, res.lastInsertRowid);
       // Per-item dayparting is part of what the screen was showing, so it travels too.
       for (const s of scheds.all(it.id)) {
         insSched.run(uuidv4(), res.lastInsertRowid, s.active_days, s.start_time, s.end_time,
@@ -74,7 +84,33 @@ function forkInheritedPlaylist(deviceId, userId) {
   run();
 
   console.log(`[fork] device ${deviceId} forked "${source.name}" (${resolved.source}) -> own playlist ${newId}`);
-  return newId;
+  return { playlistId: newId, itemIdMap };
 }
 
-module.exports = { forkInheritedPlaylist };
+/**
+ * Fork if this device is about to have ONE OF ITS ITEMS edited while it inherits, and translate the
+ * item id the caller was given into the forked equivalent.
+ *
+ * ⚠️ The item-scoped endpoints (PUT/DELETE /api/assignments/:id) are addressed by item, not by
+ * device, so they cannot know on their own whose screen is being edited — a shared playlist has
+ * many. The device page passes device_id for exactly this reason. Without it the old behaviour
+ * stands: the edit lands on the shared playlist and every screen in the group changes.
+ *
+ * @returns the item id to operate on (unchanged when no fork was needed or possible)
+ */
+function forkForItemEdit(deviceId, userId, itemId) {
+  if (!deviceId) return itemId;
+  const item = db.prepare('SELECT playlist_id FROM playlist_items WHERE id = ?').get(itemId);
+  if (!item) return itemId;
+  // Only fork when the item really belongs to the playlist this device INHERITS. An item from some
+  // unrelated playlist is not this screen's to fork, and forking on it would be a silent no-op that
+  // still created a playlist.
+  const resolved = resolveDevicePlaylist(deviceId);
+  if (resolved.playlist_id !== item.playlist_id) return itemId;
+
+  const forked = forkInheritedPlaylist(deviceId, userId);
+  if (!forked) return itemId;
+  return forked.itemIdMap.get(Number(itemId)) ?? forked.itemIdMap.get(itemId) ?? itemId;
+}
+
+module.exports = { forkInheritedPlaylist, forkForItemEdit };

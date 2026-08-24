@@ -35,8 +35,15 @@ function validZoneForLayout(zoneId, deviceLayoutId, ctx) {
 
 // Phase 2.2j: workspace-aware device access check. Returns access context
 // (with workspaceRole/actingAs) or null. Caller decides if read or write.
-function checkDeviceAccess(req, res, paramName = 'deviceId', requireWrite = true) {
-  const device = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(req.params[paramName]);
+/*
+ * explicitId is for the item-scoped routes, where the device is named in the BODY or QUERY rather
+ * than the path — device_id there decides whose screen a fork belongs to, so it must be authorised
+ * exactly like a path param. Passing it through req.params was the obvious shortcut and would have
+ * silently skipped this check, because req.params has no such key.
+ */
+function checkDeviceAccess(req, res, paramName = 'deviceId', requireWrite = true, explicitId = null) {
+  const deviceId = explicitId || req.params[paramName];
+  const device = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(deviceId);
   if (!device) { res.status(404).json({ error: 'Device not found' }); return null; }
   if (!device.workspace_id) { res.status(403).json({ error: 'Device not assigned to a workspace' }); return null; }
   const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(device.workspace_id);
@@ -66,7 +73,7 @@ function ensureDevicePlaylist(deviceId, userId) {
    * one owned by this device, and stamps playlist_source = 'device'.
    */
   const forked = forkInheritedPlaylist(deviceId, userId);
-  if (forked) return forked;
+  if (forked) return forked.playlistId;
 
   // Already this screen's own, or driven by an active schedule: edit it in place.
   const resolved = resolveDevicePlaylistId(deviceId);
@@ -189,12 +196,30 @@ function checkItemWrite(req, res) {
 // Per-item mute lives in lib/mute-sync.js so routes/playlists.js can share it.
 const { emitMuteChanged } = require('../lib/mute-sync');
 const { resolveDevicePlaylistId } = require('../lib/resolve-device-playlist');
-const { forkInheritedPlaylist } = require('../lib/fork-device-playlist');
+const { forkInheritedPlaylist, forkForItemEdit } = require('../lib/fork-device-playlist');
 
 // Update playlist item
 router.put('/:id', (req, res) => {
-  const item = checkItemWrite(req, res);
+  let item = checkItemWrite(req, res);
   if (!item) return;
+
+  /*
+   * ⚠️ device_id turns an item-scoped edit back into a per-screen one.
+   *
+   * This endpoint is addressed by ITEM, so it cannot know whose screen is being edited — a shared
+   * playlist has many. Editing an item on a screen that INHERITS therefore changed that item for
+   * every screen in the group. The device page passes device_id so the same fork-on-write rule as
+   * "add content to this screen" applies here; without it (the group page, the API) the item is
+   * edited where it lives, which is correct for those callers.
+   */
+  if (req.body.device_id) {
+    if (!checkDeviceAccess(req, res, 'body_device_id', true, req.body.device_id)) return;
+    const forkedItemId = forkForItemEdit(req.body.device_id, req.user.id, req.params.id);
+    if (String(forkedItemId) !== String(req.params.id)) {
+      req.params.id = forkedItemId;
+      item = db.prepare('SELECT * FROM playlist_items WHERE id = ?').get(forkedItemId);
+    }
+  }
 
   const { sort_order, duration_sec, zone_id, muted } = req.body;
   const updates = [];
@@ -236,8 +261,21 @@ router.put('/:id', (req, res) => {
 
 // Delete playlist item
 router.delete('/:id', (req, res) => {
-  const item = checkItemWrite(req, res);
+  let item = checkItemWrite(req, res);
   if (!item) return;
+
+  // Same rule as PUT above: removing an item from a screen that inherits used to remove it from
+  // every screen in the group. device_id (query param here — a DELETE carries no body from the
+  // dashboard) says which screen is meant.
+  const deviceId = req.query.device_id;
+  if (deviceId) {
+    if (!checkDeviceAccess(req, res, 'query_device_id', true, deviceId)) return;
+    const forkedItemId = forkForItemEdit(deviceId, req.user.id, req.params.id);
+    if (String(forkedItemId) !== String(req.params.id)) {
+      req.params.id = forkedItemId;
+      item = db.prepare('SELECT * FROM playlist_items WHERE id = ?').get(forkedItemId);
+    }
+  }
 
   db.prepare('DELETE FROM playlist_items WHERE id = ?').run(req.params.id);
   markDraft(item.playlist_id);
@@ -251,21 +289,33 @@ router.post('/device/:deviceId/reorder', (req, res) => {
   const { order } = req.body;
   if (!Array.isArray(order)) return res.status(400).json({ error: 'order must be an array of item IDs' });
 
-  const device = db.prepare('SELECT playlist_id FROM devices WHERE id = ?').get(req.params.deviceId);
-  if (!device?.playlist_id) return res.json([]);
+  /*
+   * ⚠️ Resolved, and forked. This read devices.playlist_id directly, which is NULL for a screen
+   * that inherits now that the copies are gone — so a drag-and-drop on an inheriting screen
+   * silently returned an empty list and reordered nothing.
+   *
+   * Reordering "this screen" is a per-device edit like any other, so it forks; the ids the client
+   * sent belong to the shared playlist and are translated to the fork's equivalents. Without the
+   * translation the UPDATE would match nothing (they are in a different playlist) and the reorder
+   * would appear to succeed while changing nothing at all.
+   */
+  const forked = forkInheritedPlaylist(req.params.deviceId, req.user.id);
+  const playlistId = forked ? forked.playlistId : resolveDevicePlaylistId(req.params.deviceId);
+  if (!playlistId) return res.json([]);
+  const mapId = (itemId) => (forked ? (forked.itemIdMap.get(Number(itemId)) ?? itemId) : itemId);
 
   const updateStmt = db.prepare('UPDATE playlist_items SET sort_order = ? WHERE id = ? AND playlist_id = ?');
   const transaction = db.transaction(() => {
     order.forEach((itemId, index) => {
-      updateStmt.run(index, itemId, device.playlist_id);
+      updateStmt.run(index, mapId(itemId), playlistId);
     });
   });
   transaction();
 
-  markDraft(device.playlist_id);
+  markDraft(playlistId);
 
   const items = db.prepare(`${ITEM_SELECT} WHERE pi.playlist_id = ? ORDER BY pi.sort_order ASC`)
-    .all(device.playlist_id);
+    .all(playlistId);
   res.json(items);
 });
 

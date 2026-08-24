@@ -242,8 +242,19 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(data)
   }),
-  updateAssignment: (id, data) => request(`/assignments/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  deleteAssignment: (id) => request(`/assignments/${id}`, { method: 'DELETE' }),
+  // deviceId says WHICH screen is being edited. These endpoints are addressed by item, and a shared
+  // playlist has many screens, so without it an edit on a screen that inherits its playlist changes
+  // that item for every screen in the group. With it, the server forks first (see
+  // server/lib/fork-device-playlist.js). Optional: the playlist page edits items where they live.
+  updateAssignment: (id, data, deviceId) => request(`/assignments/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(deviceId ? { ...data, device_id: deviceId } : data),
+  }),
+  // DELETE carries no body here, so the device goes in the query string.
+  deleteAssignment: (id, deviceId) => request(
+    `/assignments/${id}${deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : ''}`,
+    { method: 'DELETE' },
+  ),
   reorderAssignments: (deviceId, order) => request(`/assignments/device/${deviceId}/reorder`, {
     method: 'POST',
     body: JSON.stringify({ order })

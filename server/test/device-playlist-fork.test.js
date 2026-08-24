@@ -170,3 +170,113 @@ test('⚠️ adding content to the GROUP still edits the shared playlist — it 
   assert.equal(devRow(mine).playlist_source, null, 'no member should have been forked');
   assert.equal(devRow(other).playlist_source, null);
 });
+
+/*
+ * ─── The item-scoped half ──────────────────────────────────────────────────────────────────
+ *
+ * PUT and DELETE /api/assignments/:id are addressed by ITEM, so they cannot know whose screen is
+ * being edited — a shared playlist has many. Editing or removing an item on a screen that inherits
+ * therefore changed it for every screen in the group. The device page now passes device_id.
+ */
+
+test('⚠️ REMOVING an item from an inheriting screen does not remove it from the group', async () => {
+  const { shared, mine, other } = await groupWithTwoScreens('remove-grp');
+  const sharedItem = itemsOf(shared.id)[0];
+
+  const r = await api(`/api/assignments/${sharedItem.id}?device_id=${mine}`, J(jwt, undefined, 'DELETE'));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+
+  assert.equal(itemsOf(shared.id).length, 1,
+    'the item vanished from the shared playlist, so it vanished from every screen in the group');
+  assert.equal(devRow(mine).playlist_source, 'device', 'the screen should now own its playlist');
+  assert.equal(itemsOf(devRow(mine).playlist_id).length, 0, 'and the removal should apply to it');
+  assert.equal(devRow(other).playlist_id, null, 'the other screen must be untouched');
+});
+
+test('⚠️ EDITING an item on an inheriting screen does not edit it for the group', async () => {
+  const { shared, mine } = await groupWithTwoScreens('edit-grp');
+  const sharedItem = itemsOf(shared.id)[0];
+
+  const r = await api(`/api/assignments/${sharedItem.id}`, J(jwt, { duration_sec: 99, device_id: mine }, 'PUT'));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+
+  assert.equal(itemsOf(shared.id)[0].duration_sec, 10, "the group's copy must keep its own duration");
+  assert.equal(itemsOf(devRow(mine).playlist_id)[0].duration_sec, 99,
+    'the edit must land on the forked item, not be silently dropped');
+});
+
+test('without device_id the item is edited where it lives — the group page still works', async () => {
+  const { shared, mine } = await groupWithTwoScreens('nodev-grp');
+  const sharedItem = itemsOf(shared.id)[0];
+
+  assert.equal((await api(`/api/assignments/${sharedItem.id}`, J(jwt, { duration_sec: 42 }, 'PUT'))).status, 200);
+
+  assert.equal(itemsOf(shared.id)[0].duration_sec, 42,
+    'a caller that did not name a screen means the playlist itself — forking there would break the '
+    + 'playlist and group pages');
+  assert.equal(devRow(mine).playlist_source, null, 'and nothing should have been forked');
+});
+
+test('⚠️ REORDERING an inheriting screen works at all, and forks', async () => {
+  const { shared, mine, other } = await groupWithTwoScreens('reorder-grp');
+  await api(`/api/playlists/${shared.id}/items`, J(jwt, { content_id: contentB, duration_sec: 10 }));
+  await api(`/api/playlists/${shared.id}/publish`, J(jwt, {}));
+  const before = itemsOf(shared.id);
+  assert.equal(before.length, 2);
+
+  const r = await api(`/api/assignments/device/${mine}/reorder`, J(jwt, { order: [before[1].id, before[0].id] }));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.length, 2,
+    'this read devices.playlist_id, which is NULL for an inheriting screen once the copies were '
+    + 'removed — so a drag-and-drop returned an empty list and reordered nothing');
+
+  assert.deepEqual(itemsOf(devRow(mine).playlist_id).map((i) => i.content_id), [contentB, contentA],
+    'the ids sent belong to the SHARED playlist; without translating them to the fork the UPDATE '
+    + 'matches nothing and the reorder silently does nothing');
+  assert.deepEqual(itemsOf(shared.id).map((i) => i.content_id), [contentA, contentB],
+    'the group order must be untouched');
+  assert.equal(devRow(other).playlist_id, null);
+});
+
+test('a caller who cannot write the item is refused, and nothing is forked', async () => {
+  const { shared, mine } = await groupWithTwoScreens('authz-grp');
+  const sharedItem = itemsOf(shared.id)[0];
+
+  const reg2 = await (await fetch(BASE + '/api/auth/register', J(null, {
+    email: `forkauth${Date.now()}@example.com`, password: 'Passw0rd123', name: 'Other',
+  }))).json();
+
+  const r = await api(`/api/assignments/${sharedItem.id}`, J(reg2.token, { duration_sec: 5, device_id: mine }, 'PUT'));
+  assert.ok(r.status === 403 || r.status === 404, `expected a refusal, got ${r.status}`);
+  assert.equal(devRow(mine).playlist_source, null, 'a refused call must not have forked anything');
+});
+
+/*
+ * ⚠️ The device_id authorization check in the route is DEFENCE IN DEPTH and is deliberately not
+ * claimed to be covered here. Mutation-testing it showed no test could fail: checkItemWrite already
+ * refuses a caller who cannot write the item, and forkForItemEdit refuses to act unless the named
+ * device actually resolves to that item's playlist — which cannot happen across workspaces. The
+ * check stays because it turns a nonsense device_id into a 403 instead of a silent no-op, but a
+ * test asserting it would be decorative, and this project has shipped enough of those.
+ */
+
+test('a device_id whose screen plays something ELSE does not fork, or edit anything of that screen\'s', async () => {
+  const { shared } = await groupWithTwoScreens('unrelated-grp');
+  const sharedItem = itemsOf(shared.id)[0];
+
+  // A device INHERITING a DIFFERENT group's playlist. It is forkable — which is the point: the only
+  // thing stopping it being forked here is that this item is not the one it plays.
+  const otherGroup = await groupWithTwoScreens('unrelated-other');
+  const bystander = otherGroup.mine;
+  assert.equal(devRow(bystander).playlist_source, null, 'precondition: the bystander inherits');
+
+  const r = await api(`/api/assignments/${sharedItem.id}`, J(jwt, { duration_sec: 77, device_id: bystander }, 'PUT'));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+
+  assert.equal(devRow(bystander).playlist_source, null,
+    'naming a device that does not play this item must not fork it — that would sever an unrelated '
+    + "screen from its group as a side effect of editing something else");
+  assert.equal(devRow(bystander).playlist_id, null);
+  assert.equal(itemsOf(shared.id)[0].duration_sec, 77,
+    'with no applicable fork the edit lands where the item actually lives');
+});
