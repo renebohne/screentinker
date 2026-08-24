@@ -1,6 +1,7 @@
 'use strict';
 
 const grantsLib = require('./grants');
+const deviceCommand = require('../device-command');
 
 /*
  * Exactly what a parent may CHANGE on this node, and nothing else.
@@ -35,7 +36,38 @@ const WRITABLE = Object.freeze([
   { pattern: '/api/playlists/:id/items/:itemId',   method: 'DELETE', grant: 'content-push' },
   { pattern: '/api/playlists/:id/publish',         method: 'POST',   grant: 'content-push' },
   { pattern: '/api/playlists/:id/assign',          method: 'POST',   grant: 'content-push' },
+
+  /*
+   * Commanding screens. A separate grant, and the customer ticks it separately: changing what
+   * plays and restarting the hardware are different powers, and somebody may reasonably want to
+   * hand over the first and not the second.
+   *
+   * ⚠️ THE PATH IS NOT ENOUGH HERE, WHICH IS WHY THESE CARRY A BODY CHECK.
+   *
+   * Everywhere else on this list, the path names the action. `POST /command` does not: the same
+   * URL carries `reboot`, and `shell`, and `install_apk` — remote code execution and remote
+   * software installation. The consent text the customer reads says "Reboot, reload, change
+   * settings on screens", so the grant must permit exactly that and no more, and no path rule can
+   * express the difference. lib/device-command.js holds the subset and the reasoning for each
+   * exclusion.
+   */
+  { pattern: '/api/devices/:id/command',           method: 'POST', grant: 'device-command',
+    body: meshCommandAllowed },
+  { pattern: '/api/device-groups/:id/command',     method: 'POST', grant: 'device-command',
+    body: meshCommandAllowed },
 ]);
+
+/**
+ * ⚠️ Fails CLOSED on anything it does not recognise. A body with no type, a non-string type, or a
+ * command outside the mesh subset is refused — never passed through on the assumption that the
+ * route beyond will catch it. The route's allowlist is the OPERATOR's; this one is the customer's,
+ * and it is deliberately smaller.
+ */
+function meshCommandAllowed(body) {
+  const type = body && body.type;
+  if (typeof type !== 'string') return false;
+  return deviceCommand.isMeshCommand(type);
+}
 
 /*
  * ⚠️ NORMALISE FIRST, AND SEND WHAT YOU MATCHED. THIS IS THE WHOLE GUARD.
@@ -135,12 +167,20 @@ function isWritable(path, method) {
 const REFUSED = 'That is not something this connection may change. Write access is granted by this ' +
                 "server's operator, per workspace — ask them if you believe it should be allowed.";
 
-function authorizeWrite(edge, path, method, writeGrant, writeScope, workspaceId) {
+function authorizeWrite(edge, path, method, writeGrant, writeScope, workspaceId, body) {
   const norm = normalizeTarget(path);
   const rule = norm && matchPath(norm.full, method);
   if (!rule) {
     // Same refusal for "no such route" and "not permitted": a parent has no business mapping this
     // server's API surface, and only needs to know the answer is no.
+    return { ok: false, reason: REFUSED };
+  }
+  /*
+   * ⚠️ The body check runs BEFORE the grant check and returns the same refusal. A caller must not
+   * be able to tell "you may not command screens at all" from "you may, but not that command" —
+   * the second answer is a map of which verbs are worth trying.
+   */
+  if (typeof rule.body === 'function' && !rule.body(body)) {
     return { ok: false, reason: REFUSED };
   }
   if (!grantsLib.writeAllows(writeGrant, writeScope, rule.grant, workspaceId)) {

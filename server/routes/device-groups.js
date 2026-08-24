@@ -15,17 +15,9 @@ const { resolveDevicePlaylistId, clearInheritedCopy } = require('../lib/resolve-
 const { stripDeviceSecretsForList } = require('../lib/device-sanitize');
 
 const VALID_COLOR = /^#[0-9A-Fa-f]{6}$/;
-const ALLOWED_COMMANDS = [
-  'screen_on', 'screen_off', 'launch', 'update', 'reboot', 'shutdown',
-  // #161 Tier-2 (owner-gated on the panel; STPolicy no-ops off-tier so a stray send is inert):
-  'power_menu', 'lock_now', 'kiosk_lock', 'kiosk_unlock',
-  'set_time', 'set_timezone', 'status_bar', 'block_uninstall', 'unblock_uninstall',
-  // #161 device-owner tooling: remote shell (app-UID diagnostics) + push/install an APK from a URL.
-  'shell', 'install_apk',
-  // #160 Track-A system control (no device owner): media volume + per-window brightness (Tier 0),
-  // system brightness + screen-off timeout (Tier 1 / WRITE_SETTINGS). Panel no-ops if unsupported.
-  'set_volume', 'set_brightness', 'set_system_brightness', 'set_screen_timeout',
-];
+// ⚠️ Moved to lib/device-command.js — this list and the delivery logic below existed in three
+// places and had already drifted (the socket path queued for an offline device; this one did not).
+const { ALLOWED_COMMANDS, deliverCommand } = require('../lib/device-command');
 
 // Phase 2.2i: split read/write access checks. Both attach req.group on success.
 function loadGroupAccessCtx(req, res) {
@@ -451,22 +443,12 @@ router.post('/:id/command', requireScope('full'), requireGroupWrite, (req, res) 
     // report 'sent'. Reporting per-device rather than refusing the whole command: the operator's
     // intent is valid for the members that can do it, and failing the lot because one member is a
     // browser tab would be its own bug.
-    const verdict = playerCapabilities.commandAllowed(device, type);
-    if (!verdict.ok) {
-      results.push({ device_id: device.id, name: device.name, status: 'unsupported', capability: verdict.capability });
-      continue;
-    }
-    const room = deviceNs.adapter.rooms.get(device.id);
-    if (room && room.size > 0) {
-      deviceNs.to(device.id).emit('device:command', { type, payload: payload || {} });
-      results.push({ device_id: device.id, name: device.name, status: 'sent' });
-    } else {
-      results.push({ device_id: device.id, name: device.name, status: 'offline' });
-    }
+    const r = deliverCommand(deviceNs, device, type, payload);
+    results.push({ device_id: device.id, name: device.name, ...r });
   }
 
   const sent = results.filter(r => r.status === 'sent').length;
-  const offline = results.filter(r => r.status === 'offline').length;
+  const offline = results.filter(r => r.status === 'offline' || r.status === 'queued').length;
   const unsupported = results.filter(r => r.status === 'unsupported').length;
   console.log(`Group command '${type}' sent to group '${req.group.name}': ${sent} sent, ${offline} offline, ${unsupported} unsupported`);
   res.json({ success: true, sent, offline, unsupported, total: devices.length, results });

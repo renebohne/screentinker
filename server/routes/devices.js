@@ -9,6 +9,7 @@ const { accessContext } = require('../lib/tenancy');
 // requireScope gates by API-token scope; the workspace WRITE gate is checkDeviceOwnership, which
 // already rejects workspace_viewer — the same check requireFleetWrite performs in routes/triggers.js.
 const { requireScope } = require('../middleware/apiToken');
+const { ALLOWED_COMMANDS, deliverCommand } = require('../lib/device-command');
 const { stripDeviceSecrets, stripDeviceSecretsForList, stripTriggerSecretForTokens } = require('../lib/device-sanitize');
 const { layoutZones, orphanCountsByDevice } = require('../lib/zone-validate');
 const deviceSettings = require('../lib/device-settings'); // #150 delete+re-pair settings preservation
@@ -407,6 +408,38 @@ router.put('/:id', (req, res) => {
  * Modelled on POST /:id/settings-pin: rotate-or-set, live push, and the response says whether the
  * panel actually got it rather than implying it.
  */
+/*
+ * Send one command to one screen.
+ *
+ * ⚠️ THE GROUP EQUIVALENT HAS EXISTED FOR A LONG TIME and this did not, so commanding a single
+ * device was reachable only over the dashboard socket. That was survivable while the only caller
+ * was a browser tab; it stopped being survivable when another server needed to ask, because the
+ * mesh write channel re-enters this node's own HTTP API precisely so that a remote request passes
+ * the same guards a local one does. Without an HTTP surface there was nothing for it to re-enter.
+ *
+ * Guarded exactly as the group route is: requireScope('full') for API tokens (a fleet-affecting
+ * action is not an ordinary write), checkDeviceOwnership for the workspace, the shared command
+ * allowlist, and the panel's own declared capabilities.
+ */
+router.post('/:id/command', requireScope('full'), (req, res) => {
+  const device = checkDeviceOwnership(req, res);
+  if (!device) return;
+
+  const { type, payload } = req.body || {};
+  if (!type) return res.status(400).json({ error: 'command type required' });
+  if (!ALLOWED_COMMANDS.includes(type)) return res.status(400).json({ error: 'invalid command type' });
+
+  const deviceNs = req.app.get('io')?.of('/device');
+  if (!deviceNs) return res.status(503).json({ error: 'The realtime layer is not available.' });
+
+  const r = deliverCommand(deviceNs, device, type, payload);
+  if (r.status === 'unsupported') {
+    // Named rather than generic: "this panel cannot do that" is actionable, "failed" is not.
+    return res.status(400).json({ error: 'That screen cannot do that', capability: r.capability });
+  }
+  res.json({ success: true, status: r.status, device_id: device.id });
+});
+
 router.post('/:id/trigger-config', requireScope('full'), (req, res) => {
   const device = checkDeviceOwnership(req, res);
   if (!device) return;

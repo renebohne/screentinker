@@ -554,3 +554,113 @@ test('⚠️ the origin node is the EDGE, never anything in the body', async () 
   assert.equal(r.ok, false, "another hub's provenance must not be addressable from this edge");
   assert.equal(applied.length, 0);
 });
+
+/*
+ * ⚠️ COMMANDING SCREENS — a different grant, and a narrower one than the path suggests.
+ *
+ * Every other rule on the allowlist is fully described by its path. `POST /command` is not: the
+ * same URL carries `reboot`, and `shell`, and `install_apk`. The consent sentence says "Reboot,
+ * reload, change settings on screens", so the grant must permit that and no more — and only a body
+ * check can tell those apart.
+ */
+test('⚠️ a hub with content-push alone cannot command screens', async () => {
+  applied = [];
+  const dev = id();
+  db.prepare('INSERT INTO devices (id, name, workspace_id) VALUES (?,?,?)').run(dev, 'Lobby', wsA);
+  const edge = mkEdge(['content-push'], [wsA]);
+  const r = await applyWrite(db, edge, req({
+    path: `/api/devices/${dev}/command`, method: 'POST', body: { type: 'reboot' },
+  }), { apply });
+  assert.equal(r.ok, false, 'changing what plays and restarting the hardware are different powers');
+  assert.equal(applied.length, 0);
+});
+
+test('a hub with device-command may reboot a screen in scope', async () => {
+  applied = [];
+  const dev = id();
+  db.prepare('INSERT INTO devices (id, name, workspace_id) VALUES (?,?,?)').run(dev, 'Lobby', wsA);
+  const edge = mkEdge(['device-command'], [wsA]);
+  const r = await applyWrite(db, edge, req({
+    path: `/api/devices/${dev}/command`, method: 'POST', body: { type: 'reboot' },
+  }), { apply });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(applied[0].body.type, 'reboot');
+});
+
+test('⚠️ and may NOT run a shell command or install software on it', async () => {
+  const dev = id();
+  db.prepare('INSERT INTO devices (id, name, workspace_id) VALUES (?,?,?)').run(dev, 'Lobby', wsA);
+  const edge = mkEdge(['device-command'], [wsA]);
+  for (const type of ['shell', 'install_apk', 'kiosk_lock', 'block_uninstall', 'update']) {
+    applied = [];
+    const r = await applyWrite(db, edge, req({
+      path: `/api/devices/${dev}/command`, method: 'POST', body: { type, payload: { cmd: 'id' } },
+    }), { apply });
+    assert.equal(r.ok, false, `${type} must never be reachable from another server`);
+    assert.equal(applied.length, 0, `${type} must not reach the executor`);
+    // ⚠️ The SAME refusal as "you may not command at all" — telling those apart would hand a caller
+    // a map of which verbs are worth trying.
+    assert.equal(r.reason, require('../lib/mesh/write-proxy').REFUSED);
+  }
+});
+
+test('a command with no type, or a non-string one, is refused', async () => {
+  const dev = id();
+  db.prepare('INSERT INTO devices (id, name, workspace_id) VALUES (?,?,?)').run(dev, 'Lobby', wsA);
+  const edge = mkEdge(['device-command'], [wsA]);
+  for (const body of [{}, { type: null }, { type: ['reboot'] }, { type: { toString: () => 'reboot' } }]) {
+    applied = [];
+    const r = await applyWrite(db, edge, req({ path: `/api/devices/${dev}/command`, method: 'POST', body }), { apply });
+    assert.equal(r.ok, false);
+    assert.equal(applied.length, 0);
+  }
+});
+
+test('⚠️ a device in another workspace is refused, exactly as a playlist would be', async () => {
+  applied = [];
+  const dev = id();
+  db.prepare('INSERT INTO devices (id, name, workspace_id) VALUES (?,?,?)').run(dev, 'Other', wsB);
+  const edge = mkEdge(['device-command'], [wsA]);
+  const r = await applyWrite(db, edge, req({
+    path: `/api/devices/${dev}/command`, method: 'POST', body: { type: 'reboot' },
+  }), { apply });
+  assert.equal(r.ok, false);
+  assert.equal(applied.length, 0);
+});
+
+test('⚠️ the resolver itself refuses a target with no workspace', () => {
+  /*
+   * ⚠️ TESTED DIRECTLY, because writeAllows also denies a falsy workspace — so removing this check
+   * changes nothing observable through applyWrite and the mutation survives. Two layers refuse it;
+   * each has to be shown to work alone, or deleting either leaves the suite green. (That is the
+   * third time in this feature that a defence-in-depth guard needed its own test to be real.)
+   */
+  const { resolveTargetWorkspace } = require('../lib/mesh/node-write');
+  const orphan = id();
+  db.prepare('INSERT INTO devices (id, name, workspace_id) VALUES (?,?,NULL)').run(orphan, 'Orphan');
+  assert.equal(resolveTargetWorkspace(db, `/api/devices/${orphan}/command`), null,
+    'a row whose owner is unknown must not resolve — "I do not know whose this is" is never "yours"');
+
+  const owned = id();
+  db.prepare('INSERT INTO devices (id, name, workspace_id) VALUES (?,?,?)').run(owned, 'Lobby', wsA);
+  assert.deepEqual(resolveTargetWorkspace(db, `/api/devices/${owned}/command`),
+    { kind: 'devices', workspaceId: wsA, id: owned });
+
+  // ...and a table nobody allowlisted does not resolve at all, whatever the id.
+  assert.equal(resolveTargetWorkspace(db, '/api/users/abc/command'), null);
+});
+
+test('⚠️ a device row with no workspace is refused rather than treated as unowned', async () => {
+  // For content, NULL workspace means "platform template, shared with everyone" — a deliberate
+  // global. For a device it means the row predates tenancy or was written wrong, and the safe
+  // reading of "I do not know whose this is" is never "yours".
+  applied = [];
+  const dev = id();
+  db.prepare('INSERT INTO devices (id, name, workspace_id) VALUES (?,?,NULL)').run(dev, 'Orphan');
+  const edge = mkEdge(['device-command'], [wsA]);
+  const r = await applyWrite(db, edge, req({
+    path: `/api/devices/${dev}/command`, method: 'POST', body: { type: 'reboot' },
+  }), { apply });
+  assert.equal(r.ok, false);
+  assert.equal(applied.length, 0);
+});

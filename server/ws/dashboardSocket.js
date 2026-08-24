@@ -5,6 +5,7 @@ const { accessContext, accessibleWorkspaceIds } = require('../lib/tenancy');
 const { workspaceRoom } = require('../lib/socket-rooms');
 const { protectSocket } = require('../lib/safe-socket');
 const playerCapabilities = require('../lib/player-capabilities');
+const { deliverCommand } = require('../lib/device-command');
 const bsSnapshotQueue = require('../lib/brightsign-snapshot-queue');
 
 // Phase 2.3: workspace-scoped socket rooms + per-command permission gates.
@@ -175,33 +176,24 @@ module.exports = function setupDashboardSocket(io) {
       // it fails loudly instead of being delivered and silently ignored — which is the failure
       // this whole mechanism exists to end.
       const devRow = db.prepare('SELECT * FROM devices WHERE id = ?').get(device_id);
-      const verdict = playerCapabilities.commandAllowed(devRow, type);
-      if (!verdict.ok) {
-        console.warn(`Command ${type} refused for device ${device_id}: needs ${verdict.capability}`);
-        if (typeof ack === 'function') {
-          ack({ delivered: false, reason: 'unsupported', capability: verdict.capability });
-        }
+      // ⚠️ One definition of "deliver a command", shared with the group route and the mesh path —
+      // see lib/device-command.js for why it was extracted.
+      const r = deliverCommand(deviceNs, devRow, type, payload);
+
+      if (r.status === 'unsupported') {
+        console.warn(`Command ${type} refused for device ${device_id}: needs ${r.capability}`);
+        if (typeof ack === 'function') ack({ delivered: false, reason: 'unsupported', capability: r.capability });
         return;
       }
-
-      const room = deviceNs.adapter.rooms.get(device_id);
-      if (room && room.size > 0) {
-        deviceNs.to(device_id).emit('device:command', { type, payload });
+      if (r.status === 'sent') {
         console.log(`Command delivered to device ${device_id}: ${type}`);
         if (typeof ack === 'function') ack({ delivered: true });
         return;
       }
-      // Device offline at emit time. Try to queue (lazy require so reverting
-      // the queue commit doesn't break this commit - MODULE_NOT_FOUND on the
-      // first try gets cached by Node's module loader, giving consistent
-      // queued=false behavior on every subsequent call).
-      let queued = false;
-      try {
-        const queue = require('../lib/command-queue');
-        queued = queue.queueCommand(device_id, type, payload);
-      } catch (e) { /* command-queue module absent; fall through to lost */ }
-      console.log(`Command for offline device ${device_id}: ${type} (queued=${queued})`);
-      if (typeof ack === 'function') ack({ delivered: false, queued, reason: 'offline' });
+      console.log(`Command for offline device ${device_id}: ${type} (queued=${r.status === 'queued'})`);
+      if (typeof ack === 'function') {
+        ack({ delivered: false, queued: r.status === 'queued', reason: 'offline' });
+      }
     });
 
     socket.on('disconnect', () => {

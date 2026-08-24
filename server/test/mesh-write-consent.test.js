@@ -101,10 +101,7 @@ test('⚠️ a write category offered over the wire is REFUSED, and says where o
 
 test('the consent door takes writes and refuses reads; the wire door is the mirror image', () => {
   assert.equal(grants.validateWriteConsent(['content-push']).ok, true);
-  // ⚠️ device-command was listed here too until it was marked unavailable: it is defined and
-  // described but no rule in write-proxy.WRITABLE requires it, so granting it permitted nothing.
-  // The mirror-image property this test exists for is unaffected — see the dedicated test below.
-  assert.equal(grants.validateWriteConsent(['content-push', 'device-command']).ok, false);
+  assert.equal(grants.validateWriteConsent(['content-push', 'device-command']).ok, true);
   assert.equal(grants.validateWriteConsent(['health']).ok, false,
     'a read category set through the write door would let one route widen the other column');
   assert.equal(grants.validateGrant(['health']).ok, true);
@@ -242,16 +239,64 @@ test('⚠️ a grant with categories but no workspaces does not claim the parent
   assert.equal(view.parentCanControlThisNode, false);
 });
 
-test('⚠️ a category nothing can enforce cannot be granted', () => {
-  const r = grants.validateWriteConsent(['device-command']);
-  assert.equal(r.ok, false);
-  assert.match(r.reason, /cannot be granted yet/i);
-  assert.deepEqual(r.rejected, ['device-command']);
-  assert.equal(grants.validateWriteConsent(['content-push']).ok, true);
+/*
+ * ⚠️ EVERY ADVERTISED CATEGORY MUST HAVE SOMETHING BEHIND IT.
+ *
+ * This replaces two tests that asserted device-command was *unavailable*. That was true and is no
+ * longer: it now maps to the device and group command routes. But the reason it was marked
+ * unavailable is the thing worth keeping — it was defined, described to the customer, and enforced
+ * by nothing, so ticking it granted a permanent no-op while the consent screen said otherwise.
+ *
+ * So the guard is now the general form rather than a fact about one category: anything the consent
+ * screen offers must be required by at least one rule. A category added later with no rule behind
+ * it fails here instead of shipping as a promise the product does not keep.
+ */
+test('⚠️ every write category the consent screen offers is enforced by a rule', () => {
+  const writeProxy = require('../lib/mesh/write-proxy');
+  const enforced = new Set(writeProxy.WRITABLE.map((r) => r.grant));
+  for (const name of grants.ALL_WRITE) {
+    const meta = grants.WRITE_CATEGORIES[name];
+    if (meta && meta.available === false) {
+      // Still explicitly unavailable: it must be refused at the door rather than silently stored.
+      assert.equal(grants.validateWriteConsent([name]).ok, false,
+        `${name} is marked unavailable, so granting it must be refused`);
+      continue;
+    }
+    assert.ok(enforced.has(name),
+      `${name} is offered to the customer and no rule in WRITABLE requires it — granting it would ` +
+      'permit nothing while the consent screen said it permitted something');
+    assert.equal(grants.validateWriteConsent([name]).ok, true);
+  }
 });
 
-test('the catalogue marks which categories are unavailable, so the UI can say so', () => {
-  assert.equal(grants.WRITE_CATEGORIES['content-push'].available, undefined,
-    'available is absent on the ones that work — only the exception is marked');
-  assert.equal(grants.WRITE_CATEGORIES['device-command'].available, false);
+/*
+ * ⚠️ AND WHAT A HUB MAY COMMAND IS NARROWER THAN WHAT AN OPERATOR MAY.
+ *
+ * The command routes accept `shell` and `install_apk` — remote code execution and remote software
+ * installation — which are legitimate for somebody acting on their own fleet from their own
+ * dashboard. The consent sentence a customer reads is "Reboot, reload, change settings on screens",
+ * and it must bound what the grant permits. A path rule cannot express that difference, because the
+ * same URL carries every command; the body check is what does.
+ */
+test('⚠️ a hub cannot reach shell or install_apk through the command grant', () => {
+  const { ALLOWED_COMMANDS, MESH_COMMANDS, isMeshCommand } = require('../lib/device-command');
+  for (const forbidden of ['shell', 'install_apk', 'kiosk_lock', 'block_uninstall', 'power_menu', 'update']) {
+    assert.ok(ALLOWED_COMMANDS.includes(forbidden), `${forbidden} is still an operator command`);
+    assert.equal(isMeshCommand(forbidden), false, `${forbidden} must never be reachable from a hub`);
+  }
+  assert.ok(MESH_COMMANDS.length > 0);
+  for (const allowed of MESH_COMMANDS) {
+    assert.ok(ALLOWED_COMMANDS.includes(allowed),
+      `${allowed} is offered to a hub but is not a command this server accepts at all`);
+  }
 });
+
+test('⚠️ the consent sentence names what it permits, and excludes what it does not', () => {
+  // The sentence IS the boundary — if the subset grows and this does not, the screen starts lying.
+  const said = grants.describeGrant(['device-command']).join(' ').toLowerCase();
+  assert.match(said, /restart/);
+  assert.match(said, /volume|brightness/);
+  assert.match(said, /not be able to run commands|install software/,
+    'the exclusions are the half a customer cannot infer, so they must be stated');
+});
+

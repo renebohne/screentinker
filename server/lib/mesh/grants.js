@@ -115,9 +115,23 @@ const WRITE_CATEGORIES = Object.freeze({
   },
   'device-command': {
     summary: 'Reboot, reload, change settings on screens',
-    consequence: 'This hub will be able to restart and reconfigure your screens.',
     /*
-     * ⚠️ DEFINED BUT NOT YET IMPLEMENTED, AND SAID SO RATHER THAN LEFT TO LOOK REAL.
+     * ⚠️ ENUMERATES, because the sentence IS the boundary. lib/device-command.js permits a subset
+     * of what an operator may send from their own dashboard, and the excluded ones are excluded
+     * precisely because nobody grants remote shell or software installation by ticking a box that
+     * says "reboot and change settings". If that subset ever grows, this sentence grows with it in
+     * the same commit.
+     */
+    consequence: 'This hub will be able to restart your screens, turn them on and off, relaunch ' +
+                 'the player, and change volume, brightness, screen timeout, clock and status bar. ' +
+                 'It will NOT be able to run commands on them, install software, or change what ' +
+                 'the person standing at the screen can do.',
+    /*
+     * ⚠️ WAS "defined but not implemented" AND IS NOW REAL. Kept for the record, because the shape
+     * of the fix matters: the answer was not to allowlist the command surface under the existing
+     * sentence, but to permit the subset that sentence actually describes and enumerate it.
+     *
+     * The original note follows.
      *
      * Every rule in write-proxy.WRITABLE requires 'content-push'; there is no rule any
      * device-command grant could satisfy, and the hub-side action name ('command-devices') is
@@ -130,7 +144,6 @@ const WRITE_CATEGORIES = Object.freeze({
      * rendered unavailable, per the note in client-roles.js: a capability that does not exist
      * reads as a promise the product does not keep.
      */
-    available: false,
   },
 });
 

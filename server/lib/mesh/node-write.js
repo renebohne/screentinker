@@ -38,11 +38,34 @@ function resolveTargetWorkspace(db, path) {
   // the caller supplies it; every other rule addresses an existing object.
   if (seg.length === 3) return { kind: 'collection', workspaceId: null };
 
-  const playlistId = seg[3];
-  if (!playlistId) return null;
-  const row = db.prepare('SELECT workspace_id FROM playlists WHERE id = ?').get(playlistId);
+  /*
+   * ⚠️ EVERY TARGET'S WORKSPACE IS READ FROM THIS NODE'S OWN ROWS, whatever kind it is. The table
+   * differs; the rule does not — the parent names an object, and this node alone decides which
+   * workspace that object belongs to. A resolver that took the workspace from the request would
+   * let a parent choose its own permission, which is the defect the whole design exists to close.
+   */
+  const kind = seg[2];
+  const targetId = seg[3];
+  if (!targetId) return null;
+
+  const TABLES = {
+    playlists: 'playlists',
+    devices: 'devices',
+    'device-groups': 'device_groups',
+  };
+  const table = TABLES[kind];
+  if (!table) return null;
+
+  const row = db.prepare(`SELECT workspace_id FROM ${table} WHERE id = ?`).get(targetId);
   if (!row) return null;
-  return { kind: 'playlist', workspaceId: row.workspace_id, id: playlistId };
+  /*
+   * ⚠️ A row with no workspace is refused rather than treated as unowned-and-therefore-fair-game.
+   * For content, NULL means "platform template, shared with everyone" — a deliberate global. For a
+   * device or a group it means the row predates tenancy or was written wrong, and the safe reading
+   * of "I do not know whose this is" is never "yours".
+   */
+  if (!row.workspace_id) return null;
+  return { kind, workspaceId: row.workspace_id, id: targetId };
 }
 
 /**
@@ -175,7 +198,7 @@ async function applyWriteInner(db, edge, req, deps = {}) {
     ? (req.body && req.body.workspace_id) || null
     : target.workspaceId;
 
-  const auth = writeProxy.authorizeWrite(edge, path, method, writeGrant, writeScope, workspaceId);
+  const auth = writeProxy.authorizeWrite(edge, path, method, writeGrant, writeScope, workspaceId, req.body);
   if (!auth.ok) return auth;
 
   /*
