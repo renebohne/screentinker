@@ -10,6 +10,7 @@ const { sixDigitCode } = require('../lib/numeric-code');
 const VERSION = require('../version');
 const { PLATFORM_ROLES, resolveSessionUser } = require('../middleware/auth');
 const { INLINE_SAFE_EXTS } = require('../lib/upload-sniff');
+const { digestFileSync, isDigestName } = require('../lib/content-digest');
 const loopLag = require('../services/loop-lag');
 // #146 P3.8: soak observability — internal limiter/maintenance states.
 const flapLimiter = require('../lib/flap-limiter');
@@ -363,7 +364,24 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
           // dir under a name the browser would treat as an active document.
           const ext = path.extname(f.name).toLowerCase();
           if (!INLINE_SAFE_EXTS.has(ext)) continue;
-          const destName = `${newId}${ext}`;
+          /*
+           * ⚠️ A CONTENT-ADDRESSED NAME IS KEPT, and everything else is re-named to the new id.
+           *
+           * Files received over the mesh are stored as <sha256><ext>, and `filepath` sits inside
+           * the player's structural fingerprint. Renaming them on restore therefore changed the
+           * fingerprint of every playlist holding one — restarting playback at item 1 on every web
+           * and BrightSign screen in the estate, for files whose bytes had not changed at all.
+           *
+           * It also broke the far side: a hub re-pushing after a restore found no matching digest,
+           * concluded the assets were absent, re-transferred every one of them and charged the
+           * customer's storage allowance a second time for bytes they already had.
+           *
+           * Keeping the name is safe precisely because it IS the digest: identical name means
+           * identical bytes, so two rows sharing one is correct rather than a collision — and
+           * unlinking is refcounted now (lib/content-files.js), so neither row can take the other's
+           * file with it.
+           */
+          const destName = isDigestName(f.name) ? path.basename(f.name) : `${newId}${ext}`;
           const destPath = path.join(config.contentDir, destName);
           try {
             copyFileBytes(f.path, destPath);
@@ -383,7 +401,23 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
         }
       }
 
-      db.prepare(`INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type, file_size, duration_sec, remote_url, thumbnail_path, width, height, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(newId, userId, workspaceId, c.filename, newFilepath, c.mime_type, c.file_size || 0, c.duration_sec || null, c.remote_url || null, newThumbnail, c.width || null, c.height || null, c.created_at || Math.floor(Date.now() / 1000));
+      /*
+       * ⚠️ byte_digest IS COMPUTED FROM THE RESTORED BYTES — the fifth writer named in that
+       * column's own migration note, and the one that was missed when the other four were done.
+       *
+       * Without it every restored row carries NULL, so the dedup lookup can never match one: a
+       * hub re-pushing content this server already holds transfers all of it again and spends the
+       * operator's allowance on storage they have already paid for. Hashing here costs one streamed
+       * read of a file written moments ago; failing to hash degrades to "cannot dedup", which is
+       * where the row would have been anyway, so it must never lose the restore.
+       */
+      let restoredDigest = null;
+      if (newFilepath) {
+        // Synchronous because this runs inside the restore's transaction — see digestFileSync.
+        restoredDigest = digestFileSync(path.join(config.contentDir, newFilepath));
+      }
+
+      db.prepare(`INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type, file_size, duration_sec, remote_url, thumbnail_path, width, height, created_at, byte_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(newId, userId, workspaceId, c.filename, newFilepath, c.mime_type, c.file_size || 0, c.duration_sec || null, c.remote_url || null, newThumbnail, c.width || null, c.height || null, c.created_at || Math.floor(Date.now() / 1000), restoredDigest);
       stats.content++;
     }
 

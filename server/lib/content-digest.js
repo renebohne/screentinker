@@ -33,6 +33,41 @@ function digestFile(absPath) {
 }
 
 /**
+ * The same digest, computed synchronously in bounded chunks.
+ *
+ * ⚠️ EXISTS FOR ONE CALLER: the backup restore, whose inserts run inside a better-sqlite3
+ * transaction — and a transaction callback cannot await. The alternatives were worse: restructuring
+ * the restore so hashing happens outside it means either holding every file's bytes in memory until
+ * the transaction opens, or opening the transaction twice and losing the all-or-nothing property a
+ * restore most needs.
+ *
+ * ⚠️ CHUNKED, NOT readFileSync, for the reason given above — these files reach 500 MB. This still
+ * blocks the event loop while it runs, which is acceptable ONLY here: a restore is an explicit,
+ * exclusive, operator-initiated act on a server nobody is watching screens from. Do not reach for
+ * this on a request path; use digestFile().
+ *
+ * @returns {string|null} hex digest, or null if the file cannot be read.
+ */
+function digestFileSync(absPath, chunkBytes = 1024 * 1024) {
+  let fd = null;
+  try {
+    fd = fs.openSync(absPath, 'r');
+    const hash = crypto.createHash('sha256');
+    const buf = Buffer.alloc(chunkBytes);
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, chunkBytes, null);
+      if (n <= 0) break;
+      hash.update(buf.subarray(0, n));
+    }
+    return hash.digest('hex');
+  } catch (e) {
+    return null;
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch (e) { /* best effort */ } }
+  }
+}
+
+/**
  * The filepath a pushed asset lands on: content-addressed.
  *
  * ⚠️ THIS IS WHAT KEEPS AN UNCHANGED RE-PUSH FREE. `filepath` is inside the player's structural
@@ -60,4 +95,4 @@ function isDigestName(filepath) {
   return /^[0-9a-f]{64}\.[A-Za-z0-9]+$/.test(path.basename(String(filepath || '')));
 }
 
-module.exports = { digestFile, digestFilename, isDigestName };
+module.exports = { digestFile, digestFileSync, digestFilename, isDigestName };

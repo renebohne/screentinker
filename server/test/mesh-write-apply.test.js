@@ -52,7 +52,15 @@ const mkEdge = (writeGrant, writeScope) => {
     .run(e, id(), writeGrant ? JSON.stringify(writeGrant) : null, writeScope ? JSON.stringify(writeScope) : null);
   return db.prepare('SELECT * FROM mesh_edges WHERE id = ?').get(e);
 };
-const req = (o = {}) => ({ opId: id(), path: `/api/playlists/${plA}/items`, method: 'POST', body: {}, ...o });
+/*
+ * ⚠️ Stamps BOTH clock fields, because our own hub stamps both on every write. A fixture that
+ * omitted them was modelling a peer this product does not produce — and it hid the fact that the
+ * deadline check could be switched off simply by leaving a field out.
+ */
+const req = (o = {}) => ({
+  opId: id(), path: `/api/playlists/${plA}/items`, method: 'POST', body: {},
+  sentAt: Date.now(), notAfter: Date.now() + 120_000, ...o,
+});
 
 test('a granted write, in scope, is applied', async () => {
   applied = [];
@@ -122,9 +130,50 @@ test('⚠️ a RETRY returns the first outcome instead of applying twice', async
 
 test('a write with no operation id is refused, because retrying it could not be safe', async () => {
   const edge = mkEdge(['content-push'], [wsA]);
-  const r = await applyWrite(db, edge, { path: `/api/playlists/${plA}/items`, method: 'POST', body: {} }, { apply });
+  // Built by hand rather than via req(), so it must still carry the clock fields — otherwise it is
+  // refused for missing a deadline and this asserts the wrong refusal.
+  const r = await applyWrite(db, edge, {
+    path: `/api/playlists/${plA}/items`, method: 'POST', body: {},
+    sentAt: Date.now(), notAfter: Date.now() + 120_000,
+  }, { apply });
   assert.equal(r.ok, false);
   assert.match(r.reason, /operation id/i);
+});
+
+/*
+ * ⚠️ THE DEADLINE WAS OPT-IN BY THE SENDER, WHICH IS NOT A GUARD.
+ *
+ * The whole block ran `if (typeof req.notAfter === 'number')`, so a peer that omitted the field got
+ * no deadline — and one that omitted `sentAt` with it disarmed the skew check too, because skew was
+ * computed against `req.sentAt || now` and was therefore always zero. It constrained only callers
+ * who chose to be constrained.
+ *
+ * What it protects: revocation means "stop future writes", and the live edge re-read cannot see a
+ * write that is already in flight. The deadline is what bounds that window.
+ */
+test('⚠️ a write with no expiry is refused, however good the grant is', async () => {
+  applied = [];
+  const edge = mkEdge(['content-push'], [wsA]);
+  const r = await applyWrite(db, edge, {
+    path: `/api/playlists/${plA}/items`, method: 'POST', body: {}, opId: id(), sentAt: Date.now(),
+  }, { apply });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /expiry/i);
+  assert.equal(applied.length, 0);
+});
+
+test('⚠️ and one that will not say when it was sent is refused too', async () => {
+  // Without sentAt there is no clock to check the expiry against, so accepting it would mean
+  // trusting a deadline nobody can verify — which is the same as having no deadline.
+  applied = [];
+  const edge = mkEdge(['content-push'], [wsA]);
+  const r = await applyWrite(db, edge, {
+    path: `/api/playlists/${plA}/items`, method: 'POST', body: {}, opId: id(),
+    notAfter: Date.now() + 120_000,
+  }, { apply });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /when it was sent/i);
+  assert.equal(applied.length, 0);
 });
 
 test('⚠️ a STALE intent for the same target is dropped, not applied last-wins', async () => {

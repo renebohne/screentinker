@@ -29,6 +29,7 @@
 
 const mirrorStore = require('../lib/mesh/mirror-store');
 const contentReceive = require('../lib/mesh/content-receive');
+const { TOKEN_PREFIX: MESH_TOKEN_PREFIX } = require('../lib/mesh/local-apply');
 
 // Read lazily: config resolves DATA_DIR at first require, and this module is loaded early.
 const contentDir = () => require('../config').contentDir;
@@ -41,7 +42,7 @@ const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 function sweepOnce(db, logger = console) {
   const nowSec = Math.floor(Date.now() / 1000);
-  const out = { alerts: 0, playLogs: 0, tombstoned: 0, writeOps: 0, tickets: 0, stagedParts: 0 };
+  const out = { alerts: 0, playLogs: 0, tombstoned: 0, writeOps: 0, tickets: 0, stagedParts: 0, staleTokens: 0 };
 
   /*
    * Mirrored data, per edge, against that edge's OWN retention. Per edge rather than one global
@@ -92,6 +93,29 @@ function sweepOnce(db, logger = console) {
    * takes hours, and sweeping a transfer that is merely slow would make the bad-link case
    * unwinnable. The `mesh-` prefix keeps this off ordinary uploads, which use their own `.part`.
    */
+  /*
+   * ⚠️ ABANDONED MESH TOKENS. local-apply mints a workspace-bound token per write and revokes it in
+   * a `finally` — which covers a throw and a normal return, and does NOT cover SIGKILL, an OOM, or
+   * the power going out mid-request. The row then survives as an un-revoked credential.
+   *
+   * Not directly exploitable: the secret exists only in the memory of a process that is now gone,
+   * and nothing writes it down. But an un-revoked token row is a live credential as far as every
+   * query and every audit of this table is concerned, and "it's fine because the secret is lost" is
+   * the kind of reasoning that stops being true the first time somebody adds token export.
+   *
+   * Five minutes, because a live one exists only for the duration of a single loopback request —
+   * anything older has no process behind it. Revoked rather than deleted: the row is evidence that
+   * a write happened, and this is the table an auditor reads.
+   */
+  try {
+    out.staleTokens = db.prepare(
+      `UPDATE api_tokens SET revoked_at = ?
+        WHERE revoked_at IS NULL AND prefix LIKE ? AND created_at < ?`,
+    ).run(nowSec, `${MESH_TOKEN_PREFIX}%`, nowSec - 300).changes;
+  } catch (e) {
+    logger.warn(`[mesh] could not sweep abandoned write tokens: ${e && e.message}`);
+  }
+
   try {
     out.stagedParts = contentReceive.sweepStagedParts(contentDir()).removed;
   } catch (e) {
@@ -113,12 +137,12 @@ function startMeshMaintenance(db, { logger = console } = {}) {
   const timer = setInterval(() => {
     try {
       const r = sweepOnce(db, logger);
-      const total = r.alerts + r.playLogs + r.tombstoned + r.writeOps + r.tickets + r.stagedParts;
+      const total = r.alerts + r.playLogs + r.tombstoned + r.writeOps + r.tickets + r.stagedParts + r.staleTokens;
       if (total > 0) {
         logger.log(`[mesh] housekeeping removed ${total} row(s): ` +
                    `${r.alerts} alerts, ${r.playLogs} play logs, ${r.tombstoned} tombstoned devices, ` +
                    `${r.writeOps} write ops, ${r.tickets} expired tickets, ` +
-                   `${r.stagedParts} abandoned transfers`);
+                   `${r.stagedParts} abandoned transfers, ${r.staleTokens} stale write tokens`);
       }
     } catch (e) {
       logger.warn(`[mesh] housekeeping failed: ${e && e.message}`);

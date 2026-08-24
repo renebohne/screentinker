@@ -830,6 +830,15 @@ function writeGrantBlock(u, caps) {
       <!-- ⚠️ ON THE SAME PANEL AS THE GRANT, because "what did they do with it" is the second
            question every operator asks and there was nowhere to ask it. Collapsed by default: it
            is a record to consult, not a thing to read every visit. -->
+      <!-- ⚠️ Next to the budget, because "18 GB of 20 GB used" is only actionable if the operator
+           can see what the 18 GB IS. Without this the allowance could only go up in practice,
+           however correctly the refund worked. -->
+      ${hasBudget ? `
+      <details class="mesh-stored" data-stored-edge="${esc(u.edgeId)}" style="margin-top:8px">
+        <summary style="cursor:pointer;font-size:13px">What this server is storing here</summary>
+        <div data-stored-body style="margin-top:8px;font-size:12px;color:var(--text-muted)">Loading…</div>
+      </details>` : ''}
+
       <details class="mesh-write-log" data-log-edge="${esc(u.edgeId)}" style="margin-top:8px">
         <summary style="cursor:pointer;font-size:13px">What this server has changed here</summary>
         <div data-log-body style="margin-top:8px;font-size:12px;color:var(--text-muted)">Loading…</div>
@@ -998,6 +1007,34 @@ async function renderConnect(panel, caps) {
    * Loaded on first open rather than with the page: most visits never open it, and a customer with
    * a busy hub should not pay for a query they did not ask for on every render.
    */
+  panel.querySelectorAll('.mesh-stored').forEach((box) => {
+    box.addEventListener('toggle', async () => {
+      if (!box.open || box.dataset.loaded) return;
+      box.dataset.loaded = '1';
+      const body = box.querySelector('[data-stored-body]');
+      try {
+        const r = await api.get(`/mesh/uplink/${encodeURIComponent(box.dataset.storedEdge)}/content`);
+        const items = r.items || [];
+        body.innerHTML = items.length
+          ? `<div style="margin-bottom:6px">
+               ${esc(fmtBytes(r.totalBytes))} stored${r.unusedBytes
+                 /* Named separately because it is the number an operator can act on. */
+                 ? ` — <strong>${esc(fmtBytes(r.unusedBytes))} of it is not used by any playlist</strong>` : ''}.
+             </div>
+             <div style="max-height:220px;overflow:auto">${items.map((i) => `
+               <div style="display:flex;gap:8px;padding:3px 0;border-bottom:1px solid var(--border)">
+                 <span style="flex:1">${esc(i.filename || i.localId)}</span>
+                 <span>${esc(fmtBytes(i.bytes))}</span>
+                 <span class="badge">${i.inUse ? 'in use' : 'unused'}</span>
+               </div>`).join('')}</div>
+             <div style="margin-top:6px">${esc(r.note || '')}</div>`
+          : `<div>That server has not stored anything here.</div>`;
+      } catch (e) {
+        body.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+      }
+    });
+  });
+
   panel.querySelectorAll('.mesh-write-log').forEach((box) => {
     box.addEventListener('toggle', async () => {
       if (!box.open || box.dataset.loaded) return;

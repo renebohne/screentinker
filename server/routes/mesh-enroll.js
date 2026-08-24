@@ -746,6 +746,69 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
     });
   });
 
+  /*
+   * ⚠️ WHAT THIS SERVER IS STORING FOR ANOTHER ONE — and which of it nothing plays any more.
+   *
+   * Deleting hub-pushed content already works and is already the RIGHT shape: the rows live in the
+   * customer's own workspace, their own operator can remove them through their own library, and the
+   * purge refunds the storage allowance. A hub can stop referencing a file; it can never delete
+   * bytes here. Remote-triggered unlink is the highest-blast-radius verb this design could have
+   * grown, and it deliberately did not grow it.
+   *
+   * What was missing is the only thing that made that useless: nothing showed which content came
+   * from a hub, how much room it takes, or which of it is now unreferenced. The consent panel said
+   * "18 GB of 20 GB used" and gave the operator no way to find out what the 18 GB was — so the
+   * budget could only ever go up in practice, however correct the refund was.
+   *
+   * "Unused" means no playlist item and no published snapshot mentions it. Both, because a snapshot
+   * outlives the items it was built from — offering to remove something a screen is still playing
+   * from its published copy is exactly the mistake this list exists to prevent.
+   */
+  router.get('/uplink/:id/content', requireAuth, requireCanShareSomething(db), (req, res) => {
+    const edge = db.prepare("SELECT * FROM mesh_edges WHERE id = ? AND direction = 'up'").get(req.params.id);
+    if (!edge) return res.status(404).json({ error: 'No such connection.' });
+
+    const rows = db.prepare(`
+      SELECT p.origin_content_id, p.bytes, p.last_seen_at,
+             c.id AS local_id, c.filename, c.file_size, c.workspace_id, c.filepath
+        FROM mesh_content_provenance p
+        JOIN content c ON c.id = p.local_content_id
+       WHERE p.origin_node_id = ?
+       ORDER BY c.file_size DESC
+       LIMIT 500`).all(edge.peer_node_id);
+
+    const referenced = (contentId) => {
+      const item = db.prepare('SELECT 1 FROM playlist_items WHERE content_id = ? LIMIT 1').get(contentId);
+      if (item) return true;
+      const snap = db.prepare(
+        "SELECT 1 FROM playlists WHERE published_snapshot LIKE ? LIMIT 1").get(`%${contentId}%`);
+      return !!snap;
+    };
+
+    const items = rows.map((r) => ({
+      localId: r.local_id,
+      filename: r.filename,
+      bytes: r.file_size || r.bytes || 0,
+      workspaceId: r.workspace_id,
+      receivedAt: r.last_seen_at ? r.last_seen_at * 1000 : null,
+      inUse: referenced(r.local_id),
+    }));
+
+    res.json({
+      peerNodeId: edge.peer_node_id,
+      peerName: edge.peer_name || null,
+      items,
+      totalBytes: items.reduce((n, i) => n + i.bytes, 0),
+      unusedBytes: items.filter((i) => !i.inUse).reduce((n, i) => n + i.bytes, 0),
+      /*
+       * ⚠️ Says where deletion happens, because the obvious assumption is that it happens here.
+       * It does not, and that is the design: this page reports, the library removes.
+       */
+      note: 'Remove anything you no longer want from your own content library — the space it was ' +
+            'using is returned to this connection\'s allowance. That server cannot delete files here.',
+    });
+  });
+
   router.delete('/uplink/:id', requireAuth, requireCanShareSomething(db), (req, res) => {
     const edge = db.prepare("SELECT * FROM mesh_edges WHERE id = ? AND direction = 'up'").get(req.params.id);
     if (!edge) return res.status(404).json({ error: 'No such connection.' });

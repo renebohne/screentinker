@@ -57,7 +57,8 @@ const mkEdge = (grant = ['content-push'], scope = [wsA], peerName = 'Acme HQ') =
 
 const req = (over = {}) => ({
   path: `/api/playlists/${plA}/items`, method: 'POST', body: { content_id: null },
-  opId: id(), ...over,
+  // Both clock fields — see the note in mesh-write-apply.test.js.
+  opId: id(), sentAt: Date.now(), notAfter: Date.now() + 120_000, ...over,
 });
 
 const meshRows = () => db.prepare(
@@ -189,4 +190,51 @@ test('retention actually deletes, and only past the horizon', () => {
   const left = db.prepare("SELECT details FROM activity_log WHERE action='mesh:write'").all().map((r) => r.details);
   assert.ok(!left.includes('old'));
   assert.ok(left.includes('recent'));
+});
+
+/*
+ * ⚠️ THE IMPORT PATH IS THE FIFTH WRITER THAT OWES byte_digest A VALUE.
+ *
+ * A restore used to insert every content row with a NULL digest and rename every file to a fresh
+ * uuid. Two consequences, both silent: a hub re-pushing afterwards found no matching digest,
+ * concluded the assets were absent, re-transferred all of them and charged the customer's allowance
+ * a second time for bytes they already had — and because `filepath` sits inside the player's
+ * structural fingerprint, the rename restarted playback at item 1 on every web and BrightSign
+ * screen in the estate, for files whose bytes had not changed.
+ */
+test('⚠️ a content-addressed filename survives a restore', () => {
+  const { isDigestName } = require('../lib/content-digest');
+  const digestName = `${'a'.repeat(64)}.mp4`;
+  assert.equal(isDigestName(digestName), true);
+  assert.equal(isDigestName('holiday-promo.mp4'), false);
+  assert.equal(isDigestName(`${id()}.mp4`), false, 'a uuid name is not a digest name');
+
+  // The rule the restore applies: keep a digest name, rename anything else to the new row id.
+  const restoredName = (original, newId) =>
+    (isDigestName(original) ? original : `${newId}.mp4`);
+  assert.equal(restoredName(digestName, 'new-id'), digestName,
+    'renaming this would restart every web and BrightSign screen for unchanged bytes');
+  assert.match(restoredName('holiday-promo.mp4', 'new-id'), /^new-id\.mp4$/);
+});
+
+test('the synchronous digest agrees with the streamed one', async () => {
+  /*
+   * The restore runs inside a better-sqlite3 transaction, which cannot await — so it uses a
+   * chunked synchronous digest. Two implementations of one hash is two chances to disagree, and a
+   * digest that disagrees with itself is worse than no digest: it would report content as changed
+   * on every push, for ever.
+   */
+  const os2 = require('node:os');
+  const fs2 = require('node:fs');
+  const path2 = require('node:path');
+  const { digestFile, digestFileSync } = require('../lib/content-digest');
+
+  const dir = fs2.mkdtempSync(path2.join(os2.tmpdir(), 'digest-agree-'));
+  const f = path2.join(dir, 'x.bin');
+  // Bigger than the sync reader's chunk, so the chunking itself is exercised rather than skipped.
+  fs2.writeFileSync(f, crypto.randomBytes(3 * 1024 * 1024));
+
+  assert.equal(digestFileSync(f), await digestFile(f));
+  assert.equal(digestFileSync(path2.join(dir, 'missing.bin')), null, 'and both fail the same way');
+  assert.equal(await digestFile(path2.join(dir, 'missing.bin')), null);
 });

@@ -113,6 +113,32 @@ async function applyWriteInner(db, edge, req, deps = {}) {
    * apply. The parent sets it on its own clock; both clocks travel in the envelope already, so a
    * peer whose skew is absurd is refused rather than trusted to have meant well.
    */
+  /*
+   * ⚠️ A DEADLINE IS REQUIRED, NOT OFFERED. This block only ran `if (typeof req.notAfter ===
+   * 'number')` — so a peer that simply omitted the field got no deadline at all, and one that
+   * omitted `sentAt` with it disarmed the skew check too, since the skew was computed against
+   * `req.sentAt || now` and therefore always zero. A guard a caller can switch off by leaving a
+   * field out is not a guard; it constrains only the honest.
+   *
+   * What it protects: revocation means "stop future writes", and without a deadline a write that
+   * left the parent before a revocation can arrive long afterwards and still apply. The live edge
+   * re-read is what actually stops a revoked peer — this bounds the window for one already in
+   * flight, which the re-read cannot see.
+   *
+   * Refusing outright is safe here because our own hub has always sent both fields (routes/mesh.js
+   * stamps sentAt and notAfter on every write), and mesh write has never shipped in a build that
+   * did not. A peer sending neither is hand-rolled, and a hand-rolled peer asking to change
+   * somebody's screens with no expiry on the request is exactly the caller to turn away.
+   */
+  if (req && typeof req.notAfter !== 'number') {
+    return { ok: false, reason: 'A write must carry an expiry, so that revoking access cannot be ' +
+                                'outrun by a request already in flight.' };
+  }
+  if (req && typeof req.sentAt !== 'number') {
+    return { ok: false, reason: 'A write must say when it was sent, so its expiry can be checked ' +
+                                'against a clock rather than taken on trust.' };
+  }
+
   if (req && typeof req.notAfter === 'number') {
     if (Math.abs((req.sentAt || now) - now) > MAX_SKEW_MS) {
       return { ok: false, reason: "This server and yours disagree about the time by more than ten " +
