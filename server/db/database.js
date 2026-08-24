@@ -864,6 +864,74 @@ const migrations = [
   'ALTER TABLE mesh_edges ADD COLUMN write_bytes_budget INTEGER',
   'ALTER TABLE mesh_edges ADD COLUMN write_bytes_used INTEGER NOT NULL DEFAULT 0',
 
+  /* ─── Content distribution (Phase 5) ──────────────────────────────────────────────────────────
+   *
+   * sha256 of the FILE'S BYTES. Nullable, and that is load-bearing: 88 of 100 content rows in a
+   * typical dev library have no file on disk at all, remote/YouTube rows never will, and a row on a
+   * host where the read failed must still be usable. NULL is the day-one value for every existing
+   * row, so the fallback path is exercised from the first commit rather than being the rare,
+   * untested one.
+   *
+   * ⚠️ A DIGEST IS DEDUPLICATION, NOT IDENTITY. It answers "do I already hold these exact bytes",
+   * which is a transfer optimisation. It does not answer "is this the asset the hub means" — that
+   * is mesh_content_provenance below. Conflating them would merge two customers' assets the first
+   * time two sites happened to upload the same stock video.
+   *
+   * ⚠️ A new column is a duty at every writer (see docs/playlist-nesting-design.md, where 5 of 12
+   * writers corrupted rows silently). The content writers are: lib/content-ingest.js (upload),
+   * routes/content.js POST /remote and POST /youtube (no bytes, stays NULL), routes/content.js
+   * PUT /:id/replace (NEW BYTES — must re-hash or the digest lies), routes/status.js import, and
+   * the mesh committer. */
+  'ALTER TABLE content ADD COLUMN byte_digest TEXT',
+  'CREATE INDEX IF NOT EXISTS idx_content_digest ON content(byte_digest)',
+
+  /* Which local row a peer's content id means.
+   *
+   * ⚠️ KEYED ON (origin_node_id, origin_content_id) — the mesh_mirror_workspaces shape, for the
+   * reason stated there: two servers WILL eventually hand us the same id, they are generated
+   * independently and nothing coordinates them, and a single-column key would silently merge two
+   * customers' libraries into one row set.
+   *
+   * This is what makes a re-push idempotent. Without it the child mints a fresh content.id every
+   * time, every playlist item is repointed, and — because content_id and filepath are both in the
+   * player's structural fingerprint — every screen on the site restarts at item 1 on every push,
+   * even when the bytes are identical. That is #234, estate-wide, nightly. */
+  `CREATE TABLE IF NOT EXISTS mesh_content_provenance (
+     origin_node_id    TEXT    NOT NULL,
+     origin_content_id TEXT    NOT NULL,
+     local_content_id  TEXT    NOT NULL,
+     edge_id           TEXT,
+     bytes             INTEGER NOT NULL DEFAULT 0,
+     first_seen_at     INTEGER NOT NULL,
+     last_seen_at      INTEGER NOT NULL,
+     PRIMARY KEY (origin_node_id, origin_content_id)
+   )`,
+  'CREATE INDEX IF NOT EXISTS idx_mesh_prov_local ON mesh_content_provenance(local_content_id)',
+  'CREATE INDEX IF NOT EXISTS idx_mesh_prov_edge ON mesh_content_provenance(edge_id)',
+
+  /* Short-lived, single-asset pull tickets minted by the node that HOLDS the bytes.
+   *
+   * ⚠️ Stored HASHED, like every other credential here (lib/mesh/pairing.js). And bound to a
+   * FILEPATH rather than a content id: a replace on the hub writes a new randomly-named file and
+   * unlinks the old one, so a filepath-bound ticket 404s cleanly mid-transfer instead of splicing
+   * two different assets into one file.
+   *
+   * The child pulls; the parent never initiates a transfer. The child dialled out because it may
+   * have no inbound route at all, and every mechanism added here keeps that direction. */
+  `CREATE TABLE IF NOT EXISTS mesh_pull_tickets (
+     id          TEXT    PRIMARY KEY,
+     token_hash  TEXT    NOT NULL,
+     edge_id     TEXT    NOT NULL,
+     filepath    TEXT    NOT NULL,
+     size        INTEGER NOT NULL,
+     digest      TEXT,
+     created_at  INTEGER NOT NULL,
+     expires_at  INTEGER NOT NULL,
+     used_at     INTEGER
+   )`,
+  'CREATE INDEX IF NOT EXISTS idx_mesh_ticket_hash ON mesh_pull_tickets(token_hash)',
+  'CREATE INDEX IF NOT EXISTS idx_mesh_ticket_exp ON mesh_pull_tickets(expires_at)',
+
   /* Applied mesh writes, so a retry cannot apply twice.
    *
    * ⚠️ THE READ PATH NEEDS NOTHING LIKE THIS AND THAT IS EXACTLY WHY IT IS EASY TO FORGET. A

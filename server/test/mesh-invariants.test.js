@@ -353,12 +353,22 @@ test('every existing install becomes a node with zero edges (migration is a no-o
      * nobody reviewed is precisely the thing worth a failing test.
      */
     assert.deepEqual(tables, [
-      'mesh_client_access', 'mesh_clients', 'mesh_edges',
+      /*
+       * ⚠️ SORTED. The query returns them in name order, so a new table goes in its alphabetical
+       * place — appending it to the end fails with a diff that looks like every table moved.
+       *
+       * Phase 5 added three, all empty on every install until somebody actually pushes:
+       *   mesh_content_provenance — maps a peer's content id to the local row. This is what makes a
+       *     re-push idempotent: without it the child mints a fresh content id every time, and since
+       *     content_id and filepath are both in the player's structural fingerprint, every screen
+       *     on the site restarts at item 1 on every push.
+       *   mesh_pull_tickets — short-lived, single-asset, stored hashed, bound to a filepath.
+       *   mesh_write_ops — a retried write returns its first outcome instead of applying twice.
+       */
+      'mesh_client_access', 'mesh_clients', 'mesh_content_provenance', 'mesh_edges',
       'mesh_mirror_alerts', 'mesh_mirror_devices', 'mesh_mirror_nodes', 'mesh_mirror_play_logs',
-      'mesh_mirror_workspaces', 'mesh_node', 'mesh_pairing_codes', 'mesh_tombstones',
-      // Phase 5: applied writes, so a retried write returns its first outcome instead of
-      // being applied twice. Empty on every install until a write is actually accepted.
-      'mesh_write_ops',
+      'mesh_mirror_workspaces', 'mesh_node', 'mesh_pairing_codes', 'mesh_pull_tickets',
+      'mesh_tombstones', 'mesh_write_ops',
     ]);
 
     // Still empty on a fresh install: tables exist, nothing is mirrored until something is paired.
