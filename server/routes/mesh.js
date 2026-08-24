@@ -247,16 +247,36 @@ module.exports = function meshRoutes(db, { requireAuth }) {
         serverName,
         stale: fresh === 'stale',
         /*
-         * ⚠️ Still false, and it must stay false until the child TELLS us otherwise.
-         *
-         * A write permission is stored on the child, by the child's operator (see
-         * routes/mesh-enroll.js PUT /uplink/:id/write-grant). This hub has no copy of it and must
-         * never infer one: a hub that decided for itself whether it may write would be exactly the
-         * self-granting this design exists to prevent, and the UI would show a capability the other
-         * end never agreed to. When writes are negotiated, this becomes what the child announced —
-         * never what we assumed.
-         */
-        writable: false,
+        * ⚠️ WHAT THE CHILD SAYS WE MAY DO — AND ONLY EVER FOR RENDERING.
+        *
+        * This was a hardcoded `false` with a comment saying it must stay so until the child tells us
+        * otherwise, and nothing was ever built for the child to tell us. So a hub operator could not
+        * see, per client, whether they may push content or how much storage is left; they could only
+        * try and be refused, by a refusal deliberately identical for "no such thing" and "not
+        * permitted". The child now announces its grant upward (mesh:write-offer) and this reads it.
+        *
+        * Advisory in the strongest sense: the child re-checks its own row on every request and owes
+        * this hub nothing. A `true` here means "offer the operator the button", never "the write
+        * will succeed" — and a stale or absent offer degrades to read-only, which is the safe way
+        * for this to be wrong.
+        */
+      ...(() => {
+        let offer = null;
+        try { offer = edge && edge.peer_write_offer ? JSON.parse(edge.peer_write_offer) : null; } catch (x) { offer = null; }
+        const cats = (offer && Array.isArray(offer.categories)) ? offer.categories : [];
+        const spaces = (offer && Array.isArray(offer.workspaces)) ? offer.workspaces : [];
+        return {
+          writable: cats.length > 0 && spaces.length > 0,
+          writeOffer: offer ? {
+            categories: cats,
+            workspaces: spaces,
+            bytesBudget: offer.bytesBudget ?? null,
+            bytesUsed: offer.bytesUsed ?? 0,
+            bytesRemaining: typeof offer.bytesBudget === 'number'
+              ? Math.max(0, offer.bytesBudget - (offer.bytesUsed || 0)) : 0,
+          } : null,
+        };
+      })(),
       };
 
       if (!mine.length) {

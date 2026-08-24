@@ -800,6 +800,11 @@ const migrations = [
    * operator nothing; a node id tells them less. The peer declares a name when it pairs and this
    * side stores it, so the switcher can read "Acme HQ" where it used to read "another server". */
   'ALTER TABLE mesh_edges ADD COLUMN peer_name TEXT',
+  /* What a CHILD has told this hub it may do to that child — see mirror-store.recordWriteOffer.
+   * ⚠️ Advisory. The child enforces its own grant from its own row on every request; this exists so
+   * the hub's UI can offer the right controls instead of making an operator guess. NULL means "no
+   * offer, or an offer that grants nothing", and those are the same thing to a renderer. */
+  'ALTER TABLE mesh_edges ADD COLUMN peer_write_offer TEXT',
 
   /* WHICH of this server's workspaces travel up this edge. JSON array of workspace ids, or NULL.
    *

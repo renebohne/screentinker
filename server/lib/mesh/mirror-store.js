@@ -145,6 +145,33 @@ function insertPlayLog(db, { originNodeId, body, originTs, receivedAt }) {
 }
 
 /** Route a validated envelope to the right table. */
+/*
+ * What a child says this hub may do to it. Stored on the EDGE rather than in a mirror table,
+ * because it describes the relationship rather than the child's data — and because the one
+ * question it answers ("may I offer this operator a Save button?") is asked per edge.
+ *
+ * ⚠️ Recorded verbatim and trusted for NOTHING except rendering. The child enforces its own grant
+ * on every request, re-read live from its own row; a hub that used this to decide anything would be
+ * a hub granting itself permission. Shape-checked so a malformed or hostile offer cannot make the
+ * hub's UI claim more than the child would honour — and an unparseable one clears the offer rather
+ * than leaving a stale, more permissive answer standing.
+ */
+function recordWriteOffer(db, edge, ctx) {
+  const b = ctx.body || {};
+  const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string').slice(0, 200) : []);
+  const offer = {
+    categories: list(b.categories),
+    workspaces: list(b.workspaces),
+    bytesBudget: Number.isFinite(b.bytesBudget) ? b.bytesBudget : null,
+    bytesUsed: Number.isFinite(b.bytesUsed) ? b.bytesUsed : 0,
+    at: ctx.receivedAt,
+  };
+  const empty = !offer.categories.length || !offer.workspaces.length;
+  db.prepare('UPDATE mesh_edges SET peer_write_offer = ? WHERE id = ?')
+    .run(empty ? null : JSON.stringify(offer), edge.id);
+  return true;
+}
+
 function storeEnvelope(db, edge, env, now) {
   const receivedAt = now || Math.floor(Date.now() / 1000);
   const ctx = { edgeId: edge.id, originNodeId: env.origin_node_id, body: env.body || {},
@@ -156,6 +183,7 @@ function storeEnvelope(db, edge, env, now) {
     case 'alert-event':    return upsertAlert(db, ctx) ? 'alert-event' : null;
     case 'proof-of-play':  return insertPlayLog(db, ctx) ? 'proof-of-play' : null;
     case 'tombstone':      return markDeleted(db, ctx) ? 'tombstone' : null;
+    case 'write-offer':    return recordWriteOffer(db, edge, ctx) ? 'write-offer' : null;
     default:
       // ⚠️ Unknown types are NOT stored. They are relayable (I5) and that is a transport concern —
       // inventing a table for a payload this node cannot interpret would be storing bytes nobody can

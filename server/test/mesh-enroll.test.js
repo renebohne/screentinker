@@ -41,6 +41,8 @@ function freshDb() {
       -- one sweep, hence the schema guard at the end of this file.
       write_grant TEXT, write_scope TEXT,
       write_bytes_budget INTEGER, write_bytes_used INTEGER NOT NULL DEFAULT 0,
+      -- What a child announced this hub may do to it (mirror-store.recordWriteOffer). Advisory.
+      peer_write_offer TEXT,
       UNIQUE (peer_node_id, direction));
     CREATE TABLE workspaces (id TEXT PRIMARY KEY, organization_id TEXT, name TEXT);
     CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT);

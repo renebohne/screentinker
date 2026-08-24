@@ -338,8 +338,18 @@ test('⚠️ a persistent banner names the server being viewed', () => {
   // be a question the UI leaves to memory.
   assert.match(APP, /renderRemoteOrgBanner/);
   assert.match(APP, /Viewing <strong>\$\{name\}<\/strong>/);
-  assert.match(APP, /Read-only for now/);
   assert.match(APP, /Back to this server/);
+
+  /*
+   * ⚠️ This asserted the literal words "Read-only for now", which was right while nothing could be
+   * changed from here and became a lie the moment write shipped. What has to survive is that the
+   * banner states what this operator may ACTUALLY do — so it must answer both ways, from the
+   * customer's own announcement, and must still say read-only when nothing was granted.
+   */
+  assert.match(APP, /org\.writable/,
+    'the banner must reflect what the customer granted, not a fixed sentence');
+  assert.match(APP, /[Rr]ead-only/,
+    'and must still say read-only when they have granted nothing');
 });
 
 test('the remote-orgs fetch fails silently on a server with no mesh', () => {
@@ -403,8 +413,21 @@ test('⚠️ the ACTIONS are removed from the DOM, not disabled', () => {
    * about fails loudly instead of silently writing to the wrong server.
    */
   const API = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'js', 'api.js'), 'utf8');
-  assert.match(API, /!== 'GET'[\s\S]{0,200}refuse:/,
-    'writes are refused at the api layer while viewing another server');
+
+  /*
+   * ⚠️ The property changed shape when write landed, and the assertion had to change with it. It
+   * used to be "every non-GET is refused"; now a non-GET either goes to the CUSTOMER's server or is
+   * refused — and it may never quietly go to ours. Both branches are asserted, and the ordering
+   * with them: refusal is the fallthrough, so a route nobody considered is refused rather than
+   * routed. The behavioural proof lives in mesh-remote-routing.test.js, which runs this module
+   * against a stubbed fetch; this is the source-level backstop.
+   */
+  assert.match(API, /verb !== 'GET'/,
+    'writes must still be recognised as writes at the api layer');
+  assert.match(API, /org\.writable && meshWritable\(path, verb\)[\s\S]{0,200}write: true/,
+    'a write may leave for the customer only when they granted it AND the path is allowlisted');
+  assert.match(API, /write: true[\s\S]{0,400}refuse:/,
+    'and refusal must be the fallthrough, so an unconsidered route is refused rather than routed');
 });
 
 test('⚠️ an offline server falls back to the mirror AND SAYS SO', () => {

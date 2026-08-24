@@ -45,6 +45,20 @@ const PAYLOAD_TYPES = Object.freeze({
   'proof-of-play': 1,
   'tombstone': 1,
   /*
+   * ⚠️ WHAT THE CHILD HAS DECIDED THIS PARENT MAY DO — A COURTESY, NEVER AN AUTHORITY.
+   *
+   * The hub cannot otherwise know it has been granted anything: the grant lives on the child, is
+   * enforced there, and every route on this side deliberately reports `writable: false` until told
+   * otherwise. Without this the hub's operator has no way to see what they may do for a client and
+   * can only try and be refused — and the refusal is deliberately identical for "no such thing" and
+   * "not permitted", so it teaches them nothing either.
+   *
+   * ⚠️ It travels UPWARD, from the node whose screens would change, which is the only direction
+   * that preserves I10. A hub that treated this as permission would be deciding its own access;
+   * it is a hint for rendering, and the child re-checks its own row on every single request.
+   */
+  'write-offer': 1,
+  /*
    * ⚠️ A CARRIER, NOT A PAYLOAD. `batch` has no body of its own — it holds items, each with its own
    * type and body_version. It is registered here so a node that understands batches recognises it;
    * a node that does NOT will treat it as unknown and relay-without-storing (I5), which is exactly

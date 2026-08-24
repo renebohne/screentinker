@@ -45,7 +45,9 @@ function freshDb() {
       -- How much disk this edge may consume, and how much it has. ⚠️ NULL is NOTHING, never
       -- unlimited — the same rule as write_scope, and for the same reason.
       write_bytes_budget INTEGER,
-      write_bytes_used INTEGER NOT NULL DEFAULT 0);
+      write_bytes_used INTEGER NOT NULL DEFAULT 0,
+      -- What a child announced this hub may do to it. Advisory — see mirror-store.recordWriteOffer.
+      peer_write_offer TEXT);
     CREATE TABLE mesh_mirror_nodes (
       origin_node_id TEXT PRIMARY KEY, via_edge_id TEXT NOT NULL, node_version TEXT,
       device_count INTEGER, devices_online INTEGER, origin_ts INTEGER,

@@ -23,7 +23,7 @@ const { pathToFileURL } = require('node:url');
 const API_PATH = path.join(__dirname, '..', '..', 'frontend', 'js', 'api.js');
 
 /** Load api.js fresh with a controlled localStorage; returns the module plus a call log. */
-async function loadApi({ remoteOrg } = {}) {
+async function loadApi({ remoteOrg, capture, respond } = {}) {
   const store = new Map([['token', 'test-token']]);
   if (remoteOrg) store.set('st_remote_org', JSON.stringify(remoteOrg));
   global.localStorage = {
@@ -33,7 +33,10 @@ async function loadApi({ remoteOrg } = {}) {
   };
   const calls = [];
   global.fetch = async (url, opts) => {
-    calls.push({ url, method: (opts && opts.method) || 'GET' });
+    const call = { url, method: (opts && opts.method) || 'GET', body: opts && opts.body };
+    calls.push(call);
+    if (capture) capture.push(call);
+    if (respond) return respond(url, opts || {});
     return { ok: true, status: 200, json: async () => ({ rows: [] }) };
   };
   // Cache-bust so each case gets its own module instance and its own localStorage.
@@ -117,4 +120,110 @@ test('a prefix match cannot be fooled by a longer route name', async () => {
   const rows = await mod.api.get('/devices-archive');
   assert.deepEqual(rows, [], 'an unlisted lookalike is unavailable, not routed and not local');
   assert.equal(calls.length, 0);
+});
+
+/*
+ * ⚠️ AND NOW THE OTHER HALF: A COMMAND FOR A REMOTE SYSTEM IS ROUTED REMOTELY.
+ *
+ * Everything above proves a write does not land on the WRONG server. These prove it lands on the
+ * right one — which until now it never did, because POST /api/mesh/write/:nodeId had no caller
+ * anywhere in the frontend. The transport, the opId replay machinery and the whole 503/504/403
+ * triad were dead code from the UI's point of view.
+ */
+const WRITABLE_CUSTOMER = { nodeId: 'node-customer-1', name: 'Customer A', writable: true };
+
+test('⚠️ editing a customer playlist goes to THEIR server, not ours', async () => {
+  const { mod, calls } = await loadApi({ remoteOrg: WRITABLE_CUSTOMER });
+  await mod.api.put('/playlists/p1', { name: 'Autumn' });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, '/api/mesh/write/node-customer-1');
+  assert.equal(calls[0].method, 'POST', 'the envelope is a POST; the CHANGE is the PUT inside it');
+});
+
+test('the change carries the real path and method for the child to check', async () => {
+  const store = [];
+  const { mod } = await loadApi({ remoteOrg: WRITABLE_CUSTOMER, capture: store });
+  await mod.api.post('/playlists/p1/items', { content_id: 'c1' });
+
+  const sent = JSON.parse(store[0].body);
+  assert.equal(sent.path, '/api/playlists/p1/items');
+  assert.equal(sent.method, 'POST');
+  assert.deepEqual(sent.body, { content_id: 'c1' });
+});
+
+test('⚠️ a customer who granted nothing is still read-only', async () => {
+  // writable comes from what the CHILD announced. Absent or false means refuse, which is the safe
+  // way for this to be wrong — a hub must never decide for itself that it may write.
+  const { mod, calls } = await loadApi({ remoteOrg: { ...WRITABLE_CUSTOMER, writable: false } });
+  await assert.rejects(() => mod.api.put('/playlists/p1', { name: 'x' }), /read-only/i);
+  assert.equal(calls.length, 0);
+});
+
+test('⚠️ a path outside the child allowlist is not sent, even when writable', async () => {
+  // Not enforcement — the child re-checks and wins — but there is no point sending a request that
+  // is certain to be refused, and /content is not something the mesh write channel carries.
+  const { mod, calls } = await loadApi({ remoteOrg: WRITABLE_CUSTOMER });
+  await assert.rejects(() => mod.api.delete('/content/c1'), /read-only/i);
+  await assert.rejects(() => mod.api.post('/folders', { name: 'x' }), /read-only/i);
+  assert.equal(calls.length, 0);
+});
+
+test('⚠️ the method is pinned per rule, exactly as the child pins it', async () => {
+  const { mod, calls } = await loadApi({ remoteOrg: WRITABLE_CUSTOMER });
+  // DELETE on an ITEM is allowlisted; DELETE on the whole playlist is not.
+  await mod.api.delete('/playlists/p1/items/i1');
+  assert.equal(calls.length, 1);
+  await assert.rejects(() => mod.api.delete('/playlists/p1'), /read-only/i);
+  assert.equal(calls.length, 1, 'the refused one must not reach the network');
+});
+
+test('⚠️ a 504 retries ONCE with the SAME opId, never a fresh one', async () => {
+  /*
+   * The child records an outcome against the op id and REPLAYS it rather than applying twice. So
+   * re-issuing with a fresh id after a timeout is exactly how an operator ends up with the same
+   * item in a playlist twice — the failure the whole idempotency ledger exists to prevent.
+   */
+  const seen = [];
+  const { mod } = await loadApi({
+    remoteOrg: WRITABLE_CUSTOMER,
+    respond: (url, opts) => {
+      const body = JSON.parse(opts.body);
+      seen.push(body.opId);
+      if (seen.length === 1) {
+        return { ok: false, status: 504,
+                 json: async () => ({ error: 'no ack', opId: 'op-from-server', retryWithSameOpId: true }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true, result: { id: 'p1' } }) };
+    },
+  });
+
+  const r = await mod.api.put('/playlists/p1', { name: 'Autumn' });
+  assert.equal(seen.length, 2, 'exactly one retry');
+  assert.equal(seen[0], undefined, 'the first attempt lets the server mint the id');
+  assert.equal(seen[1], 'op-from-server', 'the retry reuses the id the server gave back');
+  assert.deepEqual(r, { id: 'p1' });
+});
+
+test('a refusal is reported with the customer\'s own words, not a generic failure', async () => {
+  const { mod } = await loadApi({
+    remoteOrg: WRITABLE_CUSTOMER,
+    respond: () => ({ ok: false, status: 403,
+                      json: async () => ({ error: 'That is not something this connection may change.' }) }),
+  });
+  await assert.rejects(() => mod.api.put('/playlists/p1', { name: 'x' }),
+    /not something this connection may change/);
+});
+
+test('an unacknowledged write is distinguishable from a refused one', async () => {
+  // "It failed" and "it may have applied" are different things to tell somebody standing in front
+  // of a screen, so the flag survives to the caller.
+  const { mod } = await loadApi({
+    remoteOrg: WRITABLE_CUSTOMER,
+    respond: () => ({ ok: false, status: 504, json: async () => ({ error: 'no ack' }) }),
+  });
+  await mod.api.put('/playlists/p1', { name: 'x' }).then(
+    () => assert.fail('should reject'),
+    (e) => { assert.equal(e.status, 504); assert.equal(e.indeterminate, true); },
+  );
 });

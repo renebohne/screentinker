@@ -60,6 +60,30 @@ function underPrefix(path, prefix) {
   return path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : prefix + '/');
 }
 
+/*
+ * Mirrors server/lib/mesh/write-proxy.js WRITABLE. Segment-exact, method pinned per rule.
+ * ⚠️ NOT a security boundary — see the note at its only call site.
+ */
+const MESH_WRITABLE = [
+  { pattern: '/playlists',                     method: 'POST' },
+  { pattern: '/playlists/:id',                 method: 'PUT' },
+  { pattern: '/playlists/:id/items',           method: 'POST' },
+  { pattern: '/playlists/:id/items/:itemId',   method: 'PUT' },
+  { pattern: '/playlists/:id/items/:itemId',   method: 'DELETE' },
+  { pattern: '/playlists/:id/publish',         method: 'POST' },
+  { pattern: '/playlists/:id/assign',          method: 'POST' },
+];
+
+function meshWritable(path, verb) {
+  const got = path.split('/');
+  return MESH_WRITABLE.some((rule) => {
+    if (rule.method !== verb) return false;
+    const want = rule.pattern.split('/');
+    if (want.length !== got.length) return false;
+    return want.every((seg, i) => (seg.startsWith(':') ? !!got[i] : seg === got[i]));
+  });
+}
+
 function remoteOrg() {
   try { return JSON.parse(localStorage.getItem('st_remote_org') || 'null'); } catch (e) { return null; }
 }
@@ -92,6 +116,23 @@ function remoteRoute(url, method) {
   if (ALWAYS_LOCAL.some((p) => underPrefix(path, p))) return null;
 
   if (verb !== 'GET') {
+    /*
+     * ⚠️ THIS IS WHERE A COMMAND GOES TO THE CUSTOMER'S SERVER INSTEAD OF OURS.
+     *
+     * A write reaches the other node only if all three hold: the customer granted this hub write
+     * access (org.writable, which comes from what the CHILD announced — never from anything we
+     * decided), the path is one the child's own allowlist accepts, and the method matches. Anything
+     * else is refused exactly as before.
+     *
+     * ⚠️ The allowlist here is a MIRROR of server/lib/mesh/write-proxy.js and is not the
+     * enforcement. Its only job is to avoid sending a request that will certainly be refused; the
+     * copy that matters is on the machine that owns the screens, it is checked live per request,
+     * and it wins. If the two drift, the child simply refuses and the operator sees why — which is
+     * the correct direction for a client-side list to be wrong in.
+     */
+    if (org.writable && meshWritable(path, verb)) {
+      return { write: true, nodeId: org.nodeId, path: '/api' + path, method: verb };
+    }
     return { refuse: 'This server is being viewed read-only. Switch back to make changes.' };
   }
 
@@ -119,10 +160,59 @@ export function assertLocalCallAllowed(url, method) {
     || 'That is not available while you are viewing a linked server. Switch back to your own.');
 }
 
+/*
+ * Send one change to a customer's server and report honestly what happened to it.
+ *
+ * ⚠️ THE OPERATION ID MUST SURVIVE A RETRY, and that is the whole reason this is a function rather
+ * than a fetch inline. The child records the outcome against the id and REPLAYS it rather than
+ * applying twice, so re-issuing with a fresh id on a timeout is precisely how an operator ends up
+ * with the same item in a playlist twice. The route mints an id per request body and echoes it
+ * back; the retry below reuses the one it was given.
+ *
+ * Three answers matter and they need three different things from a person:
+ *   503 not connected — nothing happened, try later
+ *   504 no acknowledgement — it MAY have applied; retry with the same id to find out which
+ *   403 refused — the customer has not granted this, and no retry will help
+ */
+async function meshWrite(routed, options) {
+  const body = options.body ? JSON.parse(options.body) : undefined;
+  const send = (opId) => fetch(`${API_BASE}/mesh/write/${encodeURIComponent(routed.nodeId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+    body: JSON.stringify({ path: routed.path, method: routed.method, body, ...(opId ? { opId } : {}) }),
+  });
+
+  let res = await send();
+  let payload = await res.json().catch(() => ({}));
+
+  /*
+   * ⚠️ ONE automatic retry, and ONLY on 504, and ONLY with the id we were given. A 504 means the
+   * answer is unknown rather than no — and because the child replays a recorded outcome, asking
+   * again with the same id is safe and is the only way to learn which it was. Retrying anything
+   * else, or retrying twice, turns an unknown into a second write.
+   */
+  if (res.status === 504 && payload.retryWithSameOpId && payload.opId) {
+    res = await send(payload.opId);
+    payload = await res.json().catch(() => ({}));
+  }
+
+  if (!res.ok) {
+    const err = new Error(payload.error || 'That server did not accept the change.');
+    err.status = res.status;
+    err.opId = payload.opId;
+    // Surfaced so a caller can say "may have applied" rather than "failed", which are different
+    // things to tell somebody standing in front of a screen.
+    err.indeterminate = res.status === 504;
+    throw err;
+  }
+  return payload.result ?? payload;
+}
+
 async function request(url, options = {}) {
   const routed = remoteRoute(url, options.method);
   if (routed && routed.refuse) throw new Error(routed.refuse);
   if (routed && routed.empty) return [];
+  if (routed && routed.write) return meshWrite(routed, options);
   if (routed) {
     const r = await fetch(API_BASE + routed.url, {
       headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },

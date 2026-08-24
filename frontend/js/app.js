@@ -66,7 +66,14 @@ function renderRemoteOrgBanner() {
   el.innerHTML = `
     <span>Viewing <strong>${name}</strong> on another server${
       org.stale ? ' — not currently reachable, showing last known state' : ''}.</span>
-    <span style="color:var(--text-muted)">Read-only for now.</span>
+    <!-- ⚠️ Says what this operator may actually do, rather than a fixed "read-only for now" that
+         stayed on the screen after write shipped. The flag is what the CHILD announced, so a
+         customer who has granted nothing still reads as read-only — which is both true and the
+         safe way for this to be wrong. Playlists only, and it says so: an operator who reads
+         "you can make changes" and then cannot upload has been misled by a half-truth. -->
+    <span style="color:var(--text-muted)">${org.writable
+      ? 'You may change playlists here. Content and settings stay read-only.'
+      : 'Read-only — this customer has not granted changes from here.'}</span>
     <button id="leaveRemoteOrg" class="btn btn-secondary btn-sm" style="margin-left:auto">
       Back to this server</button>`;
   if (!existing) host.appendChild(el);

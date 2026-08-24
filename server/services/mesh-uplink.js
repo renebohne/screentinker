@@ -108,7 +108,33 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
      * device arriving before its workspace flickers into "unfiled" and back out again on the very
      * first sync — order is preserved inside a batch, so this ordering still means something.
      */
-    const bulk = [mk('node-health', nodeHealth(db, me))];
+    /*
+     * ⚠️ WHAT WE HAVE DECIDED THIS PARENT MAY DO, SENT UPWARD SO IT CAN RENDER THE RIGHT CONTROLS.
+     *
+     * The grant lives here and is enforced here, on this node's own row, re-read live per request.
+     * The parent has no copy and must never infer one — so without this it cannot tell an operator
+     * whether they may push to this client, and can only let them try and be refused. The refusal
+     * is deliberately identical for "no such thing" and "not permitted", so it teaches nothing.
+     *
+     * Sent every tick alongside the rest rather than only on change: a report that only fires on
+     * change is a report that is wrong for ever after one dropped connection, and this is cheap —
+     * four short fields.
+     *
+     * ⚠️ The BUDGET is included and the USED figure with it, so the hub can warn before a push
+     * fails rather than after. Neither is authority: the child re-checks both when the bytes
+     * actually arrive.
+     */
+    const writeGrant = store.safeParseArray(edge.write_grant);
+    const writeScope = store.safeParseArray(edge.write_scope);
+    const bulk = [
+      mk('node-health', nodeHealth(db, me)),
+      mk('write-offer', {
+        categories: writeGrant,
+        workspaces: writeScope,
+        bytesBudget: typeof edge.write_bytes_budget === 'number' ? edge.write_bytes_budget : null,
+        bytesUsed: Number(edge.write_bytes_used) || 0,
+      }),
+    ];
     for (const w of workspaceProjections(db, grant, edge)) bulk.push(mk('workspace-summary', w));
     for (const d of deviceProjections(db, grant, edge)) bulk.push(mk('device-summary', d));
     link.sendMany(bulk, { nodeId: me, ancestry: [me] });
