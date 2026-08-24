@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
+const { devicesPlayingContent } = require('../lib/devices-playing');
 const upload = require('../middleware/upload');
 const config = require('../config');
 const { checkStorageLimit, checkRemoteUrl } = require('../middleware/subscription');
@@ -548,12 +549,10 @@ router.put('/:id/replace', upload.single('file'), async (req, res) => {
   // ...and tell the panels, which the old code did not. Without this the new bytes reached a screen
   // only when something else happened to trigger a playlist refresh — an operator replacing a video
   // watched the dashboard update and the screen keep playing the old one.
-  const affected = db.prepare(`
-    SELECT DISTINCT d.id as device_id FROM devices d
-    JOIN playlists p ON d.playlist_id = p.id
-    JOIN playlist_items pi ON pi.playlist_id = p.id
-    WHERE pi.content_id = ?
-  `).all(req.params.id).map((r) => r.device_id);
+  // Resolved and nesting-aware (lib/devices-playing.js): the old join used devices.playlist_id,
+  // so a screen inheriting its playlist — or playing this file from a NESTED playlist — kept
+  // showing the old bytes, which is the very failure the comment above describes.
+  const affected = devicesPlayingContent(req.params.id);
   pushContentUpdates(req, affected);
 
   res.json(db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id));

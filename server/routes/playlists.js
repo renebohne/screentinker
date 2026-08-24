@@ -231,9 +231,12 @@ function pushToDevices(playlistId, reqOrIo) {
      * becoming a fourth call site somebody else has to remember.
      */
     try {
+      // ⚠️ And it bit a FOURTH time, in the fan-out this comment is attached to: the join was on
+      // devices.playlist_id, so every screen that INHERITS the parent playlist was skipped.
       for (const r of db.prepare(`
         SELECT DISTINCT d.id FROM devices d
-          JOIN playlist_items pi ON pi.playlist_id = d.playlist_id
+          JOIN device_resolved_playlist rp ON rp.device_id = d.id
+          JOIN playlist_items pi ON pi.playlist_id = rp.playlist_id
          WHERE pi.child_playlist_id = ?
       `).all(playlistId)) ids.add(r.id);
     } catch (e) { console.warn(`[playlist] ancestor fan-out failed: ${e && e.message}`); }
@@ -349,7 +352,7 @@ function emptyChildReference(playlistId) {
 router.get('/', (req, res) => {
   if (!req.workspaceId) return res.json([]);
   const playlists = db.prepare(`
-    SELECT p.*, COUNT(DISTINCT pi.id) as item_count, COUNT(DISTINCT d.id) as display_count,
+    SELECT p.*, COUNT(DISTINCT pi.id) as item_count, COUNT(DISTINCT d.device_id) as display_count,
            EXISTS(SELECT 1 FROM playlist_items z WHERE z.playlist_id = p.id AND z.zone_id IS NOT NULL) as zoned,
            -- ⚠️ How many OTHER playlists include this one. Surfaced so the UI can mark it before the
            -- operator tries to delete it and hits a 409 — BrightSign's lock-icon idea, which is the
@@ -360,7 +363,9 @@ router.get('/', (req, res) => {
            EXISTS(SELECT 1 FROM playlist_items k WHERE k.playlist_id = p.id AND k.child_playlist_id IS NOT NULL) as has_children
     FROM playlists p
     LEFT JOIN playlist_items pi ON p.id = pi.playlist_id
-    LEFT JOIN devices d ON d.playlist_id = p.id
+    -- Resolved, so "used by N screens" counts the screens that actually play it, inherited ones
+    -- included. The raw column undercounts every group- and wall-driven display.
+    LEFT JOIN device_resolved_playlist d ON d.playlist_id = p.id
     WHERE p.workspace_id = ?
     GROUP BY p.id
     ORDER BY p.name ASC

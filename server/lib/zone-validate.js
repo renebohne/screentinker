@@ -35,10 +35,13 @@ function layoutZones(layoutId) {
  */
 function orphanCountsByDevice(deviceIds) {
   const rows = db.prepare(`
+    -- Resolved playlist AND resolved layout: an inheriting screen has neither on its own row, so
+    -- this counted zero orphans for exactly the displays a group or wall drives.
     SELECT d.id AS device_id, COUNT(*) AS n
     FROM devices d
-    JOIN playlist_items pi ON pi.playlist_id = d.playlist_id
-    LEFT JOIN layout_zones lz ON lz.id = pi.zone_id AND lz.layout_id = d.layout_id
+    JOIN device_resolved_playlist r ON r.device_id = d.id
+    JOIN playlist_items pi ON pi.playlist_id = r.playlist_id
+    LEFT JOIN layout_zones lz ON lz.id = pi.zone_id AND lz.layout_id = r.layout_id
     WHERE pi.zone_id IS NOT NULL AND lz.id IS NULL
     GROUP BY d.id
   `).all();

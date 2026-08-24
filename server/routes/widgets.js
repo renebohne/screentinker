@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
+const { devicesPlayingWidget } = require('../lib/devices-playing');
 const appConfig = require('../config');
 const { PLATFORM_ROLES, ELEVATED_ROLES } = require('../middleware/auth');
 // Phase 2.2d: workspace-aware access. Same pattern as devices.js / content.js.
@@ -170,13 +171,12 @@ router.put('/:id', (req, res) => {
     if (io) {
       const { buildPlaylistPayload } = require('../ws/deviceSocket');
       const commandQueue = require('../lib/command-queue');
-      const affected = db.prepare(`
-        SELECT DISTINCT d.id FROM devices d
-        JOIN playlist_items pi ON pi.playlist_id = d.playlist_id
-        WHERE pi.widget_id = ?
-      `).all(req.params.id);
-      for (const d of affected) {
-        commandQueue.queueOrEmitPlaylistUpdate(io.of('/device'), d.id, buildPlaylistPayload);
+      // ⚠️ Resolved AND nesting-aware — see lib/devices-playing.js. This joined on
+      // devices.playlist_id, which is NULL for a screen that inherits, and looked only at the
+      // top-level rows, so a widget inside a nested playlist matched nothing either. Both cases
+      // meant an edited widget simply never reached those screens.
+      for (const id of devicesPlayingWidget(req.params.id)) {
+        commandQueue.queueOrEmitPlaylistUpdate(io.of('/device'), id, buildPlaylistPayload);
       }
     }
   } catch (e) { /* best-effort; the heartbeat refresh still picks it up */ }
