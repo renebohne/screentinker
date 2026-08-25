@@ -26,9 +26,34 @@ const { resolveSessionUser } = require('../middleware/auth');
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 const contentOffer = require('../lib/mesh/content-offer');
+const { digestFileSync } = require('../lib/content-digest');
 const path = require('path');
 const fs = require('fs');
 const config = require('../config');
+
+/*
+ * Has this exact file (same path, size and mtime) already been shown to match this digest?
+ *
+ * ⚠️ Keyed on mtime AND size, so any write invalidates the answer — the cache can only ever save a
+ * re-read of bytes that demonstrably have not changed. Bounded, because an unbounded map keyed on
+ * filenames is a slow leak on a node serving a large library.
+ */
+const digestChecks = new Map();
+const DIGEST_CACHE_MAX = 500;
+
+function verifiedRecently(abs, stat, expected) {
+  const key = `${abs}:${stat.size}:${stat.mtimeMs}`;
+  const seen = digestChecks.get(key);
+  if (seen !== undefined) return seen === expected;
+
+  const actual = digestFileSync(abs);
+  if (digestChecks.size >= DIGEST_CACHE_MAX) {
+    // Oldest first: Map preserves insertion order, and this is a cache rather than an index.
+    digestChecks.delete(digestChecks.keys().next().value);
+  }
+  digestChecks.set(key, actual);
+  return actual === expected;
+}
 
 module.exports = function meshRoutes(db, { requireAuth }) {
   const router = express.Router();
@@ -675,6 +700,34 @@ module.exports = function meshRoutes(db, { requireAuth }) {
     res.json({ ok: true, node_id: req.params.nodeId, client_id: clientId });
   });
 
+  /*
+   * ⚠️ PASS CONTENT ON TO THIS CLIENT AUTOMATICALLY — set here, by the operator who holds the
+   * relationship with them, and settable nowhere else.
+   *
+   * A grandparent cannot switch this on: the servers below granted content-push to THIS node, not
+   * to whoever is above it, and letting an instruction from above decide what lands on them would
+   * be acting on a grant nobody gave. What arrives from above is an offer this node may choose to
+   * repeat.
+   *
+   * It also cannot widen what travels. Content carries the owner's decision about whether it may be
+   * passed on at all, and forwarding respects that whatever this says.
+   */
+  router.put('/clients/:id/nodes/:nodeId/auto-forward', requireAuth, requirePlatformStaff, (req, res) => {
+    const edge = db.prepare("SELECT id FROM mesh_edges WHERE peer_node_id = ? AND direction = 'down'")
+      .get(req.params.nodeId);
+    if (!edge) return res.status(404).json({ error: 'No such server.' });
+    const on = !!(req.body && req.body.enabled);
+    db.prepare('UPDATE mesh_edges SET auto_forward = ? WHERE id = ?').run(on ? 1 : 0, edge.id);
+    res.json({
+      ok: true,
+      autoForward: on,
+      note: on
+        ? 'Content sent to this server that its owner allowed to be passed on will now be offered ' +
+          'to that client automatically. They still apply their own permissions on arrival.'
+        : 'This client will only receive content you send them explicitly.',
+    });
+  });
+
   router.put('/clients/:id/access', requireAuth, requirePlatformStaff, (req, res) => {
     if (!db.prepare('SELECT 1 FROM mesh_clients WHERE id = ?').get(req.params.id)) {
       return res.status(404).json({ error: 'No such client.' });
@@ -1047,6 +1100,35 @@ module.exports = function meshRoutes(db, { requireAuth }) {
 
     const abs = path.join(config.contentDir, path.basename(redeemed.ticket.filepath));
     if (!fs.existsSync(abs)) return res.status(404).json({ error: 'That file is no longer here.' });
+
+    /*
+     * ⚠️ CHECKED BEFORE IT IS SERVED — but the size on every request and the digest only when the
+     * file has actually changed.
+     *
+     * The receiving node verifies size, digest and type on arrival, so a wrong file cannot be
+     * accepted whatever this does; that is the guarantee, and it stays. What this adds is catching
+     * it HERE, where the operator who can fix it will see it, instead of as a mystery failure at a
+     * customer site. A file replaced or truncated under a live ticket is a real thing — a restore, a
+     * botched sync, a disk error — and the ticket names the bytes it was minted for.
+     *
+     * ⚠️ Re-hashing per request was the obvious version and it is wrong: a 500 MB asset pulled by
+     * forty sites would be forty full reads of a file nobody touched, on the box those sites are
+     * also fetching from. The digest is verified once per (size, mtime) and the result remembered,
+     * so a changed file is caught and an unchanged one costs a statSync.
+     */
+    let stat;
+    try { stat = fs.statSync(abs); } catch (e) {
+      return res.status(404).json({ error: 'That file is no longer here.' });
+    }
+    if (typeof redeemed.ticket.size === 'number' && stat.size !== redeemed.ticket.size) {
+      console.warn(`[mesh] refusing to serve ${redeemed.ticket.filepath}: ${stat.size} bytes, ` +
+                   `ticket says ${redeemed.ticket.size}`);
+      return res.status(409).json({ error: 'That file has changed since it was offered.' });
+    }
+    if (redeemed.ticket.digest && !verifiedRecently(abs, stat, redeemed.ticket.digest)) {
+      console.warn(`[mesh] refusing to serve ${redeemed.ticket.filepath}: digest does not match the ticket`);
+      return res.status(409).json({ error: 'That file has changed since it was offered.' });
+    }
 
     /*
      * ⚠️ The response is forced to an opaque type and marked nosniff. It is a byte stream for a

@@ -360,6 +360,40 @@ function openAlerts(db, grantCategories, edge) {
  * screens rather than a reduced summary of them. That is the whole point: an operator looking at a
  * customer's estate should see what the customer sees, minus the ability to change it.
  */
+
+/*
+ * ⚠️ A MESSAGE, NOT A PAYLOAD. error_data is whatever the player serialised — it can contain a
+ * widget's response body, a signed URL, or text an operator typed into a slide. Sending it upward
+ * because it is "diagnostics" would hand a third party the contents of a customer's screen under a
+ * grant that says "why something went wrong".
+ */
+function summariseError(raw) {
+  if (!raw) return null;
+  let msg = null;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    msg = parsed && (parsed.message || parsed.error || parsed.name);
+  } catch (e) {
+    msg = typeof raw === 'string' ? raw : null;
+  }
+  if (typeof msg !== 'string') return null;
+  return msg.replace(/[\r\n\t]+/g, ' ').trim().slice(0, 200) || null;
+}
+
+/*
+ * Origin and path, never the query. "Which widget is failing" is the useful half; the query string
+ * is where tokens and identifiers live, and it is not needed to answer that question.
+ */
+function stripQuery(url) {
+  if (typeof url !== 'string' || !url) return null;
+  try {
+    const u = new URL(url, 'http://127.0.0.1');
+    return `${u.origin === 'http://127.0.0.1' ? '' : u.origin}${u.pathname}`.slice(0, 200) || null;
+  } catch (e) {
+    return url.split('?')[0].slice(0, 200);
+  }
+}
+
 function answerRead(db, edge, req) {
   const grants = store.safeParseArray(edge.grant_categories);
   const check = readProxy.authorize(edge, req && req.path, req && req.method, grants);
@@ -462,6 +496,38 @@ function answerRead(db, edge, req) {
                 attached_display, video_mode, temperature_c, reported_at
            FROM device_telemetry WHERE device_id = ? ORDER BY reported_at DESC LIMIT 50`).all(seg[3]);
       return { ok: true, rows, asOf: nowSec() };
+    } catch (e) { return { ok: true, rows: [], asOf: nowSec() }; }
+  }
+
+  /*
+   * ⚠️ WHY A SCREEN IS MISBEHAVING — the question support actually needs answered, and the one an
+   * MSP could not ask about a customer's site. They could see a screen was unhealthy and had no way
+   * to find out why, which is the difference between fixing it from a desk and driving to it.
+   *
+   * ⚠️ THE ERROR PAYLOAD IS NOT SENT WHOLESALE. `error_data` and `context` are captured by the
+   * player and can carry anything the page had — a URL with a token in it, a widget's fetched
+   * content, an operator's own text. What travels is the fingerprint (which groups repeats), the
+   * message, the URL's ORIGIN AND PATH without its query, and the timestamp. That is enough to say
+   * "this screen is failing to load that widget, forty times an hour" and not enough to hand over
+   * whatever happened to be in a query string.
+   */
+  if (seg.length === 5 && seg[2] === 'devices' && seg[4] === 'debug') {
+    const owns = visible.some((d) => d.id === seg[3]);
+    if (!owns) return { ok: false, reason: 'No such screen on this server.' };
+    try {
+      const rows = db.prepare(
+        `SELECT error_fingerprint, error_data, url, created_at
+           FROM player_debug_logs WHERE device_id = ? ORDER BY created_at DESC LIMIT 50`).all(seg[3]);
+      return {
+        ok: true,
+        rows: rows.map((r) => ({
+          fingerprint: r.error_fingerprint || null,
+          message: summariseError(r.error_data),
+          where: stripQuery(r.url),
+          at: r.created_at,
+        })),
+        asOf: nowSec(),
+      };
     } catch (e) { return { ok: true, rows: [], asOf: nowSec() }; }
   }
 

@@ -258,9 +258,17 @@ test('⚠️ THE HUB API HAS EXACTLY ONE WRITE ROUTE, AND IT ONLY ASKS (I2)', ()
    * argued for, and the one that proxies to the child is still the only one that leaves this node.
    */
   const HUB_LOCAL_ADMIN = [
-    'POST /clients',                 // create a customer record
+    'POST /clients',                  // create a customer record
     'PUT /clients/:id/nodes/:nodeId', // file a linked server under one
-    'PUT /clients/:id/access',       // name one of THIS hub's staff on it
+    /*
+     * ⚠️ Whether content this node RECEIVES is passed on to that client without being asked each
+     * time. Local because the decision is this operator's: the servers below granted content-push
+     * to THIS node, not to whoever is above it, so a grandparent must not be able to set it. It
+     * changes only a column on this hub's own edge — what reaches the client afterwards still goes
+     * through the ordinary offer, and the client still applies its own grant on arrival.
+     */
+    'PUT /clients/:id/nodes/:nodeId/auto-forward',
+    'PUT /clients/:id/access',        // name one of THIS hub's staff on it
   ];
   /*
    * ⚠️ TWO ROUTES REACH A CHILD NOW, AND BOTH ONLY ASK.

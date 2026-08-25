@@ -40,6 +40,17 @@ const READABLE = Object.freeze([
    */
   { pattern: '/api/devices/:id/screenshot',   grant: 'display-capture',  scope: 'workspace',
     binary: true },
+  /*
+   * ⚠️ WHY A SCREEN IS MISBEHAVING, and it needs its own grant for the same reason a screenshot
+   * does. A player's debug log carries the URLs it was loading and the errors it hit — useful to
+   * whoever is supporting the site, and more than "is it alive". `diagnostics` exists precisely so
+   * a customer can share health without sharing that, and this must never fall back to `health`.
+   *
+   * Without it an MSP could see that a screen at a customer site was unhealthy and had no way to
+   * find out why — the one question support actually needs answered, and the reason someone drives
+   * to a site.
+   */
+  { pattern: '/api/devices/:id/debug',        grant: 'diagnostics',      scope: 'workspace' },
   { pattern: '/api/assignments/device/:id',   grant: 'content-metadata', scope: 'workspace' },
   { pattern: '/api/groups',                   grant: 'identity',         scope: 'workspace' },
   { pattern: '/api/playlists',                grant: 'content-metadata', scope: 'workspace' },

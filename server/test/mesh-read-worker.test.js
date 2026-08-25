@@ -337,3 +337,67 @@ test('⚠️ the platform is not sniffed — the capability is TRIED', () => {
   assert.match(src, /catch \(e\) \{[\s\S]{0,400}mode = 'inline'/,
     'constructing one either works or it does not');
 });
+
+/*
+ * ⚠️ WHY A SCREEN IS MISBEHAVING — and how little of it travels.
+ *
+ * An MSP could see that a customer's screen was unhealthy and had no way to ask why, which is the
+ * difference between fixing it from a desk and driving to the site. But a player's debug payload is
+ * whatever the page serialised: a widget's response body, a signed URL, text an operator typed into
+ * a slide. Sending it upward because it is "diagnostics" would hand a third party the contents of a
+ * customer's screen under a grant that says "why something went wrong".
+ */
+test('⚠️ a debug read needs the diagnostics grant, not health', () => {
+  const readProxy = require('../lib/mesh/read-proxy');
+  const path = '/api/devices/dev-1/debug';
+  assert.equal(readProxy.authorize({}, path, 'GET', ['health', 'identity']).ok, false,
+    'health says whether a screen is alive; it does not open its logs');
+  assert.equal(readProxy.authorize({}, path, 'GET', ['diagnostics']).ok, true);
+  // And it stays a READ — the allowlist must never admit a write to this path.
+  assert.equal(readProxy.authorize({}, path, 'POST', ['diagnostics']).ok, false);
+});
+
+test('⚠️ the error payload is summarised, and the query string never travels', () => {
+  const db = freshDb();
+  try {
+    // d1 already exists in this fixture, in the workspace the edge can see.
+    db.prepare(`INSERT INTO player_debug_logs (device_id, ip, user_agent, url, error_fingerprint, error_data, context, created_at)
+                VALUES (?,?,?,?,?,?,?,?)`)
+      .run('d1', '10.0.0.5', 'Chrome',
+           'https://site.example/widget/render?token=SECRET-abc123&id=9',
+           'fp-1',
+           JSON.stringify({ message: 'Failed to fetch', stack: 'x', body: 'CUSTOMER CONTENT' }),
+           JSON.stringify({ note: 'private' }), NOW);
+
+    const withDiag = edge({
+      grant_categories: JSON.stringify(['health', 'identity', 'diagnostics']),
+    });
+    const out = nodeData.answerRead(db, withDiag, { path: '/api/devices/d1/debug', method: 'GET' });
+    assert.equal(out.ok, true, out.reason);
+    assert.equal(out.rows.length, 1);
+    const r = out.rows[0];
+
+    assert.equal(r.message, 'Failed to fetch', 'the message is what support needs');
+    assert.equal(r.fingerprint, 'fp-1', 'and the fingerprint, so repeats group');
+
+    const asSent = JSON.stringify(r);
+    assert.ok(!asSent.includes('SECRET-abc123'), 'the query string must not travel');
+    assert.ok(!asSent.includes('CUSTOMER CONTENT'), 'nor the error body');
+    assert.ok(!asSent.includes('private'), 'nor the context blob');
+    assert.match(r.where, /\/widget\/render$/, 'which widget IS the useful half');
+  } finally { cleanup(db); }
+});
+
+test('a screen in a workspace this edge cannot see has no debug either', () => {
+  const db = freshDb();
+  try {
+    db.prepare(`INSERT INTO player_debug_logs (device_id, url, error_fingerprint, error_data, created_at)
+                VALUES ('d2','https://x/y','fp-2','{"message":"nope"}',?)`).run(NOW);
+    const scoped = edge({
+      grant_categories: JSON.stringify(['health', 'diagnostics']),
+      shared_workspaces: JSON.stringify(['w1']),      // d2 lives in w2
+    });
+    const out = nodeData.answerRead(db, scoped, { path: '/api/devices/d2/debug', method: 'GET' });
+    assert.equal(out.ok, false, 'the workspace scope applies to diagnostics like everything else');
+  } finally { cleanup(db); }
+});

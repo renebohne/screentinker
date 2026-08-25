@@ -46,6 +46,8 @@ function freshDb() {
       -- Whether the peer agreed its data may travel a second hop, and whether we agreed ours may.
       share_upward INTEGER NOT NULL DEFAULT 0,
       peer_shares_upward INTEGER NOT NULL DEFAULT 0,
+      -- Whether this operator passes received content on to that client without being asked.
+      auto_forward INTEGER NOT NULL DEFAULT 0,
       UNIQUE (peer_node_id, direction));
     CREATE TABLE workspaces (id TEXT PRIMARY KEY, organization_id TEXT, name TEXT);
     CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT);

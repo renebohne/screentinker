@@ -50,7 +50,9 @@ function freshDb() {
       peer_write_offer TEXT,
       -- Whether the peer agreed its data may travel a second hop, and whether we agreed ours may.
       share_upward INTEGER NOT NULL DEFAULT 0,
-      peer_shares_upward INTEGER NOT NULL DEFAULT 0);
+      peer_shares_upward INTEGER NOT NULL DEFAULT 0,
+      -- Whether this operator passes received content on to that client without being asked.
+      auto_forward INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE mesh_mirror_nodes (
       origin_node_id TEXT PRIMARY KEY, via_edge_id TEXT NOT NULL, node_version TEXT,
       device_count INTEGER, devices_online INTEGER, origin_ts INTEGER,

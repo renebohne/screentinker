@@ -812,6 +812,12 @@ const migrations = [
    * to its data crossing a second hop, and inferring that consent is exactly what this design
    * refuses to do. */
   'ALTER TABLE mesh_edges ADD COLUMN share_upward INTEGER NOT NULL DEFAULT 0',
+  /* Whether THIS node's operator wants content they receive to be passed on automatically to this
+   * client, rather than sent by hand.
+   * ⚠️ Set on a DOWN edge, by the operator who holds the relationship with that client — never by
+   * whoever is above. A grandparent deciding what lands on a server that granted somebody else is
+   * the thing the whole grant model exists to prevent. Defaults to 0. */
+  'ALTER TABLE mesh_edges ADD COLUMN auto_forward INTEGER NOT NULL DEFAULT 0',
   'ALTER TABLE mesh_edges ADD COLUMN peer_shares_upward INTEGER NOT NULL DEFAULT 0',
 
   /* WHICH of this server's workspaces travel up this edge. JSON array of workspace ids, or NULL.

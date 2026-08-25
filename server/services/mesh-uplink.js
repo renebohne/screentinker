@@ -22,6 +22,7 @@ const { createReadRunner } = require('../lib/mesh/read-runner');
 const nodeWrite = require('../lib/mesh/node-write');
 const contentReceive = require('../lib/mesh/content-receive');
 const relay = require('../lib/mesh/relay');
+const autoForward = require('../lib/mesh/auto-forward');
 const contentFiles = require('../lib/content-files');
 const meshAudit = require('../lib/mesh/audit');
 const { createLocalApply } = require('../lib/mesh/local-apply');
@@ -350,6 +351,41 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
             return contentReceive.receiveContentOffer(db, fresh, req, {
               contentDir: config.contentDir,
               userId: meshPrincipalId(db),
+            }).then(async (result) => {
+              /*
+               * ⚠️ AFTER the bytes are safely committed, and never as part of committing them. A
+               * forward that failed must not make a successful receipt look like a failure — this
+               * node HAS the content either way, and the client below can be sent it later.
+               */
+              try {
+                const offerTo = global.__meshContentOfferTo;
+                if (offerTo && result && result.ok && (result.stored || []).length) {
+                  const fwd = await autoForward.forwardReceived(db, result.stored, fresh, {
+                    contentDir: config.contentDir,
+                    offerTo,
+                    /*
+                     * Which of that client's workspaces to put it in. Only answerable when they have
+                     * told us about exactly one; with several, guessing would drop a campaign into
+                     * the wrong customer's screens, so it is skipped and reported instead.
+                     */
+                    workspaceFor: (e) => {
+                      try {
+                        const rows = db.prepare(
+                          `SELECT workspace_id FROM mesh_mirror_workspaces
+                            WHERE origin_node_id = ? AND deleted_at IS NULL`).all(e.peer_node_id);
+                        return rows.length === 1 ? rows[0].workspace_id : null;
+                      } catch (x) { return null; }
+                    },
+                  });
+                  if (fwd.forwarded.length || fwd.skipped.length) {
+                    logger.log(`[mesh] passed content on to ${fwd.forwarded.length} client(s)` +
+                               `${fwd.skipped.length ? `, skipped ${fwd.skipped.length}` : ''}`);
+                  }
+                }
+              } catch (e) {
+                logger.warn(`[mesh] could not pass content on: ${e && e.message}`);
+              }
+              return result;
             });
           },
         }).start();
