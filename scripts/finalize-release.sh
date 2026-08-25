@@ -51,6 +51,8 @@ tar cf "$TMPTAR" \
   --exclude='.mcp.json' --exclude='*/.mcp.json' \
   --exclude='*.jks' --exclude='*.keystore' --exclude='*.pem' --exclude='*.key' \
   --exclude='.jwt_secret' --exclude='*/.jwt_secret' \
+  --exclude='.claude' --exclude='.cc-writes' \
+  --exclude='brightsign/*.zip' --exclude='brightsign/server-payload.json' \
   server frontend scripts VERSION README.md LICENSE \
   ScreenTinker.apk ScreenTinker.wgt
 tar rf "$TMPTAR" .env.example      # the one .env* that is meant to ship
@@ -63,8 +65,16 @@ gzip -f "$TMPTAR"                  # -> $OUT
 echo "==> Auditing $OUT for credential-shaped files"
 # Match broadly, then subtract the single documented exception. Anything new that looks
 # like a credential is caught by default; only .env.example is allowed through.
+#
+# ⚠️ `.claude/` JOINED THE LIST AFTER IT ACTUALLY SHIPPED. Every release tarball up to and
+# including v2.0.0-alpha5 carried server/.claude/{settings.json,settings.local.json,hooks,skills,
+# launch.json,loop.md,...} plus stray .cc-writes/ dirs. They were all ZERO BYTES - local tooling
+# placeholders, nothing leaked - which is exactly why nobody noticed for months. The shape is the
+# problem, not this instance of it: those are the filenames that hold real local configuration the
+# moment the tooling writes any, and they sit inside a PUBLIC archive. Excluded above and caught
+# here, because the exclude list fails open and this does not.
 BAD="$(tar tzf "$OUT" \
-  | grep -E '(^|/)(\.env|\.env\..*|\.mcp\.json|\.jwt_secret)$|\.(jks|keystore|pem|key|p12|pfx)$' \
+  | grep -E '(^|/)(\.env|\.env\..*|\.mcp\.json|\.jwt_secret)$|\.(jks|keystore|pem|key|p12|pfx)$|(^|/)\.(claude|cc-writes)/' \
   | grep -vE '(^|/)\.env\.example$' || true)"
 if [ -n "$BAD" ]; then
   echo "ERROR: refusing to upload - the archive contains credential-shaped files:" >&2
@@ -83,3 +93,65 @@ echo "==> Uploading APK + complete tarball to $TAG"
 gh release upload "$TAG" "$OUT" ScreenTinker.apk --clobber
 
 echo "==> Done: $TAG now carries the standalone APK and a tarball bundling apk + wgt."
+
+# ---------------------------------------------------------------------------
+# COMPLETENESS GATE. This is the last step of a release, so it is the right and
+# only place to answer "did we actually ship everything?".
+#
+# ⚠️ A MISSING ASSET IS SILENT. Nothing fails, no log says anything, the release page
+# simply comes out short - and you find out when a customer's player downloads an
+# artifact that is not there. v2.0.0-alpha4 and the first cut of alpha5 both shipped
+# without autorun-server.zip and server-payload.zip because CI never built them; alpha5's
+# had to be built and uploaded by hand after the fact. CI builds them now, and this
+# refuses to call a release done if any expected asset is absent.
+#
+# ⚠️ THE LIST IS EXPLICIT, NOT DERIVED. Deriving it from what is present would make the
+# check agree with whatever happened, which is precisely the failure being guarded.
+# Adding an artifact means adding it here, deliberately.
+EXPECTED="
+autorun.zip
+autorun-server.zip
+server-payload.zip
+server-payload.json
+ScreenTinker.apk
+ScreenTinker.wgt
+screentinker-$VERSION.tar.gz
+screentinker-sbom-$VERSION.cdx.json
+"
+echo "==> Checking $TAG carries every expected asset"
+PRESENT="$(gh release view "$TAG" --json assets -q '.assets[].name')"
+MISSING=""
+for a in $EXPECTED; do
+  printf '%s\n' "$PRESENT" | grep -qxF "$a" || MISSING="$MISSING $a"
+done
+if [ -n "$MISSING" ]; then
+  echo "ERROR: $TAG is missing expected release asset(s):" >&2
+  for a in $MISSING; do echo "  $a" >&2; done
+  echo "       The BrightSign server-mode artifacts come from .github/workflows/release.yml" >&2
+  echo "       (build-server-boot-zip.sh + build-server-zip.sh --payload). Build and upload the" >&2
+  echo "       missing ones with 'gh release upload $TAG <file> --clobber', then re-run." >&2
+  exit 1
+fi
+echo "    all $(printf '%s' "$EXPECTED" | wc -w) expected assets present"
+
+# ⚠️ AND THE PAYLOAD MANIFEST MUST DESCRIBE THE PAYLOAD IT SHIPS WITH. The launcher reads
+# the .json to decide whether to install the .zip, so a mismatched pair tells every
+# player a version is available that the archive does not contain - and the install
+# then fails its own checksum verification, on the device, in the field.
+echo "==> Verifying the payload manifest matches the payload"
+TMPD="$(mktemp -d)"
+gh release download "$TAG" -p server-payload.json -p server-payload.zip -D "$TMPD" --clobber
+M_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['sha256'])" "$TMPD/server-payload.json")"
+M_VER="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$TMPD/server-payload.json")"
+Z_SHA="$(sha256sum "$TMPD/server-payload.zip" | awk '{print $1}')"
+rm -rf "$TMPD"
+if [ "$M_SHA" != "$Z_SHA" ]; then
+  echo "ERROR: server-payload.json sha256 ($M_SHA)" >&2
+  echo "       does not match server-payload.zip ($Z_SHA)." >&2
+  exit 1
+fi
+if [ "$M_VER" != "$VERSION" ]; then
+  echo "ERROR: server-payload.json says version $M_VER, this release is $VERSION." >&2
+  exit 1
+fi
+echo "    manifest and payload agree ($M_VER, ${M_SHA%"${M_SHA#????????}"}...)"
