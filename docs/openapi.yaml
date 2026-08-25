@@ -84,6 +84,64 @@ components:
         error:
           type: string
 
+    TriggerInput:
+      type: object
+      required: [name, match_token, target_ref, mode]
+      properties:
+        name: { type: string, maxLength: 200 }
+        match_token:
+          type: string
+          description: |
+            The word that fires this trigger. Printable ASCII, no spaces, 1-64 characters — the UDP
+            payload is a single space-separated line (`ST1 <secret> <token>`), so a space would be
+            unparseable on arrival and a newline would let one datagram look like two messages.
+          pattern: '^[\x21-\x7E]{1,64}$'
+        clear_token:
+          type: [string, 'null']
+          description: Optional word that clears an `until_cleared` trigger. Same charset.
+          pattern: '^[\x21-\x7E]{1,64}$'
+        source_http: { type: boolean, default: true }
+        source_udp: { type: boolean, default: false }
+        target_kind:
+          type: string
+          enum: [playlist]
+          default: playlist
+          description: |
+            Only `playlist` is implemented. A URL target is designed and deliberately not built —
+            playlist items are library content and therefore pinnable for offline use, which is the
+            whole reason the target is a playlist.
+        target_ref:
+          type: string
+          description: |
+            A playlist id in this workspace. It must be published and every item must be pinnable
+            offline (no `remote_url`, no YouTube), both checked when you save.
+        mode:
+          type: string
+          enum: [once, until_cleared]
+        max_duration_sec: { type: integer, minimum: 0, maximum: 86400, default: 0 }
+        lease_sec:
+          type: [integer, 'null']
+          minimum: 5
+          maximum: 86400
+          description: |
+            For `until_cleared` only. A dead-man's timer: the overlay retires on its own if nothing
+            renews it, so a controller that dies mid-alarm cannot leave a screen stuck.
+        priority: { type: integer, minimum: -1000, maximum: 1000, default: 0 }
+        enabled: { type: boolean, default: true }
+        assignments:
+          type: array
+          description: Which screens this applies to. Every target must be in the same workspace.
+          items:
+            type: object
+            required: [target_type, target_id]
+            properties:
+              target_type: { type: string, enum: [device, group] }
+              target_id: { type: string }
+      description: |
+        Note on geometry: `position`, `width`, `height`, `opacity` and `border_radius` are accepted
+        and stored but are **not currently honoured** — every trigger renders fullscreen. They are
+        omitted here deliberately rather than documented as working.
+
     Device:
       type: object
       properties:
@@ -1307,10 +1365,182 @@ paths:
               properties:
                 type:
                   type: string
-                  enum: [screen_on, screen_off, launch, update, reboot, shutdown]
+                  # Kept identical to server/lib/device-command.js ALLOWED_COMMANDS, which both the
+                  # group and the single-device route validate against. openapi-contract.test.js
+                  # asserts the two lists match: this one had already drifted, documenting six of
+                  # the commands a 'full' token can actually send.
+                  enum: [screen_on, screen_off, launch, update, reboot, shutdown,
+                         power_menu, lock_now, kiosk_lock, kiosk_unlock,
+                         set_time, set_timezone, status_bar, block_uninstall, unblock_uninstall,
+                         shell, install_apk,
+                         set_volume, set_brightness, set_system_brightness, set_screen_timeout]
                 payload: { type: object }
       responses:
         '200': { description: '{ success, sent, offline, total, results }.' }
+
+  /devices/{id}/command:
+    post:
+      tags: [devices]
+      summary: Send an operational command to one screen
+      description: |
+        Sends reboot / shutdown / screen on/off / launch / update — and the device-owner and
+        system-control commands — to a single display. The group equivalent
+        (`POST /groups/{id}/command`) has existed far longer; this route did not, so commanding one
+        screen was reachable only over the dashboard's websocket and not over the API at all.
+
+        Requires scope: full (the highest scope; read and write tokens are rejected), the same as
+        the group route — a fleet-affecting action is not an ordinary write.
+
+        A panel that does not support the command is answered `400` with a `capability` field
+        naming what it lacks, rather than a generic failure: "this screen cannot do that" is
+        actionable and "failed" is not. The `status` in a success response says whether the panel
+        actually received it or the command was queued for a device that is currently offline.
+      x-required-scope: full
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type:
+                  type: string
+                  # Same list as the group route above; see the note there.
+                  enum: [screen_on, screen_off, launch, update, reboot, shutdown,
+                         power_menu, lock_now, kiosk_lock, kiosk_unlock,
+                         set_time, set_timezone, status_bar, block_uninstall, unblock_uninstall,
+                         shell, install_apk,
+                         set_volume, set_brightness, set_system_brightness, set_screen_timeout]
+                payload: { type: object }
+      responses:
+        '200':
+          description: '{ success, status, device_id }.'
+        '400':
+          description: |
+            Unknown command type, or the panel does not support it — in which case the body carries
+            `capability` naming the missing one.
+        '404': { description: No such device in this workspace. }
+        '503': { description: The realtime layer is not available. }
+
+  # ----------------------------------------------------------------- triggers
+  /triggers:
+    get:
+      tags: [triggers]
+      summary: List the triggers in this workspace
+      description: |
+        A trigger lets an external system interrupt a screen's playlist with different content, in
+        response to an event fired at the player over the LAN — an HTTP POST or a UDP datagram. It
+        is resolved entirely on the device, so it still works with the WAN down.
+      x-required-scope: read
+      responses:
+        '200': { description: An array of triggers, each with its `assignments`. }
+    post:
+      tags: [triggers]
+      summary: Create a trigger
+      description: |
+        Requires scope: full. A trigger changes what a screen shows in response to a packet that is
+        not itself authenticated by this API, so it is a fleet-affecting capability rather than
+        ordinary content editing — the same tier as a reboot.
+
+        The target playlist must be **published** and every item in it must be locally pinnable
+        (no `remote_url`, no YouTube). Both are refused at save time rather than at fire time: a
+        trigger that saves cleanly and then renders nothing during an alarm is the failure this
+        feature exists to prevent.
+      x-required-scope: full
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TriggerInput' }
+      responses:
+        '200': { description: The created trigger, with its assignments. }
+        '400':
+          description: |
+            Validation failed — an unusable token, an unpublished or empty target playlist, an item
+            that cannot be cached offline, or an assignment naming a device outside this workspace.
+            The message says which.
+
+  /triggers/{id}:
+    get:
+      tags: [triggers]
+      summary: Fetch one trigger
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: The trigger, with its assignments. }
+        '404': { description: No such trigger in this workspace. }
+    put:
+      tags: [triggers]
+      summary: Update a trigger
+      description: 'Requires scope: full, and revalidates everything POST does.'
+      x-required-scope: full
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TriggerInput' }
+      responses:
+        '200': { description: The updated trigger. }
+        '400': { description: Validation failed; the message says which rule. }
+        '404': { description: No such trigger in this workspace. }
+    delete:
+      tags: [triggers]
+      summary: Delete a trigger
+      x-required-scope: full
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success: true }.' }
+        '404': { description: No such trigger in this workspace. }
+
+  /devices/{id}/trigger-config:
+    post:
+      tags: [triggers]
+      summary: Configure how one screen listens for triggers
+      description: |
+        Which transports a player accepts (`accept_http`, `accept_udp`), which ports it binds, and
+        the multicast group it joins. Ports must be 1024-65534 — below 1024 needs root on every
+        platform ScreenTinker runs on.
+      x-required-scope: full
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                accept_http: { type: boolean }
+                accept_udp: { type: boolean }
+                http_port: { type: [integer, 'null'], minimum: 1024, maximum: 65534 }
+                udp_port: { type: [integer, 'null'], minimum: 1024, maximum: 65534 }
+                multicast_group: { type: [string, 'null'] }
+      responses:
+        '200': { description: The updated trigger configuration for that device. }
+        '400': { description: A port outside 1024-65534, or an unusable multicast group. }
+        '404': { description: No such device in this workspace. }
+
+  /devices/{id}/trigger-secret:
+    post:
+      tags: [triggers]
+      summary: Rotate or set the shared secret a screen requires
+      description: |
+        The secret an external system must present in the payload (`ST1 <secret> <token>`). The
+        response says whether the panel actually received the new value rather than implying it —
+        a screen that is offline when you rotate is still expecting the old one.
+      x-required-scope: full
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: 'The secret, and whether the device was reached.' }
+        '404': { description: No such device in this workspace. }
 
   # ---------------------------------------------------------------------- pip
   /pip:

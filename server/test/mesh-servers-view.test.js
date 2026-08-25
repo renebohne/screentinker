@@ -194,7 +194,17 @@ test('⚠️ mesh writes address LOCAL administration only (I2)', () => {
    * a URL reading "write to a node" is one somebody later extends into writing to a node, so the
    * route was re-addressed under the resource it actually modifies.
    */
-  const LOCAL = ['/mesh/pair/code', '/mesh/uplink', '/mesh/clients'];
+  /*
+   * ⚠️ /mesh/identity is the most local write on this page: what this box calls ITSELF. It changes
+   * one column on this node's own mesh_node row and reaches nothing else. A peer learns the new
+   * name only because this node volunteers it on its next self-report — which the peer is free to
+   * ignore, and which no hub can request.
+   *
+   * Worth stating the direction, since a name IS displayed on other people's dashboards: it travels
+   * up, never down. Nothing above can set it. A hub renaming its customers' servers is precisely
+   * the thing this guard exists to keep out, and this is the opposite of it.
+   */
+  const LOCAL = ['/mesh/pair/code', '/mesh/uplink', '/mesh/clients', '/mesh/identity'];
 
   /*
    * ⚠️ AND ONE THAT DELIBERATELY IS NOT LOCAL. /mesh/content asks a customer's server to accept

@@ -1419,6 +1419,27 @@ const migrations = [
   "ALTER TABLE devices ADD COLUMN scheduled_playlist_id TEXT REFERENCES playlists(id) ON DELETE SET NULL",
   "ALTER TABLE devices ADD COLUMN scheduled_layout_id TEXT REFERENCES layouts(id) ON DELETE SET NULL",
 
+  /* The name a node declares for ITSELF, mirrored on whoever receives its reports.
+   *
+   * ⚠️ ADDED BECAUSE THE NAME COULD TRAVEL BUT COULD NOT CHANGE. `mesh_node.node_name` and the wire
+   * field both shipped, and `mesh_edges.peer_name` was written from the introduction at enrollment
+   * — once, and never again. Nothing anywhere ever called setNodeName, so every server in a mesh
+   * was permanently whatever its hostname happened to be on pairing day. That is the same defect
+   * peer_version had, and it is fixed the same way: the name rides the periodic self-report.
+   *
+   * ⚠️ A LABEL, NEVER AN IDENTIFIER. It arrives from another operator's machine, it is not unique,
+   * not authenticated, and is freely changeable by whoever owns that node. Route, authorize and key
+   * on node_id; show this to humans and escape it on the way out. */
+  'ALTER TABLE mesh_mirror_nodes ADD COLUMN node_name TEXT',
+
+  /* Whether an operator actually CHOSE this server's name, as opposed to inheriting the hostname.
+   *
+   * ⚠️ A SEPARATE FLAG RATHER THAN COMPARING THE NAME TO os.hostname(). The comparison is wrong in
+   * both directions: a box renamed at the OS level after pairing would start reporting a chosen
+   * name as a default, and an operator who deliberately types the hostname would be told they never
+   * decided. It also has to survive the hostname changing, which is the thing that prompted the
+   * name to be editable in the first place. */
+  'ALTER TABLE mesh_node ADD COLUMN chose_name INTEGER NOT NULL DEFAULT 0',
 ];
 // Apply each ALTER idempotently. A "duplicate column name" / "already exists"
 // error means the column is already present (expected on a migrated DB) - benign.

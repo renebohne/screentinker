@@ -106,12 +106,15 @@ function deviceProjections(db, grantCategories, edge) {
 function relayedNodeProjections(db) {
   try {
     return db.prepare(`
-      SELECT m.origin_node_id, m.node_version, m.device_count, m.devices_online, m.origin_ts
+      SELECT m.origin_node_id, m.node_name, m.node_version, m.device_count, m.devices_online, m.origin_ts
         FROM mesh_mirror_nodes m
         JOIN mesh_edges e ON e.peer_node_id = m.origin_node_id
                          AND e.direction = 'down' AND e.revoked_at IS NULL
        WHERE e.peer_shares_upward = 1`).all().map((r) => ({
       node_id: r.origin_node_id,
+      // Carried onward so a grandparent sees "Kenosha North", not eight hex characters. A relay
+      // repeats the child's own word for itself; it does not get to substitute its own.
+      name: r.node_name || null,
       version: r.node_version || null,
       device_count: r.device_count ?? null,
       devices_online: r.devices_online ?? null,
@@ -307,6 +310,9 @@ function nodeHealth(db, nodeId) {
     .get();
   return mirror.projectNodeHealth({
     node_id: nodeId,
+    // What this box calls itself. Sent on EVERY report, not just at enrollment, so a rename
+    // reaches everyone who is listening instead of only everyone who pairs after it.
+    name: store.nodeName(db),
     /*
      * ⚠️ '../../' — this file moved from services/ to lib/mesh/ and the relative path did not move
      * with it. The throw was caught by the reporting loop's own try/catch and logged as "could not

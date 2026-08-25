@@ -183,6 +183,13 @@ export async function render(container) {
   })();
   const isStaff = ['platform_admin', 'platform_operator'].includes(meRole);
   /*
+   * ⚠️ NARROWER THAN isStaff, ON PURPOSE. The route behind Rename is requireInstanceOwner
+   * (platform_admin only), the same tier as minting a pairing code, because this name is displayed
+   * on every peer's dashboard - including another organisation's. Offering the button to an
+   * operator whose PUT will 403 is how a UI teaches people to distrust it.
+   */
+  const isOwner = meRole === 'platform_admin';
+  /*
    * ⚠️ THE HUB TABS ARE HIDDEN ON A NODE THAT IS NOT A HUB.
    *
    * Screens and Topology read /api/mesh/nodes and /api/mesh/topology, and those routes exist only
@@ -214,6 +221,25 @@ export async function render(container) {
       ${connect.canMint ? `
         <button class="btn btn-primary" id="connectServerBtn">+ Connect a server</button>` : ''}
     </div>
+    <!--
+      ⚠️ THIS SERVER'S OWN NAME, IN THE HEADER, ON EVERY TAB.
+      Not tucked into the pairing panel: on a LEAF there is no pairing panel and no hub tabs, and a
+      leaf is where the name matters most - it is what the MSP's dashboard calls this site. Under
+      the title is the one place present in both shapes of this page.
+    -->
+    <div id="selfIdentity" class="settings-section"
+         style="margin-bottom:16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="color:var(--text-muted);font-size:13px">This server is</span>
+      <strong id="selfName" style="font-size:14px">${esc(connect.nodeName || 'unnamed')}</strong>
+      ${connect.nodeId ? idBadge(connect.nodeId) : ''}
+      ${connect.nodeNameIsDefault ? `
+        <span style="color:var(--text-muted);font-size:12px">
+          &mdash; taken from the hostname; peers show this name</span>` : ''}
+      ${isOwner ? `
+        <button class="btn btn-secondary btn-sm" id="renameSelfBtn" style="margin-left:auto">
+          Rename</button>` : ''}
+    </div>
+    <div id="renameSelfPanel"></div>
     <div id="mintPanel"></div>
     <div id="serversTabs" style="display:flex;gap:4px;margin-bottom:16px">
       ${tabs.map(([id, label]) => `
@@ -227,6 +253,53 @@ export async function render(container) {
     if (!btn) return;
     state.tab = btn.dataset.tab;
     render(container);
+  });
+
+  container.querySelector('#renameSelfBtn')?.addEventListener('click', () => {
+    const host = container.querySelector('#renameSelfPanel');
+    if (host.innerHTML) { host.innerHTML = ''; return; }   // toggle, never stack a second copy
+    host.innerHTML = `
+      <div class="settings-section" style="margin-bottom:16px">
+        <label style="display:block;font-size:13px;margin-bottom:6px">What should this server be
+          called?</label>
+        <!--
+          ⚠️ maxlength MATCHES THE 60 THE SERVER ENFORCES. A field that accepts more than the
+          setter stores would silently truncate an operator's name, and they would find out from
+          somebody else's dashboard.
+        -->
+        <input class="input" id="renameSelfInput" maxlength="60" style="max-width:320px"
+               value="${esc(connect.nodeName || '')}">
+        <p style="color:var(--text-muted);font-size:12px;margin:8px 0 0">
+          Every server this one reports to will show this name. It reaches them on the next report,
+          not instantly, and it changes nothing about what they are allowed to see.</p>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+          <button class="btn btn-primary btn-sm" id="renameSelfSave">Save</button>
+          <span id="renameSelfMsg" style="font-size:12px"></span>
+        </div>
+      </div>`;
+    const input = host.querySelector('#renameSelfInput');
+    const msg = host.querySelector('#renameSelfMsg');
+    input.focus();
+    input.select();
+
+    const save = async () => {
+      const name = input.value.trim();
+      // Refused here as well as on the server: a round trip to be told the field is empty is a
+      // worse answer than not making it.
+      if (!name) { msg.textContent = 'A server needs a name.'; msg.style.color = 'var(--danger)'; return; }
+      msg.textContent = 'Saving...';
+      msg.style.color = 'var(--text-muted)';
+      try {
+        await api.put('/mesh/identity', { name });
+        // Re-render from the top so the header, and anything else reading the name, agree.
+        render(container);
+      } catch (e) {
+        msg.textContent = (e && e.message) || 'Could not save the name.';
+        msg.style.color = 'var(--danger)';
+      }
+    };
+    host.querySelector('#renameSelfSave').addEventListener('click', save);
+    input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') save(); });
   });
 
   container.querySelector('#connectServerBtn')?.addEventListener('click', () => {

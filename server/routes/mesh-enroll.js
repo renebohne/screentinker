@@ -356,6 +356,13 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
     res.json({
       nodeId: thisNode(),
       nodeName: store.nodeName(db),
+      /*
+       * WARNSIGN So the UI can say "defaulted from the hostname" instead of presenting a guess as a
+       * decision. An operator who has never named this box should be told that, not shown a filled
+       * field that looks deliberate - especially here, where the name is about to be handed to
+       * another organisation and shown on their dashboard.
+       */
+      nodeNameIsDefault: !store.nameWasChosen(db),
       canMint: !!config.meshAcceptEnrollment,
       canEnroll: !!config.meshAllowUplink,
       uplinks: rows.map((e) => ({
@@ -405,6 +412,50 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
        */
       writeCategories: grants.WRITE_CATEGORIES,
     });
+  });
+
+  /*
+   * NAMING THIS SERVER.
+   *
+   * ⚠️ THE HALF THAT WAS NEVER BUILT. mesh_node.node_name, store.nodeName(), store.setNodeName()
+   * and the `nodeName` field in the pairing handshake all shipped together and read as a finished
+   * feature. setNodeName had no callers anywhere in the tree, so the name was permanently whatever
+   * os.hostname() returned the first time the getter ran: peers displayed it, and nobody could
+   * change it. The same shape as the single-device command route - a definition with no way in.
+   *
+   * ⚠️ IT LIVES HERE, NOT IN THE HUB ROUTER, AND THAT IS THE WHOLE POINT.
+   *
+   * routes/mesh.js mounts only where MESH_ACCEPT_ENROLLMENT is set - on a hub. But a name matters
+   * MOST on a leaf: a site server's name is what its MSP's dashboard displays, so the operator with
+   * the strongest reason to set it is the one the hub router does not exist for. Putting it there
+   * would have shipped a rename button that appears only for people who already have one.
+   *
+   * This router mounts wherever a node participates in a mesh at all - either flag, or an existing
+   * up-edge - which is exactly the set of installs where the name is visible to somebody else. An
+   * install that never touched the mesh has no route and no button, which is I1 working correctly.
+   *
+   * requireInstanceOwner for the same reason minting a code needs it: this name is displayed by
+   * every peer, so it is an instance-level act, not a per-workspace preference.
+   */
+  router.put('/identity', requireAuth, requireInstanceOwner, (req, res) => {
+    const raw = String((req.body && req.body.name) || '');
+    /*
+     * ⚠️ REFUSED, NOT SILENTLY ABSORBED. setNodeName returns false for a blank name and leaves
+     * the old one standing; answering 200 to that would tell the operator a rename happened while
+     * every peer in the mesh still shows the old name - and they would have no reason to check.
+     */
+    if (!raw.trim()) return res.status(400).json({ error: 'A server needs a name.' });
+    if (!store.setNodeName(db, raw)) {
+      return res.status(500).json({ error: 'Could not save the name.' });
+    }
+    /*
+     * ⚠️ NO BROADCAST, AND THAT IS NOT A GAP. The name rides the next self-report to every peer
+     * watching this node (mirror-store.upsertNodeHealth refreshes both the mirror row and the edge),
+     * so it converges over exactly the path the data already takes. A bespoke rename push would be a
+     * second delivery mechanism to keep correct forever, and it would be the only one able to reach
+     * a node this one is not otherwise reporting to - which is a reach it should not have.
+     */
+    res.json({ ok: true, name: store.nodeName(db) });
   });
 
   router.get('/uplink', requireAuth, (req, res) => {

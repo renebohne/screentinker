@@ -27,7 +27,10 @@ function freshDb() {
   db.exec(`
     CREATE TABLE mesh_node (singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
       node_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, self_device_id TEXT,
-      node_name TEXT);
+      node_name TEXT,
+      -- Whether an operator picked the name or inherited the hostname. Fixture drift here would
+      -- silently turn every "did they choose it?" answer into false, so it is a real column.
+      chose_name INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE mesh_edges (id TEXT PRIMARY KEY, peer_node_id TEXT NOT NULL, direction TEXT NOT NULL,
       role_capabilities TEXT DEFAULT '[]', grant_categories TEXT DEFAULT '[]',
       transport_direction TEXT, retention_days INTEGER, tombstone_purge_days INTEGER,
@@ -414,4 +417,94 @@ test('⚠️ the hand-built mesh_edges matches the real schema', () => {
   assert.deepEqual(missing, [],
     `this file's mesh_edges is missing ${missing.join(', ')} — add them to the CREATE TABLE above, ` +
     'or every route touching those columns will throw here and pass in production');
+});
+
+// ===== naming this server =====
+
+/*
+ * ⚠️ THE HALF THAT WAS NEVER BUILT.
+ *
+ * store.setNodeName() existed and was correct and had ZERO callers anywhere in the tree, so the
+ * name every peer displayed for a box was permanently os.hostname() as it read on first boot.
+ *
+ * ⚠️ AND IT IS TESTED HERE, NOT AGAINST THE HUB ROUTER, WHICH IS THE POINT OF THE FIX. This
+ * router mounts wherever a node takes part in a mesh; routes/mesh.js mounts only on a hub. A leaf's
+ * name is what its MSP's dashboard shows, so putting the setter on the hub router would have built
+ * a rename button that appears only for the operators who least need one.
+ */
+
+const put = (base, p, body) => fetch(`${base}${p}`, {
+  method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+});
+
+test('an operator can name this server, and every peer learns it from the report', async () => {
+  const db = freshDb();
+  const { base, close } = await serve(db, owner);
+  try {
+    const before = await fetch(`${base}/api/mesh/capabilities`).then((x) => x.json());
+    assert.ok(before.nodeName, 'a name is always present - it defaults to the hostname');
+    assert.equal(before.nodeNameIsDefault, true,
+      'a name nobody chose must not be presented back as a decision');
+
+    const r = await put(base, '/api/mesh/identity', { name: 'Kenosha North' });
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).name, 'Kenosha North');
+
+    const after = await fetch(`${base}/api/mesh/capabilities`).then((x) => x.json());
+    assert.equal(after.nodeName, 'Kenosha North');
+    assert.equal(after.nodeNameIsDefault, false, 'once chosen, it is a decision');
+
+    /*
+     * The property that makes the rename worth anything: it is what this node now SAYS it is, on
+     * the handshake and on every self-report. (That the report then lands on the parent's edge is
+     * mesh-mirror-store.test.js — this half is "does the new name leave the building".)
+     */
+    const store = require('../lib/mesh/store');
+    assert.equal(store.nodeName(db), 'Kenosha North',
+      'a rename that never reaches what the node declares reaches nobody');
+  } finally { await close(); }
+});
+
+test('⚠️ naming the instance is an instance-owner action', async () => {
+  // This name is displayed by every PEER, including another organisation's dashboard. It is not a
+  // per-workspace preference, and an ordinary user must not be able to relabel the whole server.
+  const db = freshDb();
+  const { base, close } = await serve(db, tech);
+  try {
+    const r = await put(base, '/api/mesh/identity', { name: 'not yours to name' });
+    assert.equal(r.status, 403);
+    assert.notEqual(db.prepare('SELECT node_name n FROM mesh_node').get()?.n, 'not yours to name');
+  } finally { await close(); }
+});
+
+test('⚠️ an empty name is refused rather than quietly absorbed', async () => {
+  /*
+   * setNodeName() returns false for a blank name and leaves the old one standing. Answering 200 to
+   * that would report a rename that did not happen, while every peer still shows the old name - and
+   * the operator would have no reason to look again.
+   */
+  const db = freshDb();
+  const { base, close } = await serve(db, owner);
+  try {
+    await put(base, '/api/mesh/identity', { name: 'Kenosha North' });
+    for (const body of [{ name: '' }, { name: '   ' }, {}]) {
+      const r = await put(base, '/api/mesh/identity', body);
+      assert.equal(r.status, 400, `${JSON.stringify(body)} must be refused`);
+      assert.equal(db.prepare('SELECT node_name n FROM mesh_node').get().n, 'Kenosha North',
+        'and the standing name is untouched');
+    }
+  } finally { await close(); }
+});
+
+test('⚠️ the name a node introduces itself with is the one it was given', async () => {
+  // The enrollment handshake sends nodeName. If a rename did not reach that field, a freshly
+  // renamed server would still introduce itself by its hostname on the next pairing - the original
+  // bug, surviving in the one place an operator is most likely to notice it.
+  const db = freshDb();
+  const { base, close } = await serve(db, owner);
+  try {
+    await put(base, '/api/mesh/identity', { name: 'Kenosha North' });
+    const store = require('../lib/mesh/store');
+    assert.equal(store.nodeName(db), 'Kenosha North');
+  } finally { await close(); }
 });

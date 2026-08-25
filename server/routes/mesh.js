@@ -1258,6 +1258,8 @@ module.exports = function meshRoutes(db, { requireAuth }) {
         transportDirection: e ? e.transport_direction : null,
         tlsVerify: e ? !!e.tls_verify : null,
         peerVersion: node ? node.node_version : null,
+        // What to print on the box in the diagram. Same precedence as the fleet rollup.
+        peerName: (node && node.node_name) || (e && e.peer_name) || null,
         lastSyncAt: e ? e.last_sync_at : null,
         // Surfaced per edge so an operator can see WHICH link is the problem rather than being told
         // the mesh is unwell.
@@ -1292,8 +1294,17 @@ module.exports = function meshRoutes(db, { requireAuth }) {
           let path = [];
           try { path = JSON.parse(r.path); } catch (e) { path = []; }
           const via = db.prepare('SELECT peer_node_id, peer_name FROM mesh_edges WHERE id = ?').get(r.via_edge_id);
+          const seen = db.prepare('SELECT node_name FROM mesh_mirror_nodes WHERE origin_node_id = ?')
+            .get(r.node_id);
           return {
             nodeId: r.node_id,
+            /*
+             * ⚠️ ONLY FROM THE MIRROR, never from mesh_node_paths. A path is ancestry — a list of
+             * ids attested by the nodes that relayed it — and a name is not a fact about a path.
+             * Reading it here keeps the naming and the routing on separate rails, so no amount of
+             * creative naming downstream can change where anything is delivered.
+             */
+            name: (seen && seen.node_name) || null,
             hops: r.hops,
             // Ordered nearest-first, so it reads the way an operator traces it: us -> B -> C.
             path: [...path].reverse(),

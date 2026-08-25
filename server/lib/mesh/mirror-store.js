@@ -16,14 +16,31 @@
 
 const { safeParseArray } = require('./store');
 
+/*
+ * A name off the wire, made safe to store.
+ *
+ * ⚠️ THIS IS ANOTHER OPERATOR'S TEXT. It is rendered on our dashboard next to real numbers, so it is
+ * capped at the same 60 characters the setter enforces locally (a name is a signpost, and one that
+ * can be a kilobyte is a layout attack), stripped of control characters that would let it forge line
+ * structure in a log or a table, and returned as null when nothing survives — so an empty-ish name
+ * falls through to COALESCE and leaves the previous one alone rather than blanking it.
+ */
+function cleanName(raw) {
+  if (typeof raw !== 'string') return null;
+  // eslint-disable-next-line no-control-regex
+  const clean = raw.replace(/[\u0000-\u001F\u007F]/g, ' ').trim().slice(0, 60).trim();
+  return clean || null;
+}
+
 /** Node self-report. */
 function upsertNodeHealth(db, { edgeId, originNodeId, body, originTs, receivedAt }) {
   db.prepare(`
     INSERT INTO mesh_mirror_nodes
-      (origin_node_id, via_edge_id, node_version, device_count, devices_online, origin_ts, received_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+      (origin_node_id, via_edge_id, node_name, node_version, device_count, devices_online, origin_ts, received_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(origin_node_id) DO UPDATE SET
       via_edge_id    = excluded.via_edge_id,
+      node_name      = COALESCE(excluded.node_name, mesh_mirror_nodes.node_name),
       node_version   = excluded.node_version,
       device_count   = excluded.device_count,
       devices_online = excluded.devices_online,
@@ -32,7 +49,7 @@ function upsertNodeHealth(db, { edgeId, originNodeId, body, originTs, receivedAt
       -- ⚠️ Hearing from a node CLEARS its stale mark. Without this a node that was disconnected and
       -- later re-paired would stay greyed out forever while cheerfully reporting.
       stale_since    = NULL
-  `).run(originNodeId, edgeId, body.version || null, body.device_count ?? null,
+  `).run(originNodeId, edgeId, cleanName(body.name), body.version || null, body.device_count ?? null,
          body.devices_online ?? null, originTs ?? null, receivedAt);
 
   /*
@@ -53,6 +70,24 @@ function upsertNodeHealth(db, { edgeId, originNodeId, body, originTs, receivedAt
   if (body.version) {
     db.prepare('UPDATE mesh_edges SET peer_version = ? WHERE id = ? AND peer_node_id = ?')
       .run(body.version, edgeId, originNodeId);
+  }
+
+  /*
+   * ⚠️ AND THE SAME FOR THE NAME, FOR THE SAME REASON.
+   *
+   * peer_name was written from the introduction at enrollment and never again, so renaming a server
+   * changed it everywhere except on the hubs that watch it — which is the only place anybody was
+   * going to read it. Refreshed here it stays true, and the identical `peer_node_id = ?` guard keeps
+   * a RELAYED grandchild's name off the direct child's edge.
+   *
+   * ⚠️ COALESCE ABOVE, AND A TRUTHY CHECK HERE, BECAUSE ABSENT IS NOT THE SAME AS BLANK. An older
+   * child that does not send a name at all must not blank the name we already have; only a node
+   * that actually says something gets to change what it is called.
+   */
+  const named = cleanName(body.name);
+  if (named) {
+    db.prepare('UPDATE mesh_edges SET peer_name = ? WHERE id = ? AND peer_node_id = ?')
+      .run(named, edgeId, originNodeId);
   }
 }
 

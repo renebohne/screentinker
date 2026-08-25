@@ -36,10 +36,14 @@ function freshDb() {
       transport_direction TEXT, retention_days INTEGER, tombstone_purge_days INTEGER,
       tls_verify INTEGER DEFAULT 1, peer_version TEXT, peer_min_version TEXT,
       token_hash TEXT, token_expires_at INTEGER, client_id TEXT,
-      created_at INTEGER, last_sync_at INTEGER, revoked_at INTEGER, peer_url TEXT);
+      created_at INTEGER, last_sync_at INTEGER, revoked_at INTEGER, peer_url TEXT,
+      peer_name TEXT);
     CREATE TABLE mesh_mirror_nodes (origin_node_id TEXT PRIMARY KEY, via_edge_id TEXT,
-      node_version TEXT, device_count INTEGER, devices_online INTEGER, origin_ts INTEGER,
-      received_at INTEGER, stale_since INTEGER);
+      node_version TEXT, node_name TEXT, device_count INTEGER, devices_online INTEGER,
+      origin_ts INTEGER, received_at INTEGER, stale_since INTEGER);
+    CREATE TABLE mesh_node (singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      node_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, self_device_id TEXT,
+      node_name TEXT, chose_name INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE mesh_mirror_devices (origin_node_id TEXT, device_id TEXT, name TEXT, status TEXT,
       last_heartbeat INTEGER, body TEXT DEFAULT '{}', origin_ts INTEGER, received_at INTEGER,
       deleted_at INTEGER, first_seen_at INTEGER, workspace_id TEXT,
@@ -62,6 +66,9 @@ const cleanup = (db) => { try { db.close(); } catch {} fs.rmSync(db._dir, { recu
 /** Stand the router up with a fixed user. */
 async function serve(db, user) {
   const app = express();
+  // The real server parses JSON globally before any router sees a request; without it here a PUT
+  // with a body arrives as `undefined` and every write route answers 400 for the wrong reason.
+  app.use(express.json());
   app.use('/api/mesh', meshRoutes(db, {
     requireAuth: (req, _res, next) => { req.user = user; next(); },
   }));

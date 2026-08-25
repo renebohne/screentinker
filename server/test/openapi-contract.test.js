@@ -16,6 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const yaml = require('js-yaml');
 const { PUBLIC_ROUTERS, JWT_ONLY_ROUTERS } = require('../config/api-surface');
+const { ALLOWED_COMMANDS } = require('../lib/device-command');
 
 const spec = yaml.load(fs.readFileSync(path.join(__dirname, '..', '..', 'docs', 'openapi.yaml'), 'utf8'));
 const METHODS = ['get', 'post', 'put', 'delete', 'patch', 'head'];
@@ -34,7 +35,16 @@ test('openapi: every operation x-required-scope matches the method-based enforce
       if (Array.isArray(op.security) && op.security.length === 0) continue; // unauthenticated render
       // Operational/fleet-affecting routes require 'full' even though they aren't GETs:
       // the group command route, and #109 PiP (push an arbitrary web overlay to devices).
-      const isFullScope = p.includes('command') || p === '/pip' || p.startsWith('/pip/');
+      /*
+       * ⚠️ /triggers IS HERE BECAUSE IT ENFORCES full, NOT BECAUSE IT FEELS IMPORTANT.
+       * routes/triggers.js guards every mutation with requireScope('full'): a trigger rewrites what
+       * a screen shows in response to an unauthenticated LAN packet, which is a fleet-affecting
+       * capability rather than ordinary content editing. Documenting it as 'write' would send an
+       * integrator to a guaranteed 403 while telling them their token was sufficient.
+       */
+      const isFullScope = p.includes('command') || p === '/pip' || p.startsWith('/pip/')
+        || p === '/triggers' || p.startsWith('/triggers/')
+        || p.endsWith('/trigger-config') || p.endsWith('/trigger-secret');
       const expected = (m === 'get' || m === 'head') ? 'read' : (isFullScope ? 'full' : 'write');
       if (op['x-required-scope'] !== expected) {
         mismatches.push(`${m.toUpperCase()} ${p}: spec='${op['x-required-scope']}' enforcement='${expected}'`);
@@ -102,4 +112,32 @@ test('openapi: the wifi_ssid permission sentinel is documented', () => {
   const ssid = spec.components.schemas.Device.properties.wifi_ssid;
   assert.ok(ssid, 'wifi_ssid is returned by GET /devices but is not documented');
   assert.match(ssid.description, /permission/, 'the sentinel value must be explained');
+});
+
+/*
+ * ⚠️ THE COMMAND ENUM HAD ALREADY DRIFTED, BY FIFTEEN COMMANDS.
+ *
+ * ALLOWED_COMMANDS grew three times - device-owner tooling (#161), system control (#160), and the
+ * Tier-2 set - and each time the spec kept the original six. An integrator reading the docs would
+ * conclude their token could reboot a screen but not set its volume, when in fact both were
+ * accepted; the failure is invisible because a stale enum documents a SUBSET, so nothing 400s and
+ * nothing looks wrong. It is exactly the drift this file exists to make impossible.
+ */
+test('openapi: the documented command set matches what the server accepts', () => {
+  const documented = {};
+  for (const [p, ops] of Object.entries(spec.paths || {})) {
+    if (!p.endsWith('/command')) continue;
+    const enumerated = ops.post?.requestBody?.content?.['application/json']
+      ?.schema?.properties?.type?.enum;
+    assert.ok(Array.isArray(enumerated), `${p} documents no command enum at all`);
+    documented[p] = enumerated;
+  }
+  assert.ok(Object.keys(documented).length >= 2,
+    'both the group and the single-device command routes should be documented');
+
+  for (const [p, enumerated] of Object.entries(documented)) {
+    // Sorted, because the ORDER is presentation and the SET is the contract.
+    assert.deepEqual([...enumerated].sort(), [...ALLOWED_COMMANDS].sort(),
+      `${p} documents a different command set than lib/device-command.js enforces`);
+  }
 });

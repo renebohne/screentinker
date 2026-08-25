@@ -128,6 +128,13 @@ function projectDevice(row, grantCategories) {
 function projectNodeHealth(node) {
   return {
     node_id: node.node_id,
+    /*
+     * ⚠️ UNGATED, like every other field here, and that is deliberate rather than an oversight.
+     * projectNodeHealth takes no grant because a node that reports at all has already disclosed
+     * that it exists and how many screens it runs; what it calls itself is strictly less than that.
+     * The grant governs what a node says about its DEVICES and WORKSPACES, not its own signpost.
+     */
+    name: node.name || null,
     version: node.version,
     device_count: node.device_count,
     devices_online: node.devices_online,
