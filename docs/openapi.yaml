@@ -1436,7 +1436,7 @@ paths:
         is resolved entirely on the device, so it still works with the WAN down.
       x-required-scope: read
       responses:
-        '200': { description: An array of triggers, each with its `assignments`. }
+        '200': { description: 'An array of triggers, each with its `assignments`.' }
     post:
       tags: [triggers]
       summary: Create a trigger
@@ -1456,7 +1456,7 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/TriggerInput' }
       responses:
-        '200': { description: The created trigger, with its assignments. }
+        '200': { description: 'The created trigger, with its assignments.' }
         '400':
           description: |
             Validation failed — an unusable token, an unpublished or empty target playlist, an item
@@ -1471,7 +1471,7 @@ paths:
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
-        '200': { description: The trigger, with its assignments. }
+        '200': { description: 'The trigger, with its assignments.' }
         '404': { description: No such trigger in this workspace. }
     put:
       tags: [triggers]
@@ -1524,7 +1524,7 @@ paths:
                 multicast_group: { type: [string, 'null'] }
       responses:
         '200': { description: The updated trigger configuration for that device. }
-        '400': { description: A port outside 1024-65534, or an unusable multicast group. }
+        '400': { description: 'A port outside 1024-65534, or an unusable multicast group.' }
         '404': { description: No such device in this workspace. }
 
   /devices/{id}/trigger-secret:
