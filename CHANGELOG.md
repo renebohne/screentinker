@@ -1,5 +1,91 @@
 # Changelog
 
+## 2.0.0-alpha5
+
+The mesh stops being read-only. A hub can now send content to a customer's server and ask its
+screens to do things — and every one of those is a *request* the receiving server decides on, using
+its own grant, its own disk and its own rules. Servers also finally have names.
+
+### Added — a hub can send content to a customer's server
+
+Content pushed from a hub is offered, not delivered: the receiving server checks the grant its own
+operator gave, the disk budget that grant carries, and the free space it actually has, then accepts
+or refuses and says which. Transfers resume where they left off rather than restarting, which is
+what makes a 400 MB video survive a site link that drops. Abandoned transfers are swept.
+
+One campaign can be sent to many customers at once. The batch re-checks visibility and permission
+per server, so it cannot reach a customer a single send could not.
+
+### Added — a hub can ask a customer's screens to reboot, reload or change settings
+
+Under a separate grant, with a deliberately smaller command set than a local operator has. The
+consent screen says "reboot, reload, change settings on screens", so `shell` and `install_apk` are
+not in it — a consent screen that overstates what it grants is worse than none.
+
+### Added — the customer can see what was done to them
+
+Every write a hub performs against a customer's server is recorded on that server, visible to its
+own operator, and cannot be edited or suppressed from above. An MSP relationship a customer cannot
+audit is not one they consented to.
+
+### Added — a relay tier
+
+A hub can pass content on to a server further down, but only when all three parties agree: the
+content's owner marked it relayable, the relay operator opted that client in, and the receiving
+server's own grant allows it. None of the three is substitutable for another. Telemetry travels the
+other way through a relay under the same rule.
+
+### Added — topology, and names for the servers in it
+
+The Servers view draws the estate as a tree: direct neighbours, servers further away, how many hops
+a screen's data crosses to reach you, and which server relayed it. Previously a three-tier mesh was
+indistinguishable from a two-tier one.
+
+And servers can be named. The name defaulted to the machine's hostname and there was no way to
+change it — the setter existed and had no callers, so a lab of three servers was three boxes all
+called `i9`. An instance owner can now rename theirs under **Servers → Rename**; the name reaches
+every peer on the next report. It travels upward only: nobody above can rename your server.
+
+### Added — remote diagnostics, under their own grant
+
+A hub can see why a customer's screen is unhealthy, not merely that it is. Error payloads are not
+forwarded wholesale: what travels is the message, the fingerprint, and a URL's origin and path
+without its query string.
+
+### Added — bulk selection and group actions on the dashboard
+
+Select several screens and act on them together (#296).
+
+### Added — playlist inheritance that forks instead of overwriting
+
+A per-device edit to a group's playlist now forks a copy rather than editing the playlist every
+other device in the group is using.
+
+### Fixed — a long list of things that only three real servers could find
+
+Among them: the write path could not be reached by any user on any install; a backslash walked
+through the path allowlist; the disk budget could be bypassed by omitting a field; a delete could
+take another customer's bytes with it; a mandated retry double-applied; a restore restarted every
+screen that already had the content; content ids were never translated between servers, so a push
+would have failed even once everything else was right.
+
+### Fixed — the API documented six commands and accepted twenty-two
+
+`POST /groups/{id}/command` had grown three times and the spec kept the original six, so an
+integrator would conclude their token could reboot a screen but not set its volume. A contract test
+now fails if the two ever disagree again.
+
+### Added — API documentation for things that already shipped
+
+`POST /devices/{id}/command` (commanding a single screen was reachable only over the dashboard
+socket) and the whole `/triggers` surface, which shipped in alpha4 undocumented.
+
+### Note on upgrading
+
+The mesh is off unless you turn it on: with `MESH_ACCEPT_ENROLLMENT` and `MESH_ALLOW_UPLINK` unset
+there are no mesh routes at all. As with alpha4, this is a pre-release version — Android players on
+the stable OTA channel will not take it.
+
 ## 2.0.0-alpha4
 
 Triggers become usable, and a QA pass found that the previous build could not switch them on.
