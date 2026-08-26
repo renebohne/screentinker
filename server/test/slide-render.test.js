@@ -218,3 +218,97 @@ test('cqw units require a sized container, and the stage RULE declares one', () 
   assert.match(stageRule, /container-type:\s*size/);
   assert.ok(!/font-size:[\d.]+px/.test(html), 'a px font-size would not scale across panels');
 });
+
+// ===== picture backgrounds =====
+
+test('a background photo renders under the elements, from a content reference', () => {
+  const html = S.renderSlideHtml({
+    template: { background: '#101820', background_content_id: 'c1', elements: [
+      { slot: 'h', kind: 'head', box: { x: 6, y: 40, w: 70 }, style: { size_cqw: 8 } }] },
+    fields: { h: 'Over a photo' },
+  }, { resolveImage: (id) => (id === 'c1' ? '/uploads/content/sky.jpg' : null) });
+
+  assert.match(html, /<div class="bg" style="background-image:url\(\/uploads\/content\/sky\.jpg\)">/);
+  // Order matters: the photo must be emitted BEFORE the elements or it paints over the words.
+  assert.ok(html.indexOf('class="bg"') < html.indexOf('Over a photo'), 'the photo is painted over the text');
+  assert.match(html, /background-size:cover/);
+});
+
+test('⚠️ the dim is a scrim BETWEEN the photo and the text, not a filter on either', () => {
+  /*
+   * The readability problem this exists for: an operator's photo is whatever they had, its contrast
+   * varies across the frame, and white text over a bright sky is unreadable from the far side of a
+   * lobby. Dimming the photo itself would need image editing; dimming the text would ruin it.
+   */
+  const html = S.renderSlideHtml({
+    template: { background_content_id: 'c1', background_dim: 0.45, elements: [
+      { slot: 'h', kind: 'head', box: {}, style: { size_cqw: 8 } }] },
+    fields: { h: 'Legible' },
+  }, { resolveImage: () => '/x.jpg' });
+
+  assert.match(html, /<div class="scrim" style="background:rgba\(0,0,0,0\.45\)">/);
+  assert.ok(html.indexOf('class="bg"') < html.indexOf('class="scrim"'), 'the scrim is under the photo');
+  assert.ok(html.indexOf('class="scrim"') < html.indexOf('Legible'), 'the scrim covers the text');
+});
+
+test('no dim means no scrim element at all', () => {
+  const html = S.renderSlideHtml({
+    template: { background_content_id: 'c1', background_dim: 0, elements: [] }, fields: {},
+  }, { resolveImage: () => '/x.jpg' });
+  assert.ok(!html.includes('class="scrim"'));
+});
+
+test('⚠️ a background photo that will not resolve leaves the COLOUR, not a broken layer', () => {
+  // The colour is what shows while the photo downloads and what stays if it never arrives — which
+  // on a signage panel with a slow link is the case that actually happens.
+  const html = S.renderSlideHtml({
+    template: { background: '#123456', background_content_id: 'gone', background_dim: 0.5, elements: [] },
+    fields: {},
+  }, { resolveImage: () => null });
+  assert.ok(!html.includes('class="bg"'), 'an empty background layer was emitted');
+  assert.ok(!html.includes('class="scrim"'), 'a scrim was emitted with nothing to dim');
+  assert.match(html, /background:#123456/);
+});
+
+test('⚠️ a background url cannot end the declaration and append its own', () => {
+  /*
+   * escapeHtml is not enough in a CSS context — it escapes the five HTML characters and none of
+   * `; ( ) '`. A mutation run caught this: the value below rendered as
+   * `url(https://x/a.jpg);position:fixed;width:300vw;height:300vh)`, i.e. real extra declarations
+   * on somebody else's element.
+   *
+   * ⚠️ And it is REACHABLE, which is why it is fixed rather than noted: resolveImage returns
+   * content.remote_url for remote content, and that is a URL an operator types.
+   */
+  for (const evil of [
+    'https://x/a.jpg);position:fixed;width:300vw;height:300vh',
+    "a.jpg');}body{display:none",
+    'a.jpg) , url(https://evil/track.png',
+  ]) {
+    const html = S.renderSlideHtml({
+      template: { background_content_id: 'c1', elements: [] }, fields: {},
+    }, { resolveImage: () => evil });
+    const rule = html.match(/<div class="bg"[^>]*>/)[0];
+    const style = rule.match(/style="([^"]*)"/)[1];
+    /*
+     * ⚠️ Asserted on the RAW declaration, not on a decoded copy. The first version of this test
+     * stripped %XX before looking and then flagged its own encoding as a leak — a browser parsing a
+     * style attribute does no such decoding, so %3b is an inert three-character token and not a
+     * statement separator.
+     */
+    assert.ok(!style.includes(';'), `a declaration separator survived: ${style}`);
+    assert.equal((style.match(/\)/g) || []).length, 1, `the url() was closed early: ${style}`);
+    assert.match(style, /^background-image:url\(/);
+  }
+
+  // ...and an ordinary URL still works, so the encoding is not simply destroying everything.
+  const ok = S.renderSlideHtml({ template: { background_content_id: 'c1', elements: [] }, fields: {} },
+    { resolveImage: () => '/uploads/content/a%20b.jpg' });
+  assert.match(ok, /url\(\/uploads\/content\/a%2520b\.jpg\)|url\(\/uploads\/content\/a%20b\.jpg\)/);
+});
+
+test('the dim is clamped, so it can never hide the slide outright', () => {
+  const n = S.normalizeSlide({ template: { background_content_id: 'c', background_dim: 40, elements: [] } });
+  assert.equal(n.backgroundDim, 1);
+  assert.equal(S.normalizeSlide({ template: { background_dim: -5, elements: [] } }).backgroundDim, 0);
+});

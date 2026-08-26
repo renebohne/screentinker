@@ -68,6 +68,47 @@ function fontStack(id) {
  * while authoring is what plays. Injected once; the dashboard's own CSP allows font-src 'self',
  * which this is.
  */
+/*
+ * ⚠️ A REAL STYLESHEET, because some of this cannot be done inline. A native <input type="color">
+ * renders as a plain white block until its ::-webkit-color-swatch pseudo-elements are styled, and a
+ * pseudo-element has no inline form. It looked like a broken text field in a 290px panel.
+ */
+function ensureEditorStyles() {
+  if (document.getElementById('stSlideEditor')) return;
+  const st = document.createElement('style');
+  st.id = 'stSlideEditor';
+  st.textContent = `
+    .sl-group { border-top:1px solid var(--border); margin-top:4px; padding-top:9px; }
+    .sl-group:first-child { border-top:0; margin-top:0; padding-top:0; }
+    .sl-legend { font-size:10.5px; letter-spacing:.08em; text-transform:uppercase;
+                 color:var(--text-muted); margin:0 0 7px; font-weight:600; }
+    .sl-row { display:grid; grid-template-columns:56px 1fr; align-items:center; gap:8px; margin-bottom:7px; }
+    .sl-row > label { font-size:12px; color:var(--text-muted); }
+    .sl-slide { display:flex; align-items:center; gap:7px; min-width:0; }
+    .sl-slide input[type=range] { flex:1; min-width:0; accent-color:var(--primary); }
+    .sl-num { width:56px; flex:0 0 auto; padding:3px 5px; text-align:right;
+              font-variant-numeric:tabular-nums; font-size:11.5px;
+              background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:3px; }
+    .sl-num::-webkit-outer-spin-button, .sl-num::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+    .sl-num { -moz-appearance:textfield; }
+    .sl-colour { width:100%; height:26px; padding:0; border:1px solid var(--border);
+                 border-radius:3px; background:none; cursor:pointer; }
+    .sl-colour::-webkit-color-swatch-wrapper { padding:2px; }
+    .sl-colour::-webkit-color-swatch { border:0; border-radius:2px; }
+    .sl-colour::-moz-color-swatch { border:0; border-radius:2px; }
+    .sl-note { font-size:11px; color:var(--text-muted); margin:2px 0 8px; line-height:1.35; }
+    .sl-link { background:none; border:0; padding:0; font-size:11.5px; color:var(--primary);
+               cursor:pointer; text-decoration:underline; }
+    .sl-seg { display:flex; }
+    .sl-seg button { flex:1; padding:4px 0; font-size:11.5px; cursor:pointer;
+                     background:var(--surface); color:var(--text); border:1px solid var(--border); }
+    .sl-seg button:first-child { border-radius:3px 0 0 3px; }
+    .sl-seg button:last-child { border-radius:0 3px 3px 0; }
+    .sl-seg button + button { border-left:0; }
+    .sl-seg button[aria-pressed="true"] { background:var(--primary); border-color:var(--primary); color:#fff; }`;
+  document.head.appendChild(st);
+}
+
 function ensureFontFaces() {
   if (document.getElementById('stSlideFonts') || !FONT_CATALOGUE.length) return;
   const st = document.createElement('style');
@@ -263,9 +304,32 @@ function paintAll(container) {
   renderProps(container); renderStatus(container);
 }
 
+/*
+ * A STRUCTURAL change — an element added, deleted, reordered, a slide added. Repaints everything,
+ * including the inspector, because the list of things to inspect just changed.
+ */
 function touch(container) {
   state.dirty = true;
   paintAll(container);
+}
+
+/*
+ * ⚠️ A VALUE change, and it must NOT rebuild the inspector.
+ *
+ * Every slider used to call touch(), which repaints the props panel — replacing the innerHTML of
+ * the very control being dragged. The slider you were holding was destroyed on the first input
+ * event, so it moved one step and stopped, and the colour picker closed the moment you picked a
+ * colour. The panel looked fine and was unusable.
+ *
+ * This updates what the value affects — the stage, the thumbnail, the header — and leaves the DOM
+ * the pointer is interacting with alone.
+ */
+function touchValue(container) {
+  state.dirty = true;
+  renderStage(container);
+  renderStrip(container);
+  renderStatus(container);
+  renderLayers(container);
 }
 
 /* ============================================================ stage */
@@ -290,6 +354,23 @@ function renderStage(container) {
   if (!s) { stage.innerHTML = ''; return; }
   stage.style.background = s.template.background || '#000';
   stage.innerHTML = '';
+  /*
+   * ⚠️ Built the same way the renderer builds it — photo, then scrim, then elements, all inside the
+   * stage. Previewing a background any other way (on the stage's own background-image, say) would
+   * look right here and composite differently on a screen.
+   */
+  const bgUrl = contentUrl(s.template.background_content_id);
+  if (bgUrl) {
+    const bg = document.createElement('div');
+    bg.style.cssText = `position:absolute;inset:0;background-size:cover;background-position:center;background-image:url(${esc(bgUrl)})`;
+    stage.appendChild(bg);
+    const d = s.template.background_dim == null ? 0 : s.template.background_dim;
+    if (d > 0) {
+      const scrim = document.createElement('div');
+      scrim.style.cssText = `position:absolute;inset:0;background:rgba(0,0,0,${d})`;
+      stage.appendChild(scrim);
+    }
+  }
   elementsOf(s).forEach((e, i) => {
     const d = document.createElement('div');
     d.style.cssText = `position:absolute;cursor:grab;${styleFor(e)}`;
@@ -313,6 +394,7 @@ function renderStage(container) {
     stage.appendChild(d);
   });
   ensureKeyframes();
+  ensureEditorStyles();
   const settle = settleOf(s);
   container.querySelector('#settleLabel').textContent =
     settle > s.dwell_sec
@@ -397,6 +479,8 @@ function renderStrip(container) {
     <button data-slide="${i}" style="flex:0 0 auto;width:124px;padding:0;cursor:pointer;text-align:left;
       border:1px solid ${i === state.si ? 'var(--primary)' : 'var(--border)'};border-radius:4px;overflow:hidden;background:var(--surface)">
       <div style="position:relative;aspect-ratio:16/9;container-type:size;background:${esc(s.template.background || '#000')}">
+        ${contentUrl(s.template.background_content_id) ? `<div style="position:absolute;inset:0;background-size:cover;background-position:center;background-image:url(${esc(contentUrl(s.template.background_content_id))})"></div>` : ''}
+        ${(s.template.background_dim || 0) > 0 && contentUrl(s.template.background_content_id) ? `<div style="position:absolute;inset:0;background:rgba(0,0,0,${s.template.background_dim})"></div>` : ''}
         ${elementsOf(s).map((e) => `<div style="position:absolute;overflow:hidden;${styleFor(e)}">${
           TEXT_KINDS.includes(e.kind) ? esc(s.fields[e.slot] || '') : ''}</div>`).join('')}
       </div>
@@ -450,14 +534,56 @@ function renderProps(container) {
   const s = slide(); if (!s) { host.innerHTML = ''; return; }
 
   if (state.tab === 'slide') {
+    const bgId = s.template.background_content_id || '';
+    const dim = s.template.background_dim == null ? 0 : s.template.background_dim;
     host.innerHTML =
-      row('Name', `<input class="input" id="sName" value="${esc(s.name)}">`)
-      + row('Background', `<input type="color" id="sBg" value="${esc(s.template.background || '#000000')}" style="width:100%;height:28px">`)
-      + row('Dwell', rng('sDwell', 1, 60, 1, s.dwell_sec, 's'))
-      + `<button class="btn btn-secondary btn-sm" id="delSlide">Delete this slide</button>`;
-    host.querySelector('#sName').oninput = (e) => { s.name = e.target.value; touch(container); };
-    host.querySelector('#sBg').oninput = (e) => { s.template.background = e.target.value; touch(container); };
-    host.querySelector('#sDwell').oninput = (e) => { s.dwell_sec = +e.target.value; touch(container); };
+      `<div class="sl-group"><p class="sl-legend">Slide</p>
+         <div class="sl-row"><label for="sName">Name</label>
+           <input class="input" id="sName" value="${esc(s.name)}"></div>
+         <div class="sl-row"><label for="sDwell">Dwell</label>
+           <div class="sl-slide"><input type="range" id="sDwell" min="1" max="60" step="1" value="${s.dwell_sec}">
+             <input type="number" class="sl-num" id="sDwelln" min="1" max="60" step="1" value="${s.dwell_sec}"></div></div>
+       </div>`
+      + `<div class="sl-group"><p class="sl-legend">Background</p>
+           <div class="sl-row"><label for="sBg">Colour</label>
+             <input type="color" class="sl-colour" id="sBg" value="${esc(s.template.background || '#000000')}"></div>
+           <div class="sl-row"><label for="sBgImg">Photo</label>
+             <select class="input" id="sBgImg"><option value="">— none —</option>${
+               (state.contentIndex || []).map((c) => `<option value="${esc(c.id)}" ${
+                 c.id === bgId ? 'selected' : ''}>${esc(c.filename)}</option>`).join('')}</select></div>
+           ${bgId ? `<div class="sl-row"><label for="sDim">Dim</label>
+             <div class="sl-slide"><input type="range" id="sDim" min="0" max="0.9" step="0.05" value="${dim}">
+               <input type="number" class="sl-num" id="sDimn" min="0" max="0.9" step="0.05" value="${dim.toFixed(2)}"></div></div>
+             <p class="sl-note">Darkens the photo behind the text. A bright photo and white words is
+                unreadable from across a room — this fixes that without editing the image.</p>` : ''}
+           <p class="sl-note">The colour shows while the photo loads, and stays if it never arrives.</p>
+         </div>`
+      + `<div class="sl-group"><button class="btn btn-secondary btn-sm" id="delSlide">Delete this slide</button></div>`;
+
+    host.querySelector('#sName').oninput = (e) => { s.name = e.target.value; touchValue(container); };
+    host.querySelector('#sBg').oninput = (e) => { s.template.background = e.target.value; touchValue(container); };
+    // Changing the photo shows or hides the Dim row, so this one genuinely rebuilds the panel.
+    host.querySelector('#sBgImg').onchange = (e) => {
+      s.template.background_content_id = e.target.value || null;
+      if (!e.target.value) delete s.template.background_dim;
+      else if (s.template.background_dim == null) s.template.background_dim = 0.35;
+      state.dirty = true; paintAll(container);
+    };
+    const bindSlidePair = (id, set, dec) => {
+      const r = host.querySelector(`#${id}`); const n = host.querySelector(`#${id}n`);
+      if (!r || !n) return;
+      const apply = (v, from) => {
+        const num = Number(v); if (!Number.isFinite(num)) return;
+        set(num);
+        if (from !== 'range') r.value = num;
+        if (from !== 'num') n.value = num.toFixed(dec);
+        touchValue(container);
+      };
+      r.oninput = (ev) => apply(ev.target.value, 'range');
+      n.onchange = (ev) => apply(ev.target.value, 'num');
+    };
+    bindSlidePair('sDwell', (v) => { s.dwell_sec = Math.round(v); }, 0);
+    bindSlidePair('sDim', (v) => { s.template.background_dim = v; }, 2);
     host.querySelector('#delSlide').onclick = () => {
       if (state.deck.doc.slides.length === 1) { showToast('A deck needs at least one slide', 'error'); return; }
       state.deck.doc.slides.splice(state.si, 1);
@@ -511,48 +637,106 @@ function renderProps(container) {
 
   if (state.tab === 'style') {
     const st = e.style;
-    host.innerHTML =
-      row('X', rng('pX', -20, 110, 1, e.box.x, '%'))
-      + row('Y', rng('pY', -20, 110, 1, e.box.y, '%'))
-      + row('Width', rng('pW', 1, 120, 1, e.box.w, '%'))
-      + (e.box.h != null ? row('Height', rng('pH', 0.2, 110, 0.2, e.box.h, '%')) : '')
-      + row('Colour', `<input type="color" id="pColor" value="${esc(st.color)}" style="width:100%;height:28px">`)
-      + (isText ? row('Font', `<select class="input" id="pFont">${FONT_CATALOGUE.map((f) =>
-          `<option value="${esc(f.id)}" ${f.id === resolveFont(st.font) ? 'selected' : ''}>${
-            esc(f.label)} — ${esc(f.role)}</option>`).join('')}</select>`) : '')
-      + (isText ? `<p style="font-size:11.5px;color:var(--text-muted);grid-column:1/-1;margin:0">${
-          esc((FONT_CATALOGUE.find((f) => f.id === resolveFont(st.font)) || {}).note || '')}</p>` : '')
-      + (isText ? `<div style="grid-column:1/-1;display:flex;gap:8px;align-items:center">
-           <button class="btn btn-secondary btn-sm" id="pUpFont">Upload a font…</button>
-           <input type="file" id="pFontFile" accept=".woff2,.woff,.ttf,.otf,font/*" hidden>
-           <span id="pFontMsg" style="font-size:11.5px;color:var(--text-muted)"></span></div>` : '')
-      + (isText ? row('Size', rng('pSize', 0.5, 30, 0.2, st.size_cqw)) : '')
-      + (isText && !isUploadedFont(st.font) ? row('Weight', `<select class="input" id="pWeight">${[400, 500, 600, 700, 800].map((w) =>
-          `<option value="${w}" ${w === st.weight ? 'selected' : ''}>${w}</option>`).join('')}</select>`) : '')
-      /*
-       * ⚠️ Hidden rather than disabled-and-ignored for an uploaded face. It ships as a single
-       * weight (slide-fonts.customFace), so offering 400–800 would be a control that silently
-       * does nothing — worse than not offering it.
-       */
-      + (isText && isUploadedFont(st.font)
-          ? `<p style="font-size:11.5px;color:var(--text-muted);grid-column:1/-1;margin:0">
-               An uploaded font has one weight. Upload the bold as its own font to use both.</p>` : '')
-      + (isText ? row('Align', `<select class="input" id="pAlign">${['left', 'center', 'right'].map((a) =>
-          `<option value="${a}" ${a === st.align ? 'selected' : ''}>${a}</option>`).join('')}</select>`) : '')
-      + ((e.kind === 'image' || e.kind === 'box') ? row('Corner', rng('pRad', 0, 12, 0.2, st.radius_cqw || 0)) : '')
-      + row('Opacity', rng('pOp', 0.1, 1, 0.05, st.opacity == null ? 1 : st.opacity))
-      + `<p style="font-size:11.5px;color:var(--text-muted);grid-column:1/-1;margin:0">
-           Sizes are relative to the screen, so a slide looks the same on a 720p panel and a 4K one.</p>`;
+    const grp = (legend, inner) => `<div class="sl-group"><p class="sl-legend">${legend}</p>${inner}</div>`;
+    /*
+     * ⚠️ A SLIDER *AND* A NUMBER BOX FOR EVERY VALUE. Dragging is for finding a look; typing is for
+     * matching one. A 290px panel gives a slider about 120px of travel, so "x = 64%" is roughly the
+     * best you can do by dragging — which is fine until two slides need the same margin and you
+     * cannot say so.
+     */
+    const pair = (label, id, min, max, step, v, unit) => `
+      <div class="sl-row"><label for="${id}">${label}</label>
+        <div class="sl-slide">
+          <input type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${v}">
+          <input type="number" class="sl-num" id="${id}n" min="${min}" max="${max}" step="${step}"
+                 value="${(+v).toFixed(step < 1 ? 2 : 0)}" aria-label="${label}${unit ? ' in ' + unit : ''}">
+        </div></div>`;
 
-    const bindRange = (id, set) => { const n = host.querySelector(`#${id}`); if (n) n.oninput = (ev) => { set(+ev.target.value); touch(container); }; };
-    bindRange('pX', (v) => { e.box.x = v; }); bindRange('pY', (v) => { e.box.y = v; });
-    bindRange('pW', (v) => { e.box.w = v; }); bindRange('pH', (v) => { e.box.h = v; });
-    bindRange('pSize', (v) => { st.size_cqw = v; }); bindRange('pRad', (v) => { st.radius_cqw = v; });
-    bindRange('pOp', (v) => { st.opacity = v; });
-    host.querySelector('#pColor').oninput = (ev) => { st.color = ev.target.value; touch(container); };
-    const bindSel = (id, set) => { const n = host.querySelector(`#${id}`); if (n) n.onchange = (ev) => { set(ev.target.value); touch(container); }; };
-    bindSel('pFont', (v) => { st.font = v; }); bindSel('pAlign', (v) => { st.align = v; });
-    bindSel('pWeight', (v) => { st.weight = +v; });
+    host.innerHTML =
+      grp('Position &amp; size',
+        pair('X', 'pX', -20, 110, 1, e.box.x, '%')
+        + pair('Y', 'pY', -20, 110, 1, e.box.y, '%')
+        + pair('Width', 'pW', 1, 120, 1, e.box.w, '%')
+        + (e.box.h != null ? pair('Height', 'pH', 0.2, 110, 0.2, e.box.h, '%') : ''))
+
+      + (isText ? grp('Type',
+          `<div class="sl-row"><label for="pFont">Font</label>
+             <select class="input" id="pFont">${FONT_CATALOGUE.map((f) =>
+               `<option value="${esc(f.id)}" ${f.id === resolveFont(st.font) ? 'selected' : ''}>${
+                 esc(f.label)} — ${esc(f.role)}</option>`).join('')}</select></div>`
+          + `<p class="sl-note">${esc((FONT_CATALOGUE.find((f) => f.id === resolveFont(st.font)) || {}).note || '')}
+               <button class="sl-link" id="pUpFont">Upload a font…</button>
+               <input type="file" id="pFontFile" accept=".woff2,.woff,.ttf,.otf,font/*" hidden>
+               <span id="pFontMsg"></span></p>`
+          + pair('Size', 'pSize', 0.5, 30, 0.2, st.size_cqw, '')
+          + (isUploadedFont(st.font)
+              // ⚠️ Hidden rather than shown-and-ignored: an uploaded face ships at one weight, so
+              // offering 400–800 would be a control that silently does nothing.
+              ? '<p class="sl-note">An uploaded font has one weight. Upload the bold separately to use both.</p>'
+              : `<div class="sl-row"><label>Weight</label><div class="sl-seg">${
+                  [400, 600, 700, 800].map((w) =>
+                    `<button data-w="${w}" aria-pressed="${w === st.weight}">${w}</button>`).join('')}</div></div>`)
+          + `<div class="sl-row"><label>Align</label><div class="sl-seg">${
+              ['left', 'center', 'right'].map((a) =>
+                `<button data-a="${a}" aria-pressed="${a === st.align}">${a[0].toUpperCase()}${a.slice(1)}</button>`).join('')}</div></div>`)
+        : '')
+
+      + grp('Appearance',
+        `<div class="sl-row"><label for="pColor">Colour</label>
+           <input type="color" class="sl-colour" id="pColor" value="${esc(st.color)}"></div>`
+        + ((e.kind === 'image' || e.kind === 'box') ? pair('Corner', 'pRad', 0, 12, 0.2, st.radius_cqw || 0, '') : '')
+        + pair('Opacity', 'pOp', 0.1, 1, 0.05, st.opacity == null ? 1 : st.opacity, ''))
+
+      + `<p class="sl-note" style="margin-top:9px">Sizes are relative to the screen, so a slide looks
+           the same on a 720p panel and a 4K one.</p>`;
+
+    /*
+     * ⚠️ touchValue, NEVER touch — and the two inputs update EACH OTHER rather than re-rendering.
+     * Rebuilding this panel on input destroys the control under the pointer, which is what made
+     * every slider here move exactly one step and stop.
+     */
+    const bindPair = (id, set, decimals) => {
+      const r = host.querySelector(`#${id}`);
+      const n = host.querySelector(`#${id}n`);
+      if (!r || !n) return;
+      const apply = (v, from) => {
+        const num = Number(v);
+        if (!Number.isFinite(num)) return;
+        set(num);
+        if (from !== 'range') r.value = num;
+        if (from !== 'num') n.value = num.toFixed(decimals);
+        touchValue(container);
+      };
+      r.oninput = (ev) => apply(ev.target.value, 'range');
+      // `change`, not `input`: on `input` a half-typed "-" or "1." reads as 0 and yanks the element
+      // across the stage while somebody is still typing.
+      n.onchange = (ev) => apply(ev.target.value, 'num');
+    };
+    bindPair('pX', (v) => { e.box.x = v; }, 0);
+    bindPair('pY', (v) => { e.box.y = v; }, 0);
+    bindPair('pW', (v) => { e.box.w = v; }, 0);
+    bindPair('pH', (v) => { e.box.h = v; }, 1);
+    bindPair('pSize', (v) => { st.size_cqw = v; }, 1);
+    bindPair('pRad', (v) => { st.radius_cqw = v; }, 1);
+    bindPair('pOp', (v) => { st.opacity = v; }, 2);
+
+    host.querySelector('#pColor').oninput = (ev) => { st.color = ev.target.value; touchValue(container); };
+
+    const pFont = host.querySelector('#pFont');
+    // The font note and the weight control both depend on which font is chosen, so this one DOES
+    // rebuild the panel — a select is not a control you are mid-drag on.
+    if (pFont) pFont.onchange = (ev) => { st.font = ev.target.value; state.dirty = true; paintAll(container); };
+
+    host.querySelectorAll('[data-w]').forEach((b) => b.onclick = () => {
+      st.weight = +b.dataset.w;
+      host.querySelectorAll('[data-w]').forEach((x) => x.setAttribute('aria-pressed', x === b));
+      touchValue(container);
+    });
+    host.querySelectorAll('[data-a]').forEach((b) => b.onclick = () => {
+      st.align = b.dataset.a;
+      host.querySelectorAll('[data-a]').forEach((x) => x.setAttribute('aria-pressed', x === b));
+      touchValue(container);
+    });
 
     const upBtn = host.querySelector('#pUpFont');
     if (upBtn) {
@@ -563,21 +747,19 @@ function renderProps(container) {
         const f = ev.target.files && ev.target.files[0];
         if (!f) return;
         msg.style.color = 'var(--text-muted)';
-        msg.textContent = 'Uploading…';
+        msg.textContent = ' Uploading…';
         try {
           const fd = new FormData();
           fd.append('font', f);
           fd.append('name', f.name.replace(/\.[a-z0-9]+$/i, ''));
           /*
-           * ⚠️ Asked for at the point of upload, not buried in settings. This server redistributes
-           * the file to every screen showing a slide in it, so "where did this come from" needs an
-           * answer somebody can give later. Not a legal control — the difference between an
-           * operator who can answer and one who cannot.
+           * ⚠️ Asked at the point of upload, not buried in settings. This server redistributes the
+           * file to every screen showing a slide in it, so "where did this come from" needs an
+           * answer somebody can give later.
            */
           const note = prompt(                               // eslint-disable-line no-alert
             'Where is this font licensed from?\n\nEvery screen showing a slide in it downloads the '
-            + 'file from this server, so it helps to record what you are allowed to do with it.',
-            '') || '';
+            + 'file from this server, so it helps to record what you are allowed to do with it.', '') || '';
           fd.append('licence_note', note.slice(0, 300));
           const added = await api.postForm('/fonts', fd);
           FONT_CATALOGUE = FONT_CATALOGUE.concat([added]);
@@ -586,9 +768,9 @@ function renderProps(container) {
           st.font = added.id;
           touch(container);
           showToast(`Added ${added.label}`, 'success');
-        } catch (e) {
+        } catch (err) {
           msg.style.color = 'var(--danger)';
-          msg.textContent = e.message || 'Could not upload that font';
+          msg.textContent = ` ${err.message || 'Could not upload that font'}`;
         }
       };
     }

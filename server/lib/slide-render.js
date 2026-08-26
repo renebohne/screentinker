@@ -102,6 +102,26 @@ function color(v, dflt) {
     ? v.trim() : dflt;
 }
 
+/*
+ * A URL, made safe to sit inside a CSS `url(...)`.
+ *
+ * ⚠️ escapeHtml IS NOT ENOUGH HERE, and a mutation run proved it. That function escapes the five
+ * HTML characters; none of `; ( ) '` are among them. So a value containing `);…` closes the url(),
+ * ends the declaration and appends declarations of its own — this rendered as
+ * `url(https://x/a.jpg);position:fixed;width:300vw;height:300vh)` on a real call.
+ *
+ * That value is REACHABLE: resolveImage returns content.remote_url for remote content, and a remote
+ * URL is typed by an operator. The damage is bounded — a style attribute is a declaration list, not
+ * a rule block, so `}` buys nothing and the slide is a sandboxed iframe either way — but it is
+ * somebody else's element being restyled by a string, which is not a thing to leave working.
+ *
+ * Percent-encoding is used rather than quoting because it is valid inside a URL, so a legitimate
+ * address survives it unchanged while the characters that matter to CSS cannot appear at all.
+ */
+function cssUrl(url) {
+  return String(url == null ? '' : url).replace(/[()'"\\;\s]/g, (c) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+}
+
 function escapeHtml(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -193,6 +213,21 @@ function normalizeSlide(raw) {
 
   return {
     background: color(tplIn.background, '#000000'),
+    /*
+     * ⚠️ A PHOTO BEHIND THE WORDS, AND A SCRIM IN FRONT OF IT.
+     *
+     * A background image without a way to darken it is a trap on a signage product: the photo an
+     * operator picks is whatever they had, its contrast varies across the frame, and white text
+     * over a bright sky is unreadable from the far side of a lobby. `background_dim` overlays black
+     * at that opacity BETWEEN the photo and the elements, so the text stays legible without anybody
+     * having to edit the image.
+     *
+     * The colour stays as well, and is not redundant: it is what shows while the photo is still
+     * downloading, and what shows for good if it never arrives.
+     */
+    backgroundContentId: typeof tplIn.background_content_id === 'string'
+      && tplIn.background_content_id.length <= 64 ? tplIn.background_content_id : null,
+    backgroundDim: clamp(tplIn.background_dim, 0, 1, 0),
     elements,
     fields,
   };
@@ -337,6 +372,19 @@ function renderSlideHtml(rawConfig, opts = {}) {
         : e.style.font))
       .filter(Boolean));
 
+  /*
+   * ⚠️ THE PHOTO IS A LAYER UNDER THE ELEMENTS, NOT A body background.
+   *
+   * `background-image` on body cannot carry a scrim without a second element anyway, and the
+   * elements are absolutely positioned inside .stage — putting the photo on body would leave it
+   * outside the container that `container-type:size` establishes, so it would not track the stage
+   * on a zoned layout.
+   */
+  const bgUrl = slide.backgroundContentId ? resolveImage(slide.backgroundContentId) : null;
+  const bgLayers = (bgUrl ? `<div class="bg" style="background-image:url(${escapeHtml(cssUrl(bgUrl))})"></div>` : '')
+    + (bgUrl && slide.backgroundDim > 0
+      ? `<div class="scrim" style="background:rgba(0,0,0,${slide.backgroundDim})"></div>` : '');
+
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
@@ -346,6 +394,9 @@ function renderSlideHtml(rawConfig, opts = {}) {
      resolve against the viewport and a slide inside a ZONE renders at full-screen sizes. */
   .stage { position:relative; width:100%; height:100%; container-type:size; }
   .e { position:absolute; }
+  /* Both fill the stage and sit beneath every element, in source order: photo, then scrim. */
+  .bg { position:absolute; inset:0; background-size:cover; background-position:center; }
+  .scrim { position:absolute; inset:0; }
   .t { line-height:1.08; white-space:pre-wrap; word-break:break-word; }
   .e img { width:100%; height:100%; object-fit:cover; display:block; }
   .ph { width:100%; height:100%; background:rgba(255,255,255,.06);
@@ -359,6 +410,7 @@ function renderSlideHtml(rawConfig, opts = {}) {
   @keyframes st-wipe    { from { clip-path:inset(0 100% 0 0) }           to { clip-path:inset(0 0 0 0) } }
 </style></head>
 <body><div class="stage">
+    ${bgLayers}
     ${body}
 </div></body></html>`;
 }
