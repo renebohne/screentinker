@@ -1,5 +1,59 @@
 # Changelog
 
+## 2.0.0-alpha7
+
+Two fixes and one addition, all found by using the thing.
+
+### Fixed — the slide Style panel could not be used
+
+Every slider called a repaint that replaced the panel's own HTML — including the
+control being dragged. The slider you were holding was destroyed on its first input
+event, so it moved one step and stopped, and the colour picker closed the moment you
+picked a colour. It looked fine and did nothing.
+
+Value changes now update the stage, the thumbnail and the header and leave the
+control under the pointer alone. Structural changes — adding, deleting, reordering —
+still repaint everything, because the list of things to inspect has changed.
+
+While it was open, the panel was rebuilt around that: every value has a slider **and**
+a number box, so you can drag to find a look or type to match one; controls are grouped
+into Position & size, Type and Appearance; weight and align are buttons rather than
+dropdowns; and the colour control is a real swatch instead of the plain white bar a
+native colour input renders as until its internals are styled.
+
+### Added — picture backgrounds
+
+A slide can sit on a photo from your content library, with a **Dim** control.
+
+The dim is not decoration. The photo is whatever you had, its contrast varies across
+the frame, and white text over a bright sky is unreadable from the far side of a lobby.
+It renders as a scrim between the photo and the words — dimming the photo needs image
+editing, dimming the text ruins it. The background colour stays underneath, because
+that is what shows while the photo downloads and what stays if it never arrives.
+
+### Fixed — a failed BrightSign server install now says why
+
+When a payload install failed part way, the log on the device simply stopped and the
+reason went to two places nobody can reach: a status listener bound to localhost, and
+an on-screen buffer that is gone at the next reboot. The one file a technician can
+fetch remotely contained everything except the cause.
+
+Worse, the tree replace is not atomic. Dying part way leaves a mixture — the version
+file already updated while half the modules are the old ones — and that tree boots,
+because a failed update is deliberately survivable. The box then reports a version
+nobody built.
+
+Failures are now written to that log, naming the file the install died on. A marker
+records that a replace was interrupted, and the next boot reinstalls rather than
+trusting the version number.
+
+⚠️ On an existing player this takes **two reboots** to arm: the launcher ships inside
+the payload, and a new launcher only runs from the boot after it is installed.
+
+### Note on upgrading
+
+Still a pre-release, so Android players on the stable channel will not take it.
+
 ## 2.0.0-alpha6
 
 Slides. A deck of PowerPoint-style pages you build in the dashboard, each element with its own
