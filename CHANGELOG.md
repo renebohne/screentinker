@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.0.0-alpha8
+
+### Fixed — the slide Motion tab could not be used
+
+Delay and duration each moved one step and stopped. Both sliders triggered a
+repaint that rewrote the panel they live in, destroying the control being dragged
+on its first input event — the same defect the Style tab had, still present here
+because that tab was fixed and this one was not touched.
+
+Motion now matches Style: grouped controls, a slider **and** a number box for each
+value, and the entrance replays when you let go of a slider rather than
+restarting on every pixel of the drag.
+
+### Fixed — typing a headline lost the caret after every character
+
+The text field on the Content tab had the same problem, in the place it shows
+worst: each keystroke rebuilt the panel, so the textarea was replaced and the
+cursor went with it. Typing past the first letter was not possible.
+
+### Added — the Motion tab shows timing against the slide
+
+Delay and duration mean nothing on their own: 0.8s is unnoticeable on a
+ten-second slide and most of a two-second one. The tab now draws where the
+selected element lands against the slide's dwell, with the other elements behind
+it for context, and says plainly when something will still be animating as the
+slide is replaced — which on a wall reads as text that never arrives.
+
+### Internal
+
+The rule those three bugs broke is now enforced rather than remembered: a guard
+fails the build if any live-value handler triggers a full repaint, if the two
+update paths are collapsed back together, if a typed number commits on every
+keystroke, or if the editor stops taking its fonts and animations from the
+server. It found the third instance itself.
+
 ## 2.0.0-alpha7
 
 Two fixes and one addition, all found by using the thing.
