@@ -1440,6 +1440,41 @@ const migrations = [
    * decided. It also has to survive the hostname changing, which is the thing that prompted the
    * name to be editable in the first place. */
   'ALTER TABLE mesh_node ADD COLUMN chose_name INTEGER NOT NULL DEFAULT 0',
+
+  /* Slide decks — the editable SOURCE a deck is authored as.
+   *
+   * ⚠️ NOT A CONTENT TYPE, and that is the whole design. Publishing a deck emits one slide WIDGET
+   * per page plus a PLAYLIST that orders them, so scheduling, groups, inheritance, the resolver and
+   * every player keep working on objects they already understand. This row is read by the editor and
+   * by nothing else; delete every deck and the screens carry on unaffected.
+   *
+   * `playlist_id` is where it publishes TO. Deliberately not a foreign key with a cascade: SQLite's
+   * foreign_keys pragma is OFF in this process (see the FK-orphan note elsewhere), so a declared
+   * CASCADE here would be inert and would read as a guarantee that does not exist. publishDeck
+   * re-checks the playlist still exists and still belongs to this workspace on every publish. */
+  `CREATE TABLE IF NOT EXISTS slide_decks (
+     id           TEXT PRIMARY KEY,
+     workspace_id TEXT,
+     user_id      TEXT,
+     name         TEXT NOT NULL,
+     doc          TEXT NOT NULL DEFAULT '{"slides":[]}',
+     playlist_id  TEXT,
+     created_at   INTEGER NOT NULL,
+     updated_at   INTEGER NOT NULL
+   )`,
+  'CREATE INDEX IF NOT EXISTS idx_slide_decks_ws ON slide_decks(workspace_id)',
+
+  /* What this deck published LAST time, as a JSON array of widget ids.
+   *
+   * ⚠️ THE PRIOR STATE CANNOT COME FROM THE DOCUMENT, and a test caught why. The first version
+   * worked out what to delete by diffing the incoming doc's widget_id fields against the new set —
+   * but widget_id lives inside a blob the caller supplies, so naming another workspace's widget id
+   * on a slide made publish DELETE that widget. It also could not see a slide removed before the
+   * save, because by then the document no longer mentioned it.
+   *
+   * This column is written only by publish, so it is the server's own record of what it created,
+   * and diffing against it is both correct and unforgeable. */
+  'ALTER TABLE slide_decks ADD COLUMN published_widget_ids TEXT NOT NULL DEFAULT \'[]\'',
 ];
 // Apply each ALTER idempotently. A "duplicate column name" / "already exists"
 // error means the column is already present (expected on a migrated DB) - benign.

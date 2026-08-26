@@ -1067,4 +1067,14 @@ router.post('/:id/assign', requirePlaylistWrite, (req, res) => {
 });
 
 module.exports = router;
+/*
+ * ⚠️ EXPORTED SO SLIDE DECKS PUBLISH THROUGH THE REAL PATH, not a second copy of it.
+ *
+ * Publishing carries the change-triggered guard that keeps an unchanged resolved list from
+ * restarting every screen showing this playlist (the #234 shape, estate-wide) and the pre-expansion
+ * structure capture that makes "discard" able to restore nesting. A deck that wrote
+ * published_snapshot itself would have neither, and would look correct until the first nested deck
+ * or the first no-op republish.
+ */
+module.exports.publishPlaylist = publishPlaylist;
 module.exports.publishPlaylist = publishPlaylist; // #73: shared with the agency auto-publish path

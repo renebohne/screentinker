@@ -148,6 +148,19 @@ test('partition: the public token surface is exactly the reviewed set (snapshot 
     // ⚠️ The FIRE path is NOT here — it is device-local, because a trigger that needs this server is
     // a trigger that fails with the WAN down. See docs/triggers-design.md.
     '/api/triggers',
+    /*
+     * Slide decks, added deliberately. The deck is an AUTHORING document — it publishes to a
+     * playlist of slide widgets and then takes no part in playback — and both of those objects are
+     * already on this door, so keeping the thing that writes them off it would be a limitation with
+     * no principle behind it: an integrator generating decks from their own data is the obvious use.
+     *
+     * ⚠️ What is worth knowing at review time is that PUBLISH creates widgets and playlist items,
+     * so a `write` token here can add objects to the library. That is the same reach a write token
+     * already has against /api/widgets and /api/playlists directly, and every route is
+     * workspace-scoped through accessContext exactly as its siblings are — a deck cannot publish
+     * into, or read from, a workspace the caller is not a member of.
+     */
+    '/api/slide-decks',
   ].sort();
   assert.deepEqual(PUBLIC_ROUTERS.map(r => r.path).sort(), EXPECTED_PUBLIC);
 });
