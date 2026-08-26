@@ -520,14 +520,18 @@ function renderLayers(container) {
   }));
 }
 
+/*
+ * The Content tab's two rows. The Style, Slide and Motion tabs build their own with the .sl-*
+ * classes because they need slider/number pairs and grouping; this stays for the two plain fields
+ * that do not.
+ *
+ * ⚠️ The `rng()` helper that used to live here is gone. It produced a slider with a static text
+ * readout and every caller wired it to touch(), which repaints the panel and destroys the control
+ * mid-drag — the bug that made Style and Motion unusable. Leaving it around would be leaving the
+ * shape of that bug lying next to the code that replaced it.
+ */
 const row = (label, inner) =>
-  `<div style="display:grid;grid-template-columns:74px 1fr;align-items:center;gap:9px">
-     <label style="font-size:12px;color:var(--text-muted)">${label}</label>${inner}</div>`;
-const rng = (id, min, max, step, v, unit = '') =>
-  `<div style="display:flex;align-items:center;gap:8px"><input type="range" id="${id}" min="${min}" max="${max}"
-     step="${step}" value="${v}" style="flex:1;min-width:0">
-     <span style="font-size:11.5px;min-width:44px;text-align:right;font-variant-numeric:tabular-nums">${
-       (+v).toFixed(step < 0.1 ? 2 : 1)}${unit}</span></div>`;
+  `<div class="sl-row"><label>${label}</label>${inner}</div>`;
 
 function renderProps(container) {
   const host = container.querySelector('#props');
@@ -612,12 +616,22 @@ function renderProps(container) {
            <button class="btn btn-secondary btn-sm" id="pDel">Delete</button></div>`;
     if (host.querySelector('#pText')) {
       host.querySelector('#pText').oninput = (ev) => {
-        // ⚠️ One string, into fields. The template is not touched — that is the whole design.
-        s.fields[e.slot] = ev.target.value; touch(container);
+        /*
+         * ⚠️ One string, into fields. The template is not touched — that is the whole design.
+         *
+         * ⚠️ AND touchValue, NOT touch. This fired on every keystroke and called the full repaint,
+         * which rewrites the panel's innerHTML — so the textarea was destroyed and recreated after
+         * each character and the caret went with it. Typing a headline was impossible past the
+         * first letter. Same defect as the Style and Motion sliders, in the one control where it is
+         * most obvious and was somehow the last to be found; a source guard caught it, not use.
+         */
+        s.fields[e.slot] = ev.target.value; touchValue(container);
       };
     }
     if (host.querySelector('#pImg')) {
-      host.querySelector('#pImg').onchange = (ev) => { e.content_id = ev.target.value || null; touch(container); };
+      // A select is not a control you are mid-drag on, and swapping the photo changes nothing else
+      // in this panel — but there is no reason to rebuild it either.
+      host.querySelector('#pImg').onchange = (ev) => { e.content_id = ev.target.value || null; touchValue(container); };
     }
     host.querySelector('#pFwd').onclick = () => {
       const arr = s.template.elements;
@@ -777,26 +791,135 @@ function renderProps(container) {
     return;
   }
 
-  // motion
+  // ---------------------------------------------------------------- motion
   const m = e.motion || { animation: 'none', delay: 0, duration: 0.5, easing: 'ease-out' };
+  const grpM = (legend, inner) => `<div class="sl-group"><p class="sl-legend">${legend}</p>${inner}</div>`;
+  const pairM = (label, id, min, max, step, v, dec) => `
+    <div class="sl-row"><label for="${id}">${label}</label>
+      <div class="sl-slide">
+        <input type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${v}">
+        <input type="number" class="sl-num" id="${id}n" min="${min}" max="${max}" step="${step}"
+               value="${(+v).toFixed(dec)}">
+      </div></div>`;
+
+  const none = m.animation === 'none' || !e.motion;
+
   host.innerHTML =
-    row('Entrance', `<select class="input" id="mAnim">${Object.entries(ANIMS).map(([k, v]) =>
-      `<option value="${k}" ${k === m.animation ? 'selected' : ''}>${v}</option>`).join('')}</select>`)
-    + row('Delay', rng('mDelay', 0, 10, 0.05, m.delay, 's'))
-    + row('Duration', rng('mDur', 0.1, 5, 0.05, m.duration, 's'))
-    + row('Easing', `<select class="input" id="mEase">${Object.entries(EASES).map(([k, v]) =>
-      `<option value="${k}" ${k === m.easing ? 'selected' : ''}>${v}</option>`).join('')}</select>`)
-    + `<p style="font-size:11.5px;color:var(--text-muted);grid-column:1/-1;margin:0">
-         Everything has to finish before the slide is replaced — watch the time under the stage.</p>`;
+    grpM('Entrance',
+      `<div class="sl-row"><label for="mAnim">Effect</label>
+         <select class="input" id="mAnim">${Object.entries(ANIMS).map(([k, v]) =>
+           `<option value="${k}" ${k === m.animation ? 'selected' : ''}>${v}</option>`).join('')}</select></div>`
+      + (none
+        ? '<p class="sl-note">This element is simply there from the first frame.</p>'
+        : pairM('Delay', 'mDelay', 0, 10, 0.05, m.delay, 2)
+          + pairM('Duration', 'mDur', 0.1, 5, 0.05, m.duration, 2)
+          + `<div class="sl-row"><label for="mEase">Easing</label>
+               <select class="input" id="mEase">${Object.entries(EASES).map(([k, v]) =>
+                 `<option value="${k}" ${k === m.easing ? 'selected' : ''}>${v}</option>`).join('')}</select></div>`))
+    + grpM('Timing', `<div id="mTimeline"></div>`);
+
+  renderMiniTimeline(container);
+
   host.querySelector('#mAnim').onchange = (ev) => {
+    // Structural for this panel: choosing "None" removes the delay, duration and easing rows.
     e.motion = ev.target.value === 'none' ? null : { ...m, animation: ev.target.value };
-    touch(container); play();
+    state.dirty = true; paintAll(container); play();
   };
-  const bindM = (id, key) => { const n = host.querySelector(`#${id}`); if (n) n.oninput = (ev) => {
-    if (!e.motion) e.motion = { ...m }; e.motion[key] = +ev.target.value; touch(container); }; };
-  bindM('mDelay', 'delay'); bindM('mDur', 'duration');
-  host.querySelector('#mEase').onchange = (ev) => { if (!e.motion) e.motion = { ...m }; e.motion.easing = ev.target.value; touch(container); };
+
+  /*
+   * ⚠️ touchValue, and the timeline redrawn by hand — NOT a panel rebuild.
+   *
+   * This tab had exactly the bug the Style tab had: every slider called touch(), which repaints the
+   * props panel and replaces the innerHTML of the control being dragged. The slider died on its
+   * first input event, so delay and duration each moved one step and stopped.
+   *
+   * Only the timeline needs redrawing as a value changes, and it is a separate element, so it can
+   * be replaced without touching the inputs.
+   */
+  const bindMotion = (id, key, dec) => {
+    const r = host.querySelector(`#${id}`);
+    const n = host.querySelector(`#${id}n`);
+    if (!r || !n) return;
+    const apply = (v, from) => {
+      const num = Number(v);
+      if (!Number.isFinite(num)) return;
+      if (!e.motion) e.motion = { ...m };
+      e.motion[key] = num;
+      if (from !== 'range') r.value = num;
+      if (from !== 'num') n.value = num.toFixed(dec);
+      touchValue(container);
+      renderMiniTimeline(container);
+    };
+    r.oninput = (ev) => apply(ev.target.value, 'range');
+    n.onchange = (ev) => apply(ev.target.value, 'num');
+    // ⚠️ `change` fires on RELEASE, so the entrance replays once you have finished choosing rather
+    // than restarting on every pixel of the drag.
+    r.onchange = () => play();
+  };
+  bindMotion('mDelay', 'delay', 2);
+  bindMotion('mDur', 'duration', 2);
+
+  const mEase = host.querySelector('#mEase');
+  if (mEase) mEase.onchange = (ev) => {
+    if (!e.motion) e.motion = { ...m };
+    e.motion.easing = ev.target.value;
+    touchValue(container); play();
+  };
 }
+
+/*
+ * Where this element's entrance sits against the slide's dwell, with the others behind it.
+ *
+ * ⚠️ THE ONE THING A MOTION PANEL HAS TO SHOW. Delay and duration are meaningless in isolation: a
+ * 0.8s delay is fine on a ten-second slide and is most of a two-second one, and an element that
+ * settles after the slide is replaced reads on a wall as text that never arrives. The numbers alone
+ * cannot tell you that; the picture can.
+ *
+ * The other elements are drawn too, because motion is choreography — you are choosing when THIS
+ * element lands relative to the ones around it, not in a vacuum.
+ */
+function renderMiniTimeline(container) {
+  const host = container.querySelector('#mTimeline');
+  const s = slide();
+  if (!host || !s) return;
+
+  const els = elementsOf(s);
+  const endOf = (x) => (x.motion && x.motion.animation !== 'none'
+    ? x.motion.delay + x.motion.duration : 0);
+  const settle = els.reduce((mx, x) => Math.max(mx, endOf(x)), 0);
+  const span = Math.max(s.dwell_sec, settle) * 1.02 || 1;
+  const dwellPct = (s.dwell_sec / span) * 100;
+
+  const rows = els.map((x, i) => {
+    const sel = i === state.ei;
+    const anim = x.motion && x.motion.animation !== 'none';
+    const left = anim ? (x.motion.delay / span) * 100 : 0;
+    const width = anim ? Math.max((x.motion.duration / span) * 100, 1) : 100;
+    const over = anim && endOf(x) > s.dwell_sec + 0.001;
+    const bg = !anim ? 'var(--border)' : over ? 'var(--danger)' : (sel ? 'var(--primary)' : 'var(--text-muted)');
+    return `<div style="position:relative;height:${sel ? 11 : 7}px;margin-bottom:3px;
+              background:var(--bg-hover,rgba(127,127,127,.14));border-radius:2px">
+        <div style="position:absolute;top:0;bottom:0;left:${left}%;width:${width}%;
+             background:${bg};border-radius:2px;opacity:${anim ? (sel ? 1 : .55) : .35}"></div>
+        ${dwellPct < 99.5 ? `<div style="position:absolute;top:-2px;bottom:-2px;left:${dwellPct}%;
+             width:2px;background:var(--danger)"></div>` : ''}
+      </div>`;
+  }).join('');
+
+  const mine = els[state.ei];
+  const mineEnd = mine ? endOf(mine) : 0;
+  const overruns = els.filter((x) => endOf(x) > s.dwell_sec + 0.001).length;
+
+  host.innerHTML = rows + `<p class="sl-note" style="margin-top:6px">${
+    mine && mine.motion && mine.motion.animation !== 'none'
+      ? `This element lands at <strong>${mineEnd.toFixed(2)}s</strong>. `
+      : 'This element is present from the start. '}
+    The slide is replaced at <strong>${s.dwell_sec}s</strong>${
+      settle > 0 ? `, everything settled by <strong>${settle.toFixed(2)}s</strong>` : ''}.${
+      overruns ? ` <span style="color:var(--danger)">${overruns} never finish${
+        overruns > 1 ? '' : 'es'} — raise the dwell on the Slide tab.</span>` : ''}</p>`;
+}
+
 
 /* ============================================================ status, save, publish */
 
