@@ -8,6 +8,7 @@ import * as billing from './views/billing.js';
 import * as layoutEditor from './views/layout-editor.js';
 import * as schedule from './views/schedule.js';
 import * as widgets from './views/widgets.js';
+import * as slides from './views/slides.js';
 import * as videoWall from './views/video-wall.js';
 import * as reports from './views/reports.js';
 import * as servers from './views/servers.js';
@@ -217,6 +218,7 @@ const NAV_LABEL_KEYS = {
   playlists: 'nav.playlists',
   layouts: 'nav.layouts',
   widgets: 'nav.widgets',
+  slides: 'nav.slides',
   schedule: 'nav.schedule',
   walls: 'nav.walls',
   reports: 'nav.reports',
@@ -535,6 +537,7 @@ function route() {
     else if ((hash === '#/playlists' || hash.startsWith('#/playlists/')) && link.dataset.view === 'playlists') link.classList.add('active');
     else if (hash === '#/schedule' && link.dataset.view === 'schedule') link.classList.add('active');
     else if (hash === '#/widgets' && link.dataset.view === 'widgets') link.classList.add('active');
+    else if (hash === '#/slides' && link.dataset.view === 'slides') link.classList.add('active');
     else if ((hash.startsWith('#/wall') || hash === '#/walls') && link.dataset.view === 'walls') link.classList.add('active');
     else if (hash === '#/reports' && link.dataset.view === 'reports') link.classList.add('active');
     else if (hash === '#/activity' && link.dataset.view === 'activity') link.classList.add('active');
@@ -564,6 +567,9 @@ function route() {
   } else if (hash === '#/schedule') {
     currentView = schedule;
     schedule.render(app);
+  } else if (hash === '#/slides') {
+    currentView = slides;
+    slides.render(app);
   } else if (hash === '#/widgets') {
     currentView = widgets;
     widgets.render(app);

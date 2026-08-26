@@ -69,6 +69,7 @@ export default {
   'nav.playlists': "Listes de lecture",
   'nav.layouts': "Mises en page",
   'nav.widgets': "Widgets",
+  'nav.slides': "Diapositives",
   'nav.schedule': "Calendrier",
   'nav.walls': "Murs vidéo",
   'nav.reports': "Rapports",

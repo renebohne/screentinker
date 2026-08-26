@@ -7,7 +7,7 @@ export default {
   'nav.members': '成员', 'nav.displays': '显示屏', 'nav.content': '内容', 'nav.playlists': '播放列表',
   'dashboard.select_all': '全选', 'dashboard.invert_selection': '反选', 'dashboard.add_to_group': '加入分组', 'dashboard.create_group_and_add': '创建并加入分组', 'dashboard.remove_from_group': '移出分组', 'dashboard.cancel_selection': '取消', 'dashboard.create_wall': '创建视频墙',
   'dashboard.selection_count_other': '已选中 {n} 台显示屏',
-  'nav.layouts': '布局', 'nav.widgets': '小组件', 'nav.schedule': '排程', 'nav.walls': '视频墙',
+  'nav.layouts': '布局', 'nav.widgets': '小组件', 'nav.slides': '幻灯片', 'nav.schedule': '排程', 'nav.walls': '视频墙',
   'nav.reports': '报告', 'nav.servers': '服务器', 'nav.kiosk': '信息亭', 'nav.designer': '设计器', 'nav.activity': '活动记录',
   'nav.teams': '团队', 'nav.help': '帮助', 'nav.settings': '设置', 'nav.subscription': '订阅', 'nav.admin': '管理',
   'common.close': '关闭', 'common.save': '保存', 'common.cancel': '取消', 'common.delete': '删除',

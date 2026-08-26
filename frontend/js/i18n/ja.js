@@ -69,6 +69,7 @@ export default {
   'nav.playlists': "プレイリスト",
   'nav.layouts': "レイアウト",
   'nav.widgets': "ウィジェット",
+  'nav.slides': "スライド",
   'nav.schedule': "スケジュール",
   'nav.walls': "ビデオウォール",
   'nav.reports': "レポート",

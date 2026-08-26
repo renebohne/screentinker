@@ -90,6 +90,7 @@ export default {
   'nav.playlists': 'Playlists',
   'nav.layouts': 'Layouts',
   'nav.widgets': 'Widgets',
+  'nav.slides': 'Slides',
   'nav.schedule': 'Schedule',
   'nav.walls': 'Video Walls',
   'nav.reports': 'Reports',

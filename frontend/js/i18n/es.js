@@ -25,6 +25,7 @@ export default {
   'nav.playlists': 'Listas de reproducción',
   'nav.layouts': 'Diseños',
   'nav.widgets': 'Widgets',
+  'nav.slides': 'Diapositivas',
   'nav.schedule': 'Horario',
   'nav.walls': 'Muros de video',
   'nav.reports': 'Informes',
