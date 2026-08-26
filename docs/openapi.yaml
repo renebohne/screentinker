@@ -84,6 +84,87 @@ components:
         error:
           type: string
 
+    DeckDocument:
+      type: object
+      description: |
+        The editable source for a deck. Each slide carries a **template** (the view: element
+        geometry, style and motion, each with a `slot` name) and **fields** (the record: `{slot:
+        value}`). They are joined when the slide is rendered, which is what makes it possible to
+        come back and change a headline without rebuilding the layout.
+      properties:
+        slides:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                description: 'Unique within the deck — it is how a republish finds the widget it already made.'
+              name: { type: string, maxLength: 120 }
+              dwell_sec:
+                type: integer
+                minimum: 1
+                maximum: 3600
+                default: 10
+                description: |
+                  How long the slide stays up. A slide's motion has to finish inside this; if it
+                  does not, save and publish both return a `motion-outlives-dwell` warning naming
+                  the slide. Warned rather than refused.
+              widget_id:
+                type: [string, 'null']
+                description: 'Assigned by publish. Present so a republish updates rather than duplicates.'
+              template:
+                type: object
+                properties:
+                  background: { type: string, description: 'Hex colour. Anything else falls back to black.' }
+                  elements:
+                    type: array
+                    maxItems: 40
+                    items:
+                      type: object
+                      properties:
+                        slot: { type: string, description: 'The key this element reads from fields.' }
+                        kind: { type: string, enum: [head, body, stat, image, rule, box] }
+                        box:
+                          type: object
+                          properties:
+                            x: { type: number }
+                            y: { type: number }
+                            w: { type: number }
+                            h: { type: number }
+                        content_id: { type: [string, 'null'], description: 'For an image — a content row in this workspace.' }
+                        style:
+                          type: object
+                          properties:
+                            color: { type: string, description: 'Hex. Anything else falls back to white.' }
+                            font:
+                              type: string
+                              description: |
+                                A bundled family (`inter`, `archivo`, `oswald`, `bitter`,
+                                `jetbrains-mono`), an uploaded one (`u:<uuid>`), or one of the
+                                legacy generics (`sans`, `serif`, `mono`, `condensed`) which still
+                                resolve.
+                            size_cqw:
+                              type: number
+                              description: 'Relative to the screen, never pixels — so a slide scales from 720p to 4K.'
+                            weight: { type: integer, minimum: 100, maximum: 900 }
+                            align: { type: string, enum: [left, center, right] }
+                            opacity: { type: number, minimum: 0, maximum: 1 }
+                            radius_cqw: { type: number }
+                        motion:
+                          type: [object, 'null']
+                          description: 'Null means the element is simply present from the first frame.'
+                          properties:
+                            animation: { type: string, enum: [fade, slideL, slideR, slideU, slideD, zoom, wipe] }
+                            delay: { type: number, minimum: 0, maximum: 30 }
+                            duration: { type: number, minimum: 0.05, maximum: 10 }
+                            easing: { type: string, enum: [ease-out, ease-in, ease-in-out, linear, soft] }
+              fields:
+                type: object
+                description: 'The values, keyed by slot. Editing one of these does not touch the template.'
+                additionalProperties: { type: string }
+
     TriggerInput:
       type: object
       required: [name, match_token, target_ref, mode]
@@ -1424,6 +1505,164 @@ paths:
             `capability` naming the missing one.
         '404': { description: No such device in this workspace. }
         '503': { description: The realtime layer is not available. }
+
+  # --------------------------------------------------------------- slide decks
+  /slide-decks:
+    get:
+      tags: [slides]
+      summary: List the slide decks in this workspace
+      description: |
+        A deck is the editable source document for a set of slides. Publishing one emits a playlist
+        of slide widgets — so decks take no part in playback, and everything downstream
+        (scheduling, groups, device assignment) works on the playlist, not on this.
+      x-required-scope: read
+      responses:
+        '200': { description: 'An array of decks with slide counts and total duration.' }
+    post:
+      tags: [slides]
+      summary: Create a deck
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 120 }
+                doc: { $ref: '#/components/schemas/DeckDocument' }
+      responses:
+        '201': { description: 'The created deck, with any publish warnings.' }
+        '400': { description: 'A deck needs a name.' }
+
+  /slide-decks/{id}:
+    get:
+      tags: [slides]
+      summary: Fetch a deck document
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: 'The deck, its document, and its warnings.' }
+        '404': { description: 'No such deck in this workspace.' }
+    put:
+      tags: [slides]
+      summary: Save a deck document
+      description: |
+        Saving is **not** publishing — nothing reaches a screen until you publish. Warnings come
+        back on every save so an editor can show a problem while somebody works, rather than
+        refusing the change.
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 120 }
+                doc: { $ref: '#/components/schemas/DeckDocument' }
+      responses:
+        '200': { description: 'The saved deck.' }
+        '404': { description: 'No such deck in this workspace.' }
+    delete:
+      tags: [slides]
+      summary: Delete a deck document
+      description: |
+        **The published playlist and its widgets are kept.** By the time a deck has been published
+        what is on the wall is a playlist, possibly assigned to devices or on a schedule — deleting
+        the document must not take those down with it. Pass `with_published=1` to remove them too,
+        which still refuses to delete a widget another playlist is playing.
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: with_published
+          in: query
+          required: false
+          schema: { type: string, enum: ['1', 'true'] }
+          description: 'Also remove the slide widgets this deck published.'
+      responses:
+        '200': { description: '{ success, removed_widgets, playlist_kept }.' }
+        '404': { description: 'No such deck in this workspace.' }
+
+  /slide-decks/{id}/publish:
+    post:
+      tags: [slides]
+      summary: Publish a deck to a playlist of slide widgets
+      description: |
+        Creates or updates one slide widget per page and a playlist that orders them, then publishes
+        that playlist. Republishing updates the same widgets rather than making new ones, and a
+        slide removed from the deck has its widget deleted — unless another playlist still plays it,
+        in which case it is only unlinked.
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: 'The deck, plus published.playlist_id, published.slides and published.removed.' }
+        '404': { description: 'No such deck in this workspace.' }
+        '500': { description: 'The deck could not be published.' }
+
+  # -------------------------------------------------------------- slide fonts
+  /fonts:
+    get:
+      tags: [slides]
+      summary: List the fonts uploaded to this workspace
+      description: |
+        Fonts an operator uploaded, for setting slides in a brand face. The five bundled families
+        are not listed here — they ship with the server and need no upload.
+      x-required-scope: read
+      responses:
+        '200': { description: 'An array of uploaded fonts.' }
+    post:
+      tags: [slides]
+      summary: Upload a font
+      description: |
+        Multipart, field name `font`. Accepts `.woff2`, `.woff`, `.ttf` and `.otf`, identified by
+        magic bytes rather than by filename, up to 12 MB.
+
+        The response `id` is what a slide stores in its element style, in the form `u:<uuid>`.
+
+        Two things worth knowing before uploading. **This server redistributes the file**: every
+        screen showing a slide in that face downloads it, from a URL that cannot be authenticated
+        (the slide renders in an opaque-origin iframe carrying no credentials) — so it is
+        unguessable rather than secret, the same property uploaded images already have. And
+        `licence_note` is recorded against the font and shown beside it, so the question of where a
+        face came from has an answer later.
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [font]
+              properties:
+                font: { type: string, format: binary }
+                name: { type: string, maxLength: 80 }
+                licence_note: { type: string, maxLength: 300 }
+      responses:
+        '201': { description: 'The stored font, including the u:<uuid> a slide references it by.' }
+        '400': { description: 'Not a font, a TrueType Collection, empty, or over the size limit. The message says which.' }
+        '403': { description: 'No workspace context.' }
+
+  /fonts/{id}:
+    delete:
+      tags: [slides]
+      summary: Delete an uploaded font
+      description: |
+        Slides using it keep rendering — they fall back to the default bundled family, whose
+        `@font-face` is emitted alongside so the fallback actually loads. Takes the raw uuid, not
+        the `u:` form.
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success: true }.' }
+        '403': { description: 'That font belongs to another workspace.' }
+        '404': { description: 'No such font.' }
 
   # ----------------------------------------------------------------- triggers
   /triggers:

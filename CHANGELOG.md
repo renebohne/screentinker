@@ -1,5 +1,78 @@
 # Changelog
 
+## 2.0.0-alpha6
+
+Slides. A deck of PowerPoint-style pages you build in the dashboard, each element with its own
+entrance, published as a playlist your screens already understand.
+
+### Added — a slide editor
+
+**Slides** in the sidebar. Build a deck, drag elements around the stage, and give each one an
+entrance — rise, drop, slide, zoom, wipe or fade, with its own delay and duration. Headline, text,
+big number, photo, rule and panel. Three property tabs per element plus one for the slide itself.
+
+Publishing emits one slide widget per page and a playlist that orders them, so nothing downstream
+had to learn a new content type: scheduling, groups, inheritance and every player keep working on
+objects that already existed.
+
+**Editing text does not rebuild the layout.** A slide keeps its geometry, style and motion in a
+*template* and its words in a *record*, joined when the slide renders. That is what makes coming
+back in three months to change a number actually work — and it is the thing every other widget in
+this product gets wrong by baking content into its HTML.
+
+**Saving is not publishing.** Somebody part-way through a deck has every right to a slide that does
+not add up yet, and nothing reaches a wall until they say so.
+
+### Added — fonts, finally
+
+Five families ship with the server — Inter, Archivo, Oswald, Bitter and JetBrains Mono — so a slide
+looks the same on Android, Tizen, BrightSign and a browser. Before this there was no font pipeline
+at any layer: the old designer offered "Impact", which exists on none of those, so the same slide
+rendered differently on every panel.
+
+All five are under the SIL Open Font License, which permits the redistribution this product
+performs — every screen showing a slide downloads the face from your server.
+
+You can **upload your own** for a brand face: `.woff2`, `.woff`, `.ttf` or `.otf`, checked by
+content rather than by filename. Delete one later and slides using it stay readable in a bundled
+family rather than falling back to whatever the panel happens to have.
+
+### Fixed — an Android bug that would have made decks unusable
+
+Playlist continuity was keyed on content id, and widget items have none. In a playlist made of
+slides every item looked identical, so any edit snapped playback back to the first slide — and then
+returned without re-rendering, leaving the old slide on screen with the index pointing elsewhere.
+Fixed with an identity that includes the widget, plus a re-render when only the revision moved.
+
+### Fixed — releases were shipping short, silently
+
+CI never built the two BrightSign artifacts that make a player run the **server** rather than just
+the player. Every release since they existed went out without them and nothing said so. They are
+built in CI now, the payload manifest ships beside its payload, and `finalize-release.sh` refuses
+to finish if any expected asset is missing.
+
+Release tarballs also carried `server/.claude/` tooling files — all zero bytes, nothing leaked, and
+now excluded and caught by the credential gate.
+
+### Added — naming your servers
+
+Every server in a mesh has a name its peers display. It defaulted to the machine's hostname and
+there was no way to change it — the setter existed and had no callers, so a lab of three servers
+was three boxes all called `i9`. Rename under **Servers**; the name reaches every peer on the next
+report, and travels upward only, so nobody above can rename your server for you.
+
+### Added — remote diagnostics, verified content, and passing content on
+
+An MSP can see *why* a customer's screen is unhealthy, under its own grant, with error payloads
+reduced to the message and a URL's origin — never the query string. Content is checked before it is
+served, by size every time and by digest when the file has actually changed. And a relay can pass
+content on to a server below it when all three parties agree.
+
+### Note on upgrading
+
+Still a pre-release, so Android players on the stable channel will not take it. The mesh remains off
+unless `MESH_ACCEPT_ENROLLMENT` or `MESH_ALLOW_UPLINK` is set.
+
 ## 2.0.0-alpha5
 
 The mesh stops being read-only. A hub can now send content to a customer's server and ask its
