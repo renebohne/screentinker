@@ -61,25 +61,17 @@ const EASINGS = Object.freeze({
 });
 
 /*
- * ⚠️ FONTS ARE A REQUEST, NOT A GUARANTEE, AND THE STACKS SAY SO.
+ * ⚠️ FONTS ARE BUNDLED NOW, so this is no longer a request and a hope.
  *
- * There is no font pipeline at any layer of this product: no @font-face anywhere, no font files
- * shipped, and `lib/upload-sniff.js` accepts only image and video magic bytes, so a font cannot
- * even be uploaded. The designer already offers "Impact", which exists on none of Android, Tizen or
- * BrightSign — so that slide renders as something different on every panel, and differently again
- * on each.
+ * It used to be: four generic stacks, each ending in a keyword, because there was no font pipeline
+ * anywhere in the product and the named face was whatever the panel happened to have. Five SIL OFL
+ * families now ship with the server (lib/slide-fonts.js) and are served from /fonts, so a slide
+ * renders the same on Android, Tizen, BrightSign and a browser.
  *
- * Until that is fixed, every family here ends in a GENERIC keyword. The named face is used where a
- * platform happens to have it and the generic carries it everywhere else, which is a predictable
- * degrade rather than a silent substitution to whatever the panel's fallback happens to be. The
- * editor is expected to say this out loud rather than present a font menu that implies a promise.
+ * The generic names still resolve — see ALIASES there. Slides authored before this exist on real
+ * screens and must not silently reset.
  */
-const FONTS = Object.freeze({
-  sans:      "system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif",
-  serif:     "Georgia, 'Times New Roman', Times, serif",
-  mono:      "ui-monospace, 'DejaVu Sans Mono', 'Courier New', monospace",
-  condensed: "'Arial Narrow', 'Helvetica Neue Condensed', sans-serif",
-});
+const slideFonts = require('./slide-fonts');
 
 /** Text kinds carry a field value; the rest are decoration and never read `fields`. */
 const KINDS = Object.freeze({
@@ -167,7 +159,9 @@ function normalizeSlide(raw) {
       contentId: typeof src.content_id === 'string' && src.content_id.length <= 64 ? src.content_id : null,
       style: {
         color: color(style.color, '#FFFFFF'),
-        font: Object.prototype.hasOwnProperty.call(FONTS, style.font) ? style.font : 'sans',
+        // Total by construction: an unknown id resolves to the default rather than being dropped,
+        // which is what lets the renderer interpolate it without re-checking.
+        font: slideFonts.resolveFamily(style.font),
         // Container units, NEVER px. A slide is authored once and lands on panels from 720p to 4K,
         // and px is how the designer ended up with a regex that divides by 108 to rescue old
         // widgets. cqw against a sized container is the same number on every screen.
@@ -260,7 +254,7 @@ function renderSlideHtml(rawConfig, opts = {}) {
 
     css.push(
       `color:${s.color}`,
-      `font-family:${FONTS[s.font]}`,
+      `font-family:${slideFonts.fontStack(s.font)}`,
       `font-size:${s.size}cqw`,
       `font-weight:${s.weight}`,
       `text-align:${s.align}`,
@@ -268,9 +262,29 @@ function renderSlideHtml(rawConfig, opts = {}) {
     return `<div class="e t" style="${css.filter(Boolean).join(';')}">${escapeHtml(slide.fields[e.slot] || '')}</div>`;
   }).join('\n    ');
 
+  /*
+   * ⚠️ @font-face FOR EXACTLY THE FAMILIES THIS SLIDE USES, emitted into the document itself.
+   *
+   * It cannot be a stylesheet link: the player mounts this in an iframe sandboxed to allow-scripts
+   * with NO allow-same-origin, so the frame is an opaque origin and every subresource fetch from it
+   * is cross-origin. A font fetch in that position is CORS-restricted in a way an image is not —
+   * which is why the /fonts mount sets Access-Control-Allow-Origin, and why fonts do NOT ride
+   * /uploads/content (hardenUploadResponse forces octet-stream + attachment on anything outside the
+   * inline-safe set, and a font served that way is refused under nosniff).
+   */
+  const faces = require('./slide-fonts').fontFaceCss(
+    /*
+     * ⚠️ FILTERED ON KIND, NOT ON size. The obvious filter is `e.style.size` — and it is wrong,
+     * because normalizeSlide CLAMPS size to a default of 3 for every element including rules and
+     * panels. So every slide, even one that is nothing but a coloured bar, asked for a font it
+     * could not possibly show. A test caught it; reading the code did not.
+     */
+    slide.elements.filter((e) => KINDS[e.kind] && KINDS[e.kind].text).map((e) => e.style.font));
+
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
+  ${faces}
   html,body { margin:0; height:100%; overflow:hidden; background:${slide.background}; }
   /* ⚠️ container-type:size is what makes every cqw above mean anything. Without it the units
      resolve against the viewport and a slide inside a ZONE renders at full-screen sizes. */
@@ -294,7 +308,7 @@ function renderSlideHtml(rawConfig, opts = {}) {
 }
 
 module.exports = {
-  ANIMATIONS, EASINGS, FONTS, KINDS,
+  ANIMATIONS, EASINGS, KINDS,
   MAX_ELEMENTS, MAX_FIELD_CHARS, MAX_FIELDS,
   normalizeSlide, settleTime, renderSlideHtml,
 };

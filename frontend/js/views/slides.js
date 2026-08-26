@@ -20,9 +20,13 @@ const ANIMS = {
   slideU: 'Rise', slideD: 'Drop', zoom: 'Zoom', wipe: 'Wipe',
 };
 const EASES = { 'ease-out': 'Ease out', soft: 'Soft', linear: 'Linear', 'ease-in': 'Ease in' };
-// Mirrors FONTS in server/lib/slide-render.js. Named generically because there is no font pipeline
-// in this product yet: these are families a panel may or may not have, each backed by a generic.
-const FONTS = { sans: 'Sans', serif: 'Serif', mono: 'Mono', condensed: 'Condensed' };
+/*
+ * ⚠️ FETCHED, NOT DUPLICATED. The bundled families live in server/lib/slide-fonts.js next to the
+ * files themselves, and the editor asks for the list. A hardcoded copy here would drift the moment
+ * a family is added or dropped, and the editor would then preview something the renderer does not
+ * have — which makes the tool a liar about the one thing it exists to show.
+ */
+let FONT_CATALOGUE = [];
 const KINDS = {
   head: { icon: 'H', label: 'Headline', size: 7, weight: 700 },
   body: { icon: 'T', label: 'Text', size: 3, weight: 400 },
@@ -44,6 +48,34 @@ const slide = () => state.deck && state.deck.doc.slides[state.si];
 function elementsOf(s) { return (s.template && Array.isArray(s.template.elements)) ? s.template.elements : []; }
 
 const uid = (p) => `${p}_${Math.random().toString(36).slice(2, 9)}`;
+
+/* The same aliases the server keeps, so a slide authored before the fonts shipped previews right. */
+const FONT_ALIASES = { sans: 'inter', serif: 'bitter', mono: 'jetbrains-mono', condensed: 'oswald' };
+const resolveFont = (id) => {
+  if (FONT_CATALOGUE.some((f) => f.id === id)) return id;
+  if (FONT_ALIASES[id]) return FONT_ALIASES[id];
+  return FONT_CATALOGUE.length ? FONT_CATALOGUE[0].id : 'inter';
+};
+function fontStack(id) {
+  const f = FONT_CATALOGUE.find((x) => x.id === resolveFont(id));
+  // Both halves come from the server's own catalogue — no guessing a generic from the name.
+  return f ? `'${f.css}', ${f.stack}` : 'system-ui, sans-serif';
+}
+
+/*
+ * ⚠️ The editor loads the SAME files a screen will, from the same /fonts mount — so what you see
+ * while authoring is what plays. Injected once; the dashboard's own CSP allows font-src 'self',
+ * which this is.
+ */
+function ensureFontFaces() {
+  if (document.getElementById('stSlideFonts') || !FONT_CATALOGUE.length) return;
+  const st = document.createElement('style');
+  st.id = 'stSlideFonts';
+  st.textContent = FONT_CATALOGUE.flatMap((f) => ['', '-ext'].map((sfx) =>
+    `@font-face{font-family:'${f.css}';font-style:normal;font-weight:${f.weights[0]} ${f.weights[1]};`
+    + `font-display:swap;src:url(/fonts/${f.file}${sfx}.woff2) format('woff2')}`)).join('');
+  document.head.appendChild(st);
+}
 
 function newElement(kind) {
   const k = KINDS[kind];
@@ -86,6 +118,7 @@ export async function render(container) {
   // Loaded alongside the decks so the photo picker has something in it. Failure is not fatal:
   // a deck without its image list is still perfectly editable, and every other control works.
   if (state.contentIndex === null) await loadContent();
+  if (!FONT_CATALOGUE.length) await loadFonts();
 
   try {
     state.decks = await api.get('/slide-decks');
@@ -240,9 +273,7 @@ function styleFor(e) {
   if (e.kind === 'rule' || e.kind === 'box') out.push(`background:${s.color}`);
   else out.push(`color:${s.color}`);
   if (TEXT_KINDS.includes(e.kind)) {
-    const fam = { sans: 'system-ui,sans-serif', serif: 'Georgia,serif', mono: 'ui-monospace,monospace',
-      condensed: "'Arial Narrow',sans-serif" }[s.font] || 'system-ui,sans-serif';
-    out.push(`font-family:${fam}`, `font-size:${s.size_cqw}cqw`, `font-weight:${s.weight}`,
+    out.push(`font-family:${fontStack(s.font)}`, `font-size:${s.size_cqw}cqw`, `font-weight:${s.weight}`,
       `text-align:${s.align}`, 'line-height:1.08', 'white-space:pre-wrap');
   }
   return out.join(';');
@@ -480,8 +511,11 @@ function renderProps(container) {
       + row('Width', rng('pW', 1, 120, 1, e.box.w, '%'))
       + (e.box.h != null ? row('Height', rng('pH', 0.2, 110, 0.2, e.box.h, '%')) : '')
       + row('Colour', `<input type="color" id="pColor" value="${esc(st.color)}" style="width:100%;height:28px">`)
-      + (isText ? row('Font', `<select class="input" id="pFont">${Object.entries(FONTS).map(([k, v]) =>
-          `<option value="${k}" ${k === st.font ? 'selected' : ''}>${v}</option>`).join('')}</select>`) : '')
+      + (isText ? row('Font', `<select class="input" id="pFont">${FONT_CATALOGUE.map((f) =>
+          `<option value="${esc(f.id)}" ${f.id === resolveFont(st.font) ? 'selected' : ''}>${
+            esc(f.label)} — ${esc(f.role)}</option>`).join('')}</select>`) : '')
+      + (isText ? `<p style="font-size:11.5px;color:var(--text-muted);grid-column:1/-1;margin:0">${
+          esc((FONT_CATALOGUE.find((f) => f.id === resolveFont(st.font)) || {}).note || '')}</p>` : '')
       + (isText ? row('Size', rng('pSize', 0.5, 30, 0.2, st.size_cqw)) : '')
       + (isText ? row('Weight', `<select class="input" id="pWeight">${[400, 500, 600, 700, 800].map((w) =>
           `<option value="${w}" ${w === st.weight ? 'selected' : ''}>${w}</option>`).join('')}</select>`) : '')
@@ -583,6 +617,18 @@ function contentUrl(id) {
   const c = (state.contentIndex || []).find((x) => x.id === id);
   if (!c) return null;
   return c.remote_url || (c.filepath ? `/uploads/content/${encodeURIComponent(c.filepath)}` : null);
+}
+
+async function loadFonts() {
+  try {
+    const r = await api.get('/widgets/slide-fonts');
+    FONT_CATALOGUE = Array.isArray(r && r.fonts) ? r.fonts : [];
+    ensureFontFaces();
+  } catch (e) {
+    // Not fatal: the picker falls back to whatever is stored and the stage uses a generic. A deck
+    // is still fully editable without the list.
+    FONT_CATALOGUE = [];
+  }
 }
 
 async function loadContent() {

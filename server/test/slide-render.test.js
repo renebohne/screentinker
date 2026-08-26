@@ -105,8 +105,9 @@ test('⚠️ an unknown animation, easing or font falls back rather than being i
    * and the attacker's string is absent either way — the test passed with the guard deleted.
    * The guarantee is that normalize maps it to a real family, so that is what is asserted.
    */
+  // 'inter' since the bundled families landed — the default is a real face now, not a generic.
   assert.equal(S.normalizeSlide({ template: { elements: [{ slot: 'a', kind: 'body',
-    box: {}, style: { font: 'Impact; }' } }] } }).elements[0].style.font, 'sans');
+    box: {}, style: { font: 'Impact; }' } }] } }).elements[0].style.font, 'inter');
   assert.ok(!html.includes('undefined'), 'an unresolved font reached the document');
   assert.ok(!/animation-name/.test(html), 'an unrecognised animation should mean NO animation, not a default one');
 });

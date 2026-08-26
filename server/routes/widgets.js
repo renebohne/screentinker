@@ -112,6 +112,18 @@ router.post('/', (req, res) => {
   res.status(201).json(db.prepare('SELECT * FROM widgets WHERE id = ?').get(id));
 });
 
+/*
+ * The bundled font catalogue, for the slide editor's font picker.
+ *
+ * ⚠️ SERVED RATHER THAN DUPLICATED IN THE FRONTEND. The editor previewing a family the renderer
+ * does not have — or offering one it dropped — makes the tool a liar about the thing it exists to
+ * show. One list, defined next to the files themselves.
+ */
+router.get('/slide-fonts', (req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.json({ fonts: require('../lib/slide-fonts').catalogue() });
+});
+
 // Phase 2.2d: workspace-aware access. Mirrors the device/content pattern.
 // Platform-template widgets (workspace_id IS NULL) are readable by anyone
 // authenticated and writable only by platform_admin.

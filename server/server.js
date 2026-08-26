@@ -1298,6 +1298,50 @@ function hardenUploadResponse(res, filename) {
   return true;
 }
 
+/*
+ * Bundled slide fonts. ⚠️ ITS OWN MOUNT, NOT /uploads/content, AND THE REASON IS NOT TIDINESS.
+ *
+ * A slide renders inside an iframe sandboxed to allow-scripts with NO allow-same-origin, so the
+ * frame is an OPAQUE origin and every subresource fetch from it is cross-origin. An <img> does not
+ * care; @font-face does — a font fetch is CORS-restricted, so without Access-Control-Allow-Origin
+ * the face silently never loads and the slide falls back, on every panel, with nothing in any log.
+ *
+ * And the content mount cannot be reused: hardenUploadResponse forces Content-Type
+ * application/octet-stream plus Content-Disposition: attachment on anything outside
+ * INLINE_SAFE_EXTS, and under X-Content-Type-Options: nosniff a browser refuses to use that as a
+ * font. Adding .woff2 to INLINE_SAFE_EXTS would have been the smaller diff and the wrong one — that
+ * set exists to stop UPLOADED files being served inline, and these are not uploads.
+ *
+ * Immutable and long-lived because the filenames ship with the release: the bytes behind
+ * /fonts/inter.woff2 cannot change without a deploy, which is exactly the promise `immutable` makes.
+ */
+app.use('/fonts', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  next();
+}, express.static(path.join(__dirname, 'fonts'), {
+  index: false,
+  setHeaders: (res, filePath) => {
+    // Set explicitly rather than trusting express's lookup: getting this wrong means the browser
+    // refuses the face under nosniff, which looks exactly like a missing font.
+    if (filePath.endsWith('.woff2')) res.setHeader('Content-Type', 'font/woff2');
+    // ⚠️ The OFL text is part of what the licence requires us to distribute WITH the fonts, so it
+    // is served rather than merely sitting in the tarball.
+    else if (filePath.endsWith('.txt')) res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  },
+}), (req, res) => {
+  /*
+   * ⚠️ A MISS ENDS HERE. express.static calls next() on a miss and the only thing downstream is the
+   * SPA catch-all, which answers 200 with 15KB of dashboard HTML — under the `immutable` header set
+   * above. A browser would cache that as the font for a year and every slide would render in the
+   * fallback with no error anywhere. Same trap as /uploads/content, documented there.
+   */
+  res.removeHeader('Cache-Control');
+  res.status(404).type('text/plain').send('Not found');
+});
+
 app.use('/uploads/content', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
