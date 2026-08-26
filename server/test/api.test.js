@@ -161,6 +161,18 @@ test('partition: the public token surface is exactly the reviewed set (snapshot 
      * into, or read from, a workspace the caller is not a member of.
      */
     '/api/slide-decks',
+    /*
+     * Uploaded slide fonts, added deliberately. Reads and deletes are workspace-scoped through
+     * accessContext like every sibling.
+     *
+     * ⚠️ What review should weigh: an upload here is REDISTRIBUTED by this server — every screen
+     * showing a slide in that face fetches the file, from a URL that cannot be authenticated
+     * (the slide's iframe is an opaque origin and carries no credentials, the same constraint
+     * /uploads/content already lives with). The id is a uuid, so unguessable rather than secret.
+     * A `write` token can therefore put a file on this origin that the public can fetch — which is
+     * exactly what it can already do with /api/content, at larger sizes.
+     */
+    '/api/fonts',
   ].sort();
   assert.deepEqual(PUBLIC_ROUTERS.map(r => r.path).sort(), EXPECTED_PUBLIC);
 });

@@ -275,6 +275,34 @@ export const api = {
   patch: (path, body) => request(path, { method: 'PATCH', body: JSON.stringify(body ?? {}) }),
   delete: (path) => request(path, { method: 'DELETE' }),
 
+  /*
+   * Multipart POST for anything that is not content.
+   *
+   * ⚠️ CHECKS remoteRoute FIRST, which is the duty the uploadContent comment above names: a helper
+   * that reaches for fetch or XHR directly bypasses the routing layer, and every upload made while
+   * viewing a customer's server would land silently in YOUR OWN workspace under a heading that said
+   * theirs. It happened once with content; this is the same shape.
+   *
+   * ⚠️ No Content-Type header is set, deliberately. FormData must set its own, including the
+   * multipart boundary — supplying one produces a request the server cannot parse and an error that
+   * points nowhere near the cause.
+   */
+  postForm: async (path, formData) => {
+    const routed = remoteRoute(path, 'POST');
+    if (routed && routed.refuse) throw new Error(routed.refuse);
+    const token = localStorage.getItem('token');
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    });
+    const text = await res.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch (e) { body = null; }
+    if (!res.ok) throw new Error((body && body.error) || `Upload failed (${res.status})`);
+    return body;
+  },
+
   // Devices
   getDevices: () => request('/devices'),
   reorderDevices: (order) => request('/devices/reorder', { method: 'POST', body: JSON.stringify({ order }) }),

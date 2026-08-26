@@ -155,6 +155,43 @@ function fontFaceCss(familyKeys, opts = {}) {
   return out.join('\n  ');
 }
 
+/*
+ * ⚠️ HOW AN UPLOADED FONT IS NAMED IN A SLIDE. `u:<id>` — a namespace the bundled keys cannot enter,
+ * so resolveFamily can tell them apart without a lookup, and a stored id can never silently become
+ * a bundled family (or the reverse) if either set changes.
+ */
+const CUSTOM_PREFIX = 'u:';
+const isCustom = (id) => typeof id === 'string' && id.startsWith(CUSTOM_PREFIX);
+const customId = (id) => (isCustom(id) ? id.slice(CUSTOM_PREFIX.length) : null);
+
+/**
+ * One @font-face for an uploaded font.
+ *
+ * ⚠️ NO unicode-range, deliberately. The bundled files are Google's own script subsets, declared
+ * with the ranges they were cut against. An upload is whatever the operator had and its coverage is
+ * unknown — claiming a range it does not have would make the browser SKIP the file for characters it
+ * can actually render. Absent means "use it for anything", the only honest declaration available.
+ *
+ * ⚠️ font-weight:normal, one file. Declaring a variable range we have not read out of the font would
+ * make the browser clamp or synthesise. The editor says the weight control does not apply to an
+ * uploaded face rather than pretending it does.
+ */
+function customFace(font, opts = {}) {
+  const base = opts.base || '/fonts/u';
+  /*
+   * ⚠️ hasOwnProperty, NOT `map[fmt] || default`. A mutation run exposed this: `constructor` and
+   * `__proto__` are inherited keys, so the lookup returns the Object constructor — truthy, so the
+   * `||` fallback never fires — and `function Object() { [native code] }` is interpolated straight
+   * into the CSS rule. A character filter happened to mask it, which made the real defect invisible
+   * and the sanitiser look like the guard. This is the guard.
+   */
+  const FORMAT_CSS = { woff2: 'woff2', woff: 'woff', ttf: 'truetype', otf: 'opentype' };
+  const fmt = String(font.format || 'woff2');
+  const cssFormat = Object.prototype.hasOwnProperty.call(FORMAT_CSS, fmt) ? FORMAT_CSS[fmt] : 'woff2';
+  return `@font-face{font-family:'${font.css_family}';font-style:normal;font-weight:normal;`
+    + `font-display:swap;src:url(${base}/${encodeURIComponent(font.filepath)}) format('${cssFormat}')}`;
+}
+
 /**
  * What the editor offers, in the order it should offer it.
  *
@@ -171,6 +208,7 @@ function catalogue() {
 
 module.exports = {
   FAMILIES, ALIASES, DEFAULT_FAMILY, FONT_DIR,
+  CUSTOM_PREFIX, isCustom, customId, customFace,
   RANGE_LATIN, RANGE_LATIN_EXT,
   resolveFamily, fontStack, fontFaceCss, catalogue,
 };

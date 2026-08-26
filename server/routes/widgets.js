@@ -225,7 +225,9 @@ function renderWidgetHtml(type, config, opts = {}) {
      * makes it possible to come back and change a headline without rebuilding the layout, and
      * therefore what makes editing one later work at all. See lib/slide-render.js.
      */
-    case 'slide': return slideRender.renderSlideHtml(config, { resolveImage: opts.resolveImage });
+    case 'slide': return slideRender.renderSlideHtml(config, {
+      resolveImage: opts.resolveImage, resolveFont: opts.resolveFont,
+    });
     default: return '<html><body style="color:white;background:black;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><h1>Unknown widget</h1></body></html>';
   }
 }
@@ -288,6 +290,7 @@ router.get('/:id/render', (req, res) => {
   res.send(renderWidgetHtml(widget.widget_type, config, {
     iframeSandbox,
     resolveImage: imageResolverFor(widget),
+    resolveFont: require('./fonts').fontResolverFor(widget),
   }));
 });
 

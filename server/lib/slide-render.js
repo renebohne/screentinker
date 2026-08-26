@@ -159,9 +159,18 @@ function normalizeSlide(raw) {
       contentId: typeof src.content_id === 'string' && src.content_id.length <= 64 ? src.content_id : null,
       style: {
         color: color(style.color, '#FFFFFF'),
-        // Total by construction: an unknown id resolves to the default rather than being dropped,
-        // which is what lets the renderer interpolate it without re-checking.
-        font: slideFonts.resolveFamily(style.font),
+        /*
+         * Total by construction: an unknown id resolves to the default rather than being dropped,
+         * which is what lets the renderer interpolate it without re-checking.
+         *
+         * ⚠️ A `u:<id>` reference is KEPT AS IS. Whether that upload still exists is not a question
+         * normalize can answer — it has no database — and collapsing it to the default here would
+         * silently rewrite an operator's font choice on every save, including saves that happen for
+         * unrelated reasons. The renderer resolves it, and falls back only at render time.
+         */
+        font: slideFonts.isCustom(style.font)
+          ? String(style.font).slice(0, 80)
+          : slideFonts.resolveFamily(style.font),
         // Container units, NEVER px. A slide is authored once and lands on panels from 720p to 4K,
         // and px is how the designer ended up with a regex that divides by 108 to rescue old
         // widgets. cqw against a sized container is the same number on every screen.
@@ -212,6 +221,35 @@ function settleTime(slide) {
 function renderSlideHtml(rawConfig, opts = {}) {
   const slide = normalizeSlide(rawConfig);
   const resolveImage = typeof opts.resolveImage === 'function' ? opts.resolveImage : () => null;
+  /*
+   * ⚠️ INJECTED, LIKE resolveImage, AND FOR THE SAME REASON. An uploaded font is a row scoped to a
+   * workspace, and the lookup that enforces that belongs with the route that knows the workspace —
+   * not in a pure renderer. Absent (tests, previews) every `u:` reference simply falls back.
+   */
+  const resolveCustomFont = typeof opts.resolveFont === 'function' ? opts.resolveFont : () => null;
+
+  // Resolved once: the same font may be referenced by several elements, and a lookup per element
+  // would hit the database once per line of text on the slide.
+  const customs = new Map();
+  for (const e of slide.elements) {
+    const id = e.style && e.style.font;
+    if (!slideFonts.isCustom(id) || customs.has(id)) continue;
+    customs.set(id, resolveCustomFont(slideFonts.customId(id)) || null);
+  }
+
+  /*
+   * ⚠️ A `u:` reference whose upload is gone falls back to the DEFAULT family, not to nothing.
+   * The alternative — emitting the missing family name anyway — gives the browser a face it cannot
+   * load and no fallback, so the text renders in whatever the platform picks, differently on every
+   * panel. That is the exact failure the bundled set was built to end.
+   */
+  const fontFamilyFor = (id) => {
+    if (!slideFonts.isCustom(id)) return slideFonts.fontStack(id);
+    const f = customs.get(id);
+    if (!f) return slideFonts.fontStack(slideFonts.DEFAULT_FAMILY);
+    const generic = f.format === 'otf' || f.format === 'ttf' ? 'sans-serif' : 'sans-serif';
+    return `'${f.css_family}', ${generic}`;
+  };
 
   const body = slide.elements.map((e) => {
     const s = e.style;
@@ -254,7 +292,7 @@ function renderSlideHtml(rawConfig, opts = {}) {
 
     css.push(
       `color:${s.color}`,
-      `font-family:${slideFonts.fontStack(s.font)}`,
+      `font-family:${fontFamilyFor(s.font)}`,
       `font-size:${s.size}cqw`,
       `font-weight:${s.weight}`,
       `text-align:${s.align}`,
@@ -272,6 +310,9 @@ function renderSlideHtml(rawConfig, opts = {}) {
    * /uploads/content (hardenUploadResponse forces octet-stream + attachment on anything outside the
    * inline-safe set, and a font served that way is refused under nosniff).
    */
+  const customFaces = [...customs.values()].filter(Boolean)
+    .map((f) => slideFonts.customFace(f)).join('\n  ');
+
   const faces = require('./slide-fonts').fontFaceCss(
     /*
      * ⚠️ FILTERED ON KIND, NOT ON size. The obvious filter is `e.style.size` — and it is wrong,
@@ -279,12 +320,27 @@ function renderSlideHtml(rawConfig, opts = {}) {
      * panels. So every slide, even one that is nothing but a coloured bar, asked for a font it
      * could not possibly show. A test caught it; reading the code did not.
      */
-    slide.elements.filter((e) => KINDS[e.kind] && KINDS[e.kind].text).map((e) => e.style.font));
+    /*
+     * ⚠️ Bundled families only — a `u:` id is not one, and handing it to fontFaceCss would quietly
+     * emit the DEFAULT family's face under a custom name.
+     *
+     * ⚠️ PLUS the default, when a `u:` reference could not be resolved. fontFamilyFor falls back to
+     * the default family for a missing upload — and without declaring its face, that fallback is
+     * INERT: the browser is asked for 'Inter', has no rule for it, and lands on the platform's own
+     * sans. Which is the exact "different on every panel" failure the bundled set exists to end.
+     * Caught by looking at the emitted HTML, not by reading this function.
+     */
+    slide.elements
+      .filter((e) => KINDS[e.kind] && KINDS[e.kind].text)
+      .map((e) => (slideFonts.isCustom(e.style.font)
+        ? (customs.get(e.style.font) ? null : slideFonts.DEFAULT_FAMILY)
+        : e.style.font))
+      .filter(Boolean));
 
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-  ${faces}
+  ${faces}${customFaces ? `\n  ${customFaces}` : ''}
   html,body { margin:0; height:100%; overflow:hidden; background:${slide.background}; }
   /* ⚠️ container-type:size is what makes every cqw above mean anything. Without it the units
      resolve against the viewport and a slide inside a ZONE renders at full-screen sizes. */

@@ -51,6 +51,7 @@ const uid = (p) => `${p}_${Math.random().toString(36).slice(2, 9)}`;
 
 /* The same aliases the server keeps, so a slide authored before the fonts shipped previews right. */
 const FONT_ALIASES = { sans: 'inter', serif: 'bitter', mono: 'jetbrains-mono', condensed: 'oswald' };
+const isUploadedFont = (id) => typeof id === 'string' && id.startsWith('u:');
 const resolveFont = (id) => {
   if (FONT_CATALOGUE.some((f) => f.id === id)) return id;
   if (FONT_ALIASES[id]) return FONT_ALIASES[id];
@@ -71,9 +72,14 @@ function ensureFontFaces() {
   if (document.getElementById('stSlideFonts') || !FONT_CATALOGUE.length) return;
   const st = document.createElement('style');
   st.id = 'stSlideFonts';
-  st.textContent = FONT_CATALOGUE.flatMap((f) => ['', '-ext'].map((sfx) =>
-    `@font-face{font-family:'${f.css}';font-style:normal;font-weight:${f.weights[0]} ${f.weights[1]};`
-    + `font-display:swap;src:url(/fonts/${f.file}${sfx}.woff2) format('woff2')}`)).join('');
+  st.textContent = FONT_CATALOGUE.flatMap((f) => (f.file
+    // Bundled: two script subsets, one variable file each.
+    ? ['', '-ext'].map((sfx) =>
+        `@font-face{font-family:'${f.css}';font-style:normal;font-weight:${f.weights[0]} ${f.weights[1]};`
+        + `font-display:swap;src:url(/fonts/${f.file}${sfx}.woff2) format('woff2')}`)
+    // Uploaded: one file, one weight, no unicode-range — see slide-fonts.customFace for why.
+    : [`@font-face{font-family:'${f.css}';font-style:normal;font-weight:normal;`
+       + `font-display:swap;src:url(/fonts/u/${encodeURIComponent(f.filepath || '')})}`])).join('');
   document.head.appendChild(st);
 }
 
@@ -516,9 +522,21 @@ function renderProps(container) {
             esc(f.label)} — ${esc(f.role)}</option>`).join('')}</select>`) : '')
       + (isText ? `<p style="font-size:11.5px;color:var(--text-muted);grid-column:1/-1;margin:0">${
           esc((FONT_CATALOGUE.find((f) => f.id === resolveFont(st.font)) || {}).note || '')}</p>` : '')
+      + (isText ? `<div style="grid-column:1/-1;display:flex;gap:8px;align-items:center">
+           <button class="btn btn-secondary btn-sm" id="pUpFont">Upload a font…</button>
+           <input type="file" id="pFontFile" accept=".woff2,.woff,.ttf,.otf,font/*" hidden>
+           <span id="pFontMsg" style="font-size:11.5px;color:var(--text-muted)"></span></div>` : '')
       + (isText ? row('Size', rng('pSize', 0.5, 30, 0.2, st.size_cqw)) : '')
-      + (isText ? row('Weight', `<select class="input" id="pWeight">${[400, 500, 600, 700, 800].map((w) =>
+      + (isText && !isUploadedFont(st.font) ? row('Weight', `<select class="input" id="pWeight">${[400, 500, 600, 700, 800].map((w) =>
           `<option value="${w}" ${w === st.weight ? 'selected' : ''}>${w}</option>`).join('')}</select>`) : '')
+      /*
+       * ⚠️ Hidden rather than disabled-and-ignored for an uploaded face. It ships as a single
+       * weight (slide-fonts.customFace), so offering 400–800 would be a control that silently
+       * does nothing — worse than not offering it.
+       */
+      + (isText && isUploadedFont(st.font)
+          ? `<p style="font-size:11.5px;color:var(--text-muted);grid-column:1/-1;margin:0">
+               An uploaded font has one weight. Upload the bold as its own font to use both.</p>` : '')
       + (isText ? row('Align', `<select class="input" id="pAlign">${['left', 'center', 'right'].map((a) =>
           `<option value="${a}" ${a === st.align ? 'selected' : ''}>${a}</option>`).join('')}</select>`) : '')
       + ((e.kind === 'image' || e.kind === 'box') ? row('Corner', rng('pRad', 0, 12, 0.2, st.radius_cqw || 0)) : '')
@@ -535,6 +553,45 @@ function renderProps(container) {
     const bindSel = (id, set) => { const n = host.querySelector(`#${id}`); if (n) n.onchange = (ev) => { set(ev.target.value); touch(container); }; };
     bindSel('pFont', (v) => { st.font = v; }); bindSel('pAlign', (v) => { st.align = v; });
     bindSel('pWeight', (v) => { st.weight = +v; });
+
+    const upBtn = host.querySelector('#pUpFont');
+    if (upBtn) {
+      const file = host.querySelector('#pFontFile');
+      const msg = host.querySelector('#pFontMsg');
+      upBtn.onclick = () => file.click();
+      file.onchange = async (ev) => {
+        const f = ev.target.files && ev.target.files[0];
+        if (!f) return;
+        msg.style.color = 'var(--text-muted)';
+        msg.textContent = 'Uploading…';
+        try {
+          const fd = new FormData();
+          fd.append('font', f);
+          fd.append('name', f.name.replace(/\.[a-z0-9]+$/i, ''));
+          /*
+           * ⚠️ Asked for at the point of upload, not buried in settings. This server redistributes
+           * the file to every screen showing a slide in it, so "where did this come from" needs an
+           * answer somebody can give later. Not a legal control — the difference between an
+           * operator who can answer and one who cannot.
+           */
+          const note = prompt(                               // eslint-disable-line no-alert
+            'Where is this font licensed from?\n\nEvery screen showing a slide in it downloads the '
+            + 'file from this server, so it helps to record what you are allowed to do with it.',
+            '') || '';
+          fd.append('licence_note', note.slice(0, 300));
+          const added = await api.postForm('/fonts', fd);
+          FONT_CATALOGUE = FONT_CATALOGUE.concat([added]);
+          document.getElementById('stSlideFonts')?.remove();  // rebuild with the new face in it
+          ensureFontFaces();
+          st.font = added.id;
+          touch(container);
+          showToast(`Added ${added.label}`, 'success');
+        } catch (e) {
+          msg.style.color = 'var(--danger)';
+          msg.textContent = e.message || 'Could not upload that font';
+        }
+      };
+    }
     return;
   }
 
@@ -622,7 +679,15 @@ function contentUrl(id) {
 async function loadFonts() {
   try {
     const r = await api.get('/widgets/slide-fonts');
-    FONT_CATALOGUE = Array.isArray(r && r.fonts) ? r.fonts : [];
+    const bundled = Array.isArray(r && r.fonts) ? r.fonts : [];
+    // Uploaded fonts sit after the bundled ones. A failure here must not lose the bundled list —
+    // an operator with no uploads should never notice this call exists.
+    let custom = [];
+    try {
+      const u = await api.get('/fonts');
+      custom = Array.isArray(u && u.fonts) ? u.fonts : [];
+    } catch (e2) { custom = []; }
+    FONT_CATALOGUE = bundled.concat(custom);
     ensureFontFaces();
   } catch (e) {
     // Not fatal: the picker falls back to whatever is stored and the stage uses a generic. A deck

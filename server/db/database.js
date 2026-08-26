@@ -1475,6 +1475,31 @@ const migrations = [
    * This column is written only by publish, so it is the server's own record of what it created,
    * and diffing against it is both correct and unforgeable. */
   'ALTER TABLE slide_decks ADD COLUMN published_widget_ids TEXT NOT NULL DEFAULT \'[]\'',
+
+  /* Fonts an operator uploaded, to set slides in a brand face the bundled five do not cover.
+   *
+   * ⚠️ `css_family` IS GENERATED, NEVER THE FONT'S OWN NAME. A font declaring itself "Inter" would
+   * otherwise shadow the bundled Inter in any document that used both, and whichever @font-face
+   * came second would win — a slide changing appearance because of an unrelated upload, with
+   * nothing to point at. Every uploaded face gets a unique family that cannot collide.
+   *
+   * ⚠️ `licence_note` and `uploaded_by` exist because THIS SERVER REDISTRIBUTES the file: every
+   * screen showing a slide in this face downloads it. The bundled fonts are OFL so that is settled;
+   * for an upload it is the uploader's assertion, and on a hosted instance the operator needs to be
+   * able to see who made it and on what basis. Recorded at upload, shown in the editor. */
+  `CREATE TABLE IF NOT EXISTS custom_fonts (
+     id            TEXT PRIMARY KEY,
+     workspace_id  TEXT,
+     uploaded_by   TEXT,
+     name          TEXT NOT NULL,
+     css_family    TEXT NOT NULL,
+     filepath      TEXT NOT NULL,
+     format        TEXT NOT NULL,
+     file_size     INTEGER NOT NULL,
+     licence_note  TEXT,
+     created_at    INTEGER NOT NULL
+   )`,
+  'CREATE INDEX IF NOT EXISTS idx_custom_fonts_ws ON custom_fonts(workspace_id)',
 ];
 // Apply each ALTER idempotently. A "duplicate column name" / "already exists"
 // error means the column is already present (expected on a migrated DB) - benign.

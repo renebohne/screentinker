@@ -1315,6 +1315,37 @@ function hardenUploadResponse(res, filename) {
  * Immutable and long-lived because the filenames ship with the release: the bytes behind
  * /fonts/inter.woff2 cannot change without a deploy, which is exactly the promise `immutable` makes.
  */
+/*
+ * Uploaded fonts. Same headers as the bundled set and for the same reasons — a slide's iframe is an
+ * opaque origin, so @font-face is CORS-restricted where an <img> is not.
+ *
+ * ⚠️ MOUNTED BEFORE /fonts, because express matches in order and /fonts/u would otherwise be looked
+ * for as a file called "u" in the bundled directory.
+ *
+ * ⚠️ PUBLIC BY URL, like /uploads/content and for the same unavoidable reason: the frame that needs
+ * the font carries no credentials, so the URL cannot be authenticated. The id is a uuid, so this is
+ * unguessable rather than secret — the same property images already rely on. Worth knowing before
+ * uploading a font whose licence forbids public serving.
+ */
+app.use('/fonts/u', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  next();
+}, express.static(config.fontsDir, {
+  index: false,
+  setHeaders: (res, filePath) => {
+    const t = { '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf', '.otf': 'font/otf' }[path.extname(filePath).toLowerCase()];
+    if (t) res.setHeader('Content-Type', t);
+  },
+}), (req, res) => {
+  // A miss ends here — see the bundled mount below for why 200-with-the-dashboard is the worst
+  // possible answer under an `immutable` header.
+  res.removeHeader('Cache-Control');
+  res.status(404).type('text/plain').send('Not found');
+});
+
 app.use('/fonts', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');

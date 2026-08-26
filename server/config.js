@@ -29,6 +29,10 @@ module.exports = {
   dbPath: process.env.DB_PATH || path.join(DATA_DIR, 'db', 'remote_display.db'),
   uploadsDir,
   contentDir: path.join(uploadsDir, 'content'),
+  // ⚠️ NOT under contentDir. Fonts are not playlist content — they are never listed in the library,
+  // never assigned to a screen, and are served from their own mount with headers a font needs and
+  // content does not (see the /fonts mount in server.js).
+  fontsDir: path.join(uploadsDir, 'fonts'),
   screenshotsDir: path.join(uploadsDir, 'screenshots'),
   certsDir,
   frontendDir: path.join(__dirname, '..', 'frontend'),

@@ -37,6 +37,9 @@ const PUBLIC_ROUTERS = [
   // Slide decks: the authoring document. Publishes to a playlist of slide widgets — see
   // lib/slide-deck.js for why that is the whole design rather than a new content type.
   { path: '/api/slide-decks', mod: './routes/slide-decks' },
+  // Uploaded fonts for slides. Workspace-scoped; see routes/fonts.js for why redistribution is
+  // the thing to understand about this one.
+  { path: '/api/fonts',       mod: './routes/fonts' },
   { path: '/api/activity',    mod: './routes/activity' },
   { path: '/api/kiosk',       mod: './routes/kiosk', renderBypass: true },
   { path: '/api/pip',         mod: './routes/pip' },
