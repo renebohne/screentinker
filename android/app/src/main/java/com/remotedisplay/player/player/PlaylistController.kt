@@ -31,6 +31,22 @@ data class PlaylistItem(
     // feat/transition-engine: the resolved GL transition this item plays INTO (null = hard cut).
     val transition: TransitionSpec? = null
 ) {
+    /*
+     * ⚠️  WHICH ITEM THIS IS, FOR CONTINUITY — AND IT IS NOT contentId.
+     *
+     * Widget items carry contentId = "" (there is no content row behind them), so keying continuity
+     * on contentId alone made every widget in a playlist the same item. On an all-widget playlist
+     * `indexOfFirst { it.contentId == currentlyPlayingId }` matched INDEX 0 whatever was actually on
+     * screen, so any edit snapped playback back to the first slide — and then returned without
+     * re-rendering, so the screen kept showing the old one while the index said otherwise. That is
+     * ⚠️ #234 in a new place: the fix there was to stop treating a changed field as a changed item,
+     * and this is the same mistake from the other direction.
+     *
+     * Shaped like sig() above deliberately: a content item is "abc|", a widget item is "|w-123".
+     * Both stable across an edit, and never equal to each other.
+     */
+    val itemKey: String get() = contentId + "|" + (widgetId ?: "")
+
     val isRemote: Boolean get() = !remoteUrl.isNullOrEmpty()
     // Widget assignments have a widget_id and no downloadable content file.
     val isWidget: Boolean get() = !widgetId.isNullOrEmpty()
@@ -227,8 +243,12 @@ class PlaylistController(
 
         Log.i("PlaylistController", "Playlist changed: ${items.size} -> ${newItems.size} items")
 
-        // Remember what's currently playing
-        val currentlyPlayingId = currentItem?.contentId
+        // Remember what's currently playing.
+        // ⚠️ Captured BEFORE items is replaced below, and captured as a KEY rather than a contentId
+        // so a widget item identifies itself. The rev rides along because it is the one field that
+        // changes without changing which item this is — see the re-render below.
+        val currentlyPlayingId = currentItem?.itemKey
+        val currentlyPlayingRev = currentItem?.widgetRev ?: 0L
 
         // #157: the item on screen was REMOVED (its only change is removal — e.g. it just expired).
         // In solo playback, don't interrupt it: keep it up, stash the new list, and rotate out on the
@@ -243,13 +263,13 @@ class PlaylistController(
                 wallFollower = wallFollower,
                 hasContentOnScreen = hasContentOnScreen,
                 currentlyPlayingId = currentlyPlayingId,
-                newContentIds = newItems.map { it.contentId },
+                newContentIds = newItems.map { it.itemKey },
             )) {
             var succ: String? = null
             if (items.isNotEmpty()) {
                 for (k in 1..items.size) {
-                    val cid = items[(currentIndex + k) % items.size].contentId
-                    if (cid != currentlyPlayingId && newItems.any { it.contentId == cid }) { succ = cid; break }
+                    val cid = items[(currentIndex + k) % items.size].itemKey
+                    if (cid != currentlyPlayingId && newItems.any { it.itemKey == cid }) { succ = cid; break }
                 }
             }
             pendingItems = newItems
@@ -273,10 +293,30 @@ class PlaylistController(
         } else if (isRunning) {
             // Try to keep playing the current item if it's still in the list
             if (currentlyPlayingId != null) {
-                val newIndex = items.indexOfFirst { it.contentId == currentlyPlayingId }
+                val newIndex = items.indexOfFirst { it.itemKey == currentlyPlayingId }
                 if (newIndex >= 0 && hasContentOnScreen) {
                     // Current item still exists AND is genuinely on screen - don't interrupt, just update index.
                     currentIndex = newIndex
+                    /*
+                     * ⚠️ UNLESS THE ITEM IS THE SAME BUT ITS CONTENTS ARE NOT.
+                     *
+                     * A widget's identity does not change when it is edited — that is deliberate, and
+                     * it is what lets an edit avoid restarting the playlist. But it means "same item"
+                     * and "same thing on screen" stopped being the same question. widgetRev is the
+                     * only field that separates them, so a rev that moved under a matching key is
+                     * exactly the case where holding the WebView is wrong: the render URL changed,
+                     * and returning here would leave the old slide up until the next natural advance.
+                     *
+                     * Re-rendering only this item is the narrow fix. The index is already correct, so
+                     * playback continues from the same place — the operator sees their edit appear
+                     * where it was, not the playlist jump back to the start.
+                     */
+                    if (items[newIndex].widgetRev != currentlyPlayingRev) {
+                        Log.i("PlaylistController",
+                            "Same item at $newIndex but widgetRev ${currentlyPlayingRev} -> ${items[newIndex].widgetRev} — re-rendering in place")
+                        playCurrentItem()
+                        return
+                    }
                     Log.i("PlaylistController", "Current item still in playlist at index $newIndex, not interrupting")
                     return
                 }

@@ -5,6 +5,7 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
 const { devicesPlayingWidget } = require('../lib/devices-playing');
+const slideRender = require('../lib/slide-render');
 const appConfig = require('../config');
 const { PLATFORM_ROLES, ELEVATED_ROLES } = require('../middleware/auth');
 // Phase 2.2d: workspace-aware access. Same pattern as devices.js / content.js.
@@ -206,6 +207,13 @@ function renderWidgetHtml(type, config, opts = {}) {
     case 'directory-board': return renderDirectoryBoard(config);
     case 'directory-search': return renderDirectorySearch(config);
     case 'diag-smoothness': return renderDiagSmoothness(config);
+    /*
+     * ⚠️ THE ONLY WIDGET WHOSE CONTENT IS NOT BAKED INTO ITS CONFIG. A slide keeps its layout in
+     * `config.template` and its words in `config.fields`, and they are joined here — which is what
+     * makes it possible to come back and change a headline without rebuilding the layout, and
+     * therefore what makes editing one later work at all. See lib/slide-render.js.
+     */
+    case 'slide': return slideRender.renderSlideHtml(config, { resolveImage: opts.resolveImage });
     default: return '<html><body style="color:white;background:black;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><h1>Unknown widget</h1></body></html>';
   }
 }
@@ -265,8 +273,44 @@ router.get('/:id/render', (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
   }
   res.setHeader('Content-Type', 'text/html');
-  res.send(renderWidgetHtml(widget.widget_type, config, { iframeSandbox }));
+  res.send(renderWidgetHtml(widget.widget_type, config, {
+    iframeSandbox,
+    resolveImage: imageResolverFor(widget),
+  }));
 });
+
+/*
+ * Turn a slide's `content_id` into a URL, or into nothing.
+ *
+ * ⚠️ SCOPED TO THE WIDGET'S OWN WORKSPACE, AND THAT IS THE WHOLE JOB. The id comes out of a config
+ * blob that a workspace editor authored, so it is a value a user typed — nothing stops somebody
+ * pasting an id belonging to another tenant, and a resolver that simply looked up the row would
+ * then embed another customer's photo in their slide and serve it from this origin. Read as: a
+ * slide may only ever show media its own workspace already owns.
+ *
+ * A widget with no workspace is a PLATFORM TEMPLATE (see checkWidgetRead), so it is held to the
+ * matching rule — platform content only — rather than being treated as unscoped.
+ */
+function imageResolverFor(widget) {
+  return (contentId) => {
+    if (!contentId) return null;
+    try {
+      const row = widget.workspace_id
+        ? db.prepare('SELECT filepath, remote_url FROM content WHERE id = ? AND workspace_id = ?')
+            .get(contentId, widget.workspace_id)
+        : db.prepare('SELECT filepath, remote_url FROM content WHERE id = ? AND workspace_id IS NULL')
+            .get(contentId);
+      if (!row) return null;
+      // remote_url content is a URL the operator supplied and the player already fetches directly;
+      // an uploaded file is served from this origin. Either way the slide references, never inlines
+      // — the designer's base64 habit is how one widget config in the wild reached 2.71 MB.
+      if (row.remote_url) return row.remote_url;
+      return row.filepath ? `/uploads/content/${encodeURIComponent(row.filepath)}` : null;
+    } catch (e) {
+      return null;
+    }
+  };
+}
 
 // Public JSON feed of a directory board's entries. A directory-search page polls
 // this to reflect board edits without a reload. It exposes only the same data
