@@ -410,11 +410,22 @@ export const api = {
         };
       }
       xhr.onload = () => {
+        /*
+         * ⚠️ THE SERVER'S OWN WORDS, OR THE CALLER LEARNS NOTHING.
+         *
+         * This used to reject with a flat "Upload failed" for every non-2xx, throwing away the one
+         * thing the person needs: WHY. The server is specific — "Unsupported file type — only image
+         * and video files are accepted", a storage-limit refusal, "Switch to a workspace before
+         * uploading" — and all of it was replaced with a shrug, which is how a refused upload
+         * becomes "it just doesn't work".
+         */
         if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText));
-        } else {
-          reject(new Error('Upload failed'));
+          try { return resolve(JSON.parse(xhr.responseText)); }
+          catch (e) { return reject(new Error('Upload succeeded but the response could not be read')); }
         }
+        let msg = '';
+        try { msg = (JSON.parse(xhr.responseText) || {}).error || ''; } catch (e) { msg = ''; }
+        reject(new Error(msg || `Upload failed (${xhr.status})`));
       };
       xhr.onerror = () => reject(new Error('Upload failed'));
       xhr.send(formData);

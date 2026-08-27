@@ -1003,7 +1003,12 @@ async function loadFonts() {
 
 async function loadContent() {
   try {
-    const all = await api.get('/content');
+    /*
+     * ⚠️ IMAGES, AND THE SERVER'S MAXIMUM. `/content` with no query returns the 100 newest rows of
+     * EVERY type and this filters to images afterwards — so a workspace whose last hundred uploads
+     * were videos offers an empty image list here while its library is full of pictures.
+     */
+    const all = await api.get('/content?type=image&limit=500');
     state.contentIndex = (Array.isArray(all) ? all : [])
       .filter((c) => (c.mime_type || '').startsWith('image/'))
       .map((c) => ({ id: c.id, filename: c.filename, filepath: c.filepath, remote_url: c.remote_url }));

@@ -1,7 +1,17 @@
-import { assertLocalCallAllowed } from '../api.js';
+import { api, assertLocalCallAllowed } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { t } from '../i18n.js';
-import { hydrateAuthImages } from '../utils.js';
+/*
+ * ⚠️ esc IS AN IMPORT, NOT A GLOBAL — and it was missing for sixteen days.
+ *
+ * The escaping sweep of 2026-08-11 added esc() to three sinks in this file and imported it in none
+ * of them, so every one of those lines threw ReferenceError the moment it ran: the image picker
+ * died before it could append itself (so "+ Add Background Image" and "Choose Logo" did NOTHING),
+ * and the Weather and Social config forms threw while building their HTML, so neither could be
+ * opened at all. A syntax check passes, every view still renders, and 2600 tests stayed green —
+ * the calls only run on a click. See test/frontend-shared-helpers.test.js.
+ */
+import { esc, hydrateAuthImages } from '../utils.js';
 
 // A refused request must reject, not resolve.
 //
@@ -212,14 +222,36 @@ function parseDirectoryImport(text) {
   return res;
 }
 
+/*
+ * Pick images for a widget — and, when the one you want is not in the library yet, PUT IT THERE.
+ *
+ * ⚠️ THIS DIALOG USED TO BE READ-ONLY, AND ITS OWN EMPTY STATE ADMITTED IT: "Upload images first
+ * from Content Library". So choosing a directory-board background meant abandoning a half-filled
+ * widget form, crossing to another view, uploading, and coming back to start again — and "I
+ * couldn't upload a background picture" is precisely what that looks like from the operator's side.
+ * For anyone whose picture is still on their laptop, uploading IS the job of this dialog.
+ *
+ * ⚠️ AND IT ASKED THE SERVER FOR THE WRONG THING. `GET /content` with no query returns the 100
+ * newest rows OF EVERY TYPE (routes/content.js caps at 100 by default, 500 max), which this then
+ * filtered down to images on the client — so a workspace whose last hundred uploads were videos
+ * showed an EMPTY image picker while its library was full of images, and the search box could not
+ * find them either because it only ever filtered what had already been fetched. Ask the server for
+ * images, and ask it for as many as it will give.
+ */
 function openContentPicker({ multiple = false, title } = {}) {
   return new Promise(async (resolve) => {
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;padding:16px';
     overlay.innerHTML = `
-      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column">
+      <div id="cpBox" style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column">
         <h3 style="margin:0 0 12px;color:var(--text-primary)">${esc(title || t('widget.picker.default_title'))}</h3>
-        <input type="text" id="cpSearch" class="input" placeholder="${t('widget.picker.search')}" style="margin-bottom:12px">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+          <input type="text" id="cpSearch" class="input" placeholder="${t('widget.picker.search')}" style="flex:1;min-width:150px;margin:0">
+          <button type="button" class="btn btn-secondary btn-sm" id="cpUploadBtn">${t('widget.picker.upload')}</button>
+          <input type="file" id="cpFile" accept="image/*" ${multiple ? 'multiple' : ''} hidden>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">${t('widget.picker.drop_hint')}</div>
+        <div id="cpStatus" style="display:none;font-size:12px;margin-bottom:8px"></div>
         <div id="cpList" style="flex:1;overflow-y:auto;min-height:200px"></div>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;gap:8px;flex-wrap:wrap">
           <div style="font-size:12px;color:var(--text-muted)" id="cpSelCount"></div>
@@ -232,34 +264,53 @@ function openContentPicker({ multiple = false, title } = {}) {
     document.body.appendChild(overlay);
 
     let items = [];
-    try { items = await API('/content'); } catch {}
-    items = (items || []).filter(i => (i.mime_type || '').startsWith('image/'));
-
+    let uploading = false;
     const selected = new Set();
     const resolveUrl = (item) => item.remote_url || `/api/content/${item.id}/file`;
     const updateCount = () => {
       const el = overlay.querySelector('#cpSelCount');
       if (el && multiple) el.textContent = t('widget.picker.selected_count', { n: selected.size });
     };
+    function setStatus(msg, kind) {
+      const el = overlay.querySelector('#cpStatus');
+      if (!el) return;
+      el.textContent = msg || '';
+      el.style.color = kind === 'error' ? '#ff6b6b' : 'var(--text-muted)';
+      el.style.display = msg ? 'block' : 'none';
+    }
+
+    // The selected state of ONE tile, changed in place.
+    //
+    // ⚠️ Not a re-render. renderList() rebuilds the grid, which re-hydrates every authenticated
+    // thumbnail and drops the scroll position back to the top — so picking a fourth background
+    // image threw the operator back to the first row every time.
+    function paintTile(el, id) {
+      const isSel = selected.has(id);
+      el.style.borderColor = isSel ? 'var(--primary, #4a7cff)' : 'transparent';
+      const badge = el.querySelector('[data-check]');
+      if (badge) badge.style.display = isSel ? 'flex' : 'none';
+    }
 
     function renderList() {
-      const q = (overlay.querySelector('#cpSearch').value || '').toLowerCase();
+      const searchEl = overlay.querySelector('#cpSearch');
+      const q = ((searchEl && searchEl.value) || '').toLowerCase();
       const filtered = items.filter(i => (i.filename || '').toLowerCase().includes(q));
       const list = overlay.querySelector('#cpList');
+      if (!list) return;
       if (!filtered.length) {
         list.innerHTML = `<div style="color:var(--text-muted);padding:32px;text-align:center;font-size:13px">${items.length ? t('widget.picker.no_matches') : t('widget.picker.no_images')}</div>`;
         return;
       }
       list.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px">${
         filtered.map(c => {
-          const isSel = selected.has(c.id);
+          const isSel = selected.has(String(c.id));
           const isRemote = !!c.remote_url;
           const thumb = c.remote_url || `/api/content/${c.id}/thumbnail`;
           return `
             <div data-pick-id="${escAttr(c.id)}" style="position:relative;cursor:pointer;border-radius:6px;overflow:hidden;border:2px solid ${isSel ? 'var(--primary, #4a7cff)' : 'transparent'};aspect-ratio:4/3;background:var(--bg-input)">
               <img ${isRemote ? `src="${escAttr(thumb)}"` : `data-auth-src="${escAttr(thumb)}"`} style="width:100%;height:100%;object-fit:cover" loading="lazy" onerror="this.style.opacity='0.2'">
               <div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.75);color:#fff;padding:4px 6px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escAttr(c.filename)}</div>
-              ${isSel ? '<div style="position:absolute;top:6px;right:6px;width:22px;height:22px;background:var(--primary, #4a7cff);color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1">&#10003;</div>' : ''}
+              <div data-check style="display:${isSel ? 'flex' : 'none'};position:absolute;top:6px;right:6px;width:22px;height:22px;background:var(--primary, #4a7cff);color:#fff;border-radius:50%;align-items:center;justify-content:center;font-size:14px;line-height:1">&#10003;</div>
             </div>`;
         }).join('')
       }</div>`;
@@ -268,8 +319,8 @@ function openContentPicker({ multiple = false, title } = {}) {
         const id = el.dataset.pickId;
         if (multiple) {
           if (selected.has(id)) selected.delete(id); else selected.add(id);
+          paintTile(el, id);
           updateCount();
-          renderList();
         } else {
           const item = items.find(x => String(x.id) === id);
           if (item) { cleanup(); resolve(resolveUrl(item)); }
@@ -277,10 +328,63 @@ function openContentPicker({ multiple = false, title } = {}) {
       });
     }
 
+    /*
+     * Upload straight into the library from here.
+     *
+     * ⚠️ Goes through api.uploadContent, never a bare fetch/XHR: that helper is the one that asks
+     * remoteRoute whether we are looking at a LINKED server, and an upload that skips the question
+     * lands silently in your own workspace under a heading that says someone else's.
+     */
+    async function uploadFiles(fileList) {
+      if (uploading) return;
+      const all = Array.from(fileList || []);
+      const picked = all.filter(f => (f.type || '').startsWith('image/'));
+      if (!picked.length) { setStatus(t('widget.picker.not_an_image'), 'error'); return; }
+      uploading = true;
+      setStatus(t('widget.picker.uploading'));
+      try {
+        const r = await api.uploadContent(multiple ? picked : [picked[0]],
+          (pct) => setStatus(t('widget.picker.uploading_pct', { pct })));
+        const added = (Array.isArray(r) ? r : [r]).filter(Boolean);
+        if (!added.length) throw new Error(t('widget.picker.upload_failed'));
+        items = added.concat(items);   // newest first, the order the server itself returns
+        setStatus('');
+        if (!multiple) {
+          // A single-image dialog has nothing left to ask — the operator just chose the file.
+          cleanup();
+          resolve(resolveUrl(added[0]));
+          return;
+        }
+        for (const c of added) selected.add(String(c.id));
+        // A stale filter must never hide the file that was just uploaded.
+        const s = overlay.querySelector('#cpSearch');
+        if (s) s.value = '';
+        updateCount();
+        renderList();
+      } catch (e) {
+        // The server's own words — "Unsupported file type", a storage-limit refusal — or nothing.
+        setStatus((e && e.message) || t('widget.picker.upload_failed'), 'error');
+      } finally {
+        uploading = false;
+        const f = overlay.querySelector('#cpFile');
+        if (f) f.value = '';   // so re-picking the SAME file fires change again
+      }
+    }
+
     function cleanup() { overlay.remove(); }
 
     overlay.querySelector('#cpSearch').oninput = renderList;
     overlay.querySelector('#cpCancel').onclick = () => { cleanup(); resolve(multiple ? [] : null); };
+    overlay.querySelector('#cpUploadBtn').onclick = () => overlay.querySelector('#cpFile').click();
+    overlay.querySelector('#cpFile').onchange = (e) => uploadFiles(e.target.files);
+    const box = overlay.querySelector('#cpBox');
+    box.addEventListener('dragover', (e) => { e.preventDefault(); box.style.outline = '2px dashed var(--primary, #4a7cff)'; });
+    box.addEventListener('dragleave', () => { box.style.outline = ''; });
+    box.addEventListener('drop', (e) => {
+      e.preventDefault();
+      box.style.outline = '';
+      uploadFiles(e.dataTransfer && e.dataTransfer.files);
+    });
     if (multiple) {
       overlay.querySelector('#cpDone').onclick = () => {
         const urls = Array.from(selected).map(id => {
@@ -293,6 +397,11 @@ function openContentPicker({ multiple = false, title } = {}) {
     }
     overlay.onclick = (e) => { if (e.target === overlay) { cleanup(); resolve(multiple ? [] : null); } };
     updateCount();
+    renderList();
+
+    // ⚠️ Images, and the server's maximum — see the note above this function.
+    try { items = await API('/content?type=image&limit=500'); } catch { items = []; }
+    items = (items || []).filter(i => (i.mime_type || '').startsWith('image/'));
     renderList();
   });
 }

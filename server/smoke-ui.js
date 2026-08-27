@@ -118,6 +118,112 @@ const check = (name, ok, detail) => {
   }
   check('no untranslated keys rendered as text', rawKeyOffenders.length === 0, rawKeyOffenders.join('\n         '));
 
+  // ---- a background picture can be added to a directory board WITHOUT leaving the form ---------
+  //
+  // ⚠️ THE REPORT THIS CAME FROM: "someone couldn't upload a background picture". They were right.
+  // The picker was read-only and its own empty state said so — "Upload images first from Content
+  // Library" — so the only route to a background was to abandon a half-filled widget form, cross to
+  // another view, upload, and come back. Nothing threw, nothing failed, and no unit test could see
+  // it, because the feature simply was not there. This drives the real dialog in a real browser.
+  await page.goto(BASE + '/app#/widgets', { waitUntil: 'networkidle2' });
+  await page.reload({ waitUntil: 'networkidle2' });
+  await new Promise(r => setTimeout(r, 900));
+
+  // ---- every widget type can actually be OPENED for editing ------------------------------------
+  //
+  // ⚠️ Weather and Social could not be, for sixteen days. Both config forms interpolate esc() into
+  // their HTML, and esc was never imported into views/widgets.js — so building the form threw
+  // ReferenceError and the modal never appeared. Rendering the widgets VIEW proves nothing about
+  // this: the throw is inside a click handler. One click per type is the whole guard.
+  const formsBefore = errors.length;
+  const formResults = await page.evaluate(async () => {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const out = {};
+    for (const type of ['clock', 'weather', 'rss', 'text', 'webpage', 'social',
+      'directory-board', 'directory-search', 'transition']) {
+      const card = document.querySelector(`[data-create-type="${type}"]`);
+      if (!card) { out[type] = 'no tile'; continue; }
+      const form = document.getElementById('widgetConfigForm');
+      if (form) form.innerHTML = '';        // so a form left over from the last type cannot pass for this one
+      try { card.click(); } catch (e) { out[type] = 'threw: ' + e.message; continue; }
+      await sleep(250);
+      const f = document.getElementById('widgetConfigForm');
+      out[type] = f && f.children.length ? 'ok' : 'empty form';
+      const modal = document.getElementById('widgetModal');
+      if (modal) modal.style.display = 'none';
+    }
+    return out;
+  });
+  const badForms = Object.entries(formResults).filter(([, v]) => v !== 'ok');
+  check('every widget type opens its config form', badForms.length === 0,
+    badForms.map(([k, v]) => `${k}: ${v}`).join(', '));
+  check('no uncaught error while opening the widget forms', errors.length === formsBefore,
+    errors.slice(formsBefore).join(' | '));
+
+  const picker = await page.evaluate(async () => {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const q = (s) => document.querySelector(s);
+    const card = q('[data-create-type="directory-board"]');
+    if (!card) return { err: 'no directory-board tile in the widget type grid' };
+    card.click();
+    await sleep(200);
+    const add = q('#wBgAdd');
+    if (!add) return { err: 'the directory-board form has no "Add Background Image" button' };
+    add.click();
+    await sleep(400);
+
+    const opened = {
+      hasUploadButton: !!q('#cpUploadBtn'),
+      hasFileInput: !!q('#cpFile'),
+      // t() returns the KEY itself when a string is missing, so a new key ships as visible text.
+      bareKeys: [...document.querySelectorAll('#cpBox *')]
+        .filter(e => e.children.length === 0)
+        .map(e => (e.textContent || '').trim())
+        .filter(s => /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/.test(s)),
+    };
+    if (!opened.hasFileInput) return { ...opened, err: 'the picker has no file input' };
+
+    // A real PNG, magic bytes and all — the server sniffs content, not the filename.
+    const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], 'smoke-backdrop.png', { type: 'image/png' }));
+    const input = q('#cpFile');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change'));
+
+    // Wait for the upload to land as a tile in the grid.
+    let tiles = 0;
+    for (let i = 0; i < 60 && tiles === 0; i++) { await sleep(250); tiles = document.querySelectorAll('#cpList [data-pick-id]').length; }
+    const status = (q('#cpStatus') || {}).textContent || '';
+    const selectedAfterUpload = document.querySelectorAll('#cpList [data-check]')
+      .length ? [...document.querySelectorAll('#cpList [data-check]')].filter(e => e.style.display !== 'none').length : 0;
+
+    const done = q('#cpDone');
+    if (done) done.click();
+    await sleep(400);
+    return {
+      ...opened,
+      tiles,
+      status,
+      selectedAfterUpload,
+      onBoard: document.querySelectorAll('#wBgList img').length,
+    };
+  });
+
+  check('the picker offers an upload', !picker.err && picker.hasUploadButton && picker.hasFileInput,
+    picker.err || 'no upload control in the image picker — the whole point of the report');
+  check('an uploaded picture lands in the picker', picker.tiles > 0,
+    `no tile appeared after the upload (status: ${picker.status || 'none'})`);
+  check('the uploaded picture comes back selected', picker.selectedAfterUpload > 0,
+    'the file uploaded but was not selected, so Done would return nothing');
+  check('it reaches the directory board', picker.onBoard > 0,
+    'the picker resolved but no background image is on the widget form');
+  check('the picker renders no untranslated keys', (picker.bareKeys || []).length === 0,
+    (picker.bareKeys || []).join(', '));
+
   // ---- the calendar binds its pointer handlers ONCE -------------------------------------------
   await page.goto(BASE + '/app#/schedule', { waitUntil: 'networkidle2' });
   await page.reload({ waitUntil: 'networkidle2' });

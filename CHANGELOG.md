@@ -1,5 +1,58 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — "Add Background Image" and "Choose Logo" did nothing on a directory board
+
+Reported as "someone couldn't upload a background picture", and that is exactly what it
+was. The image picker referenced `esc()` — added by the escaping sweep on 2026-08-11 and
+never imported into `views/widgets.js` — so opening the dialog threw ReferenceError before
+it could attach itself to the page. The button was inert, silently, and the promise behind
+it never settled.
+
+The same missing import broke two more things on the same day, in the same file:
+
+* the **Weather** widget's config form could not be opened at all (`esc(config.location)`)
+* the **Social** widget's config form could not be opened at all (`esc(config.query)`)
+
+Verified against the 1.9.x tree in a real browser: Weather and Social render an empty form
+and the picker never opens, all three with `esc is not defined`; adding the import fixes
+all three and leaves no page errors.
+
+Nothing caught it. The reference resolves only when the line runs, so a syntax check
+passes; every view still rendered, because all three calls sit inside click handlers; and
+the whole suite stayed green. `test/frontend-shared-helpers.test.js` now fails when a
+frontend file calls a shared helper it has not imported, and the browser smoke opens every
+widget type's form.
+
+**This is live on hosted (v1.9.36, since 2026-08-14) and on the 1.9.x branch — it needs the
+same one-line fix there.**
+
+### Added — upload a picture from inside the picker
+
+The dialog was read-only, and its empty state said so: "Upload images first from Content
+Library". Choosing a background meant abandoning a half-filled widget form, crossing to
+another view to upload, and coming back. It now takes a file directly — a button or a drop
+— uploads it into the library, and returns it selected.
+
+### Fixed — the image picker could show nothing while the library was full of images
+
+It asked for `/content` with no query, which returns the 100 newest rows of **every** type,
+and filtered to images afterwards. A workspace whose last hundred uploads were videos saw
+an empty picker, and the search box could not reach them either because it only ever
+filtered what had already been fetched. Both the widget picker and the slide editor now ask
+the server for images, and for its maximum.
+
+### Fixed — picking an image threw the grid back to the top
+
+Every selection re-rendered the whole list, which re-fetched each authenticated thumbnail
+and reset the scroll position. Choosing a fourth background meant scrolling down four times.
+
+### Fixed — a refused upload said only "Upload failed"
+
+The server is specific — unsupported file type, storage limit, no workspace — and
+`uploadContent()` replaced all of it with a shrug. It now reports what the server said.
+
 ## 2.0.0-alpha8
 
 ### Fixed — the slide Motion tab could not be used
