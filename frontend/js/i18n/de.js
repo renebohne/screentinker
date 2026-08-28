@@ -10,6 +10,7 @@ export default {
   'slides.ai.working': 'Wird erzeugt...',
   'slides.ai.need_prompt': 'Geben Sie zuerst ein, was die Folie sagen soll',
   'slides.ai.done': '{n} Elemente erzeugt – speichern Sie nur, wenn es Ihnen gefaellt',
+  'slides.ai.moved_on': 'Die Folie hat sich waehrend der Erzeugung geaendert, es wurde nichts ersetzt',
   'slides.ai.failed': 'Folie konnte nicht erzeugt werden',
   'slides.ai.replace_warn': 'Damit wird alles auf der aktuellen Folie ersetzt.',
   'switcher.create_title': 'Neuer Arbeitsbereich',

@@ -9,6 +9,7 @@ export default {
   'slides.ai.working': 'Generation...',
   'slides.ai.need_prompt': "Indiquez d'abord ce que la diapositive doit dire",
   'slides.ai.done': '{n} elements generes - enregistrez seulement si cela vous convient',
+  'slides.ai.moved_on': "La diapositive a change pendant la generation, rien n'a ete remplace",
   'slides.ai.failed': 'Impossible de generer cette diapositive',
   'slides.ai.replace_warn': 'Cela remplace tout sur la diapositive actuelle.',
   'switcher.create_title': 'Nouvel espace de travail',

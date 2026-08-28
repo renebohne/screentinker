@@ -9,6 +9,7 @@ export default {
   'slides.ai.working': 'Generazione...',
   'slides.ai.need_prompt': 'Scrivi prima cosa deve dire la slide',
   'slides.ai.done': '{n} elementi generati: salva solo se ti convince',
+  'slides.ai.moved_on': 'La slide e cambiata durante la generazione, non e stato sostituito nulla',
   'slides.ai.failed': 'Impossibile generare la slide',
   'slides.ai.replace_warn': 'Questo sostituisce tutto nella slide corrente.',
   'switcher.create_title': 'Nuovo spazio di lavoro',

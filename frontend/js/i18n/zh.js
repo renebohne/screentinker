@@ -116,6 +116,7 @@ export default {
   'slides.ai.working': '正在生成...',
   'slides.ai.need_prompt': '请先输入幻灯片要表达的内容',
   'slides.ai.done': '已生成 {n} 个元素 — 满意后再保存',
+  'slides.ai.moved_on': '生成期间幻灯片已更改，未替换任何内容',
   'slides.ai.failed': '无法生成该幻灯片',
   'slides.ai.replace_warn': '这将替换当前幻灯片的全部内容。',
   'content.filter_type_bundle': 'HTML 包',

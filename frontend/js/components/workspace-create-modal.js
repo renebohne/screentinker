@@ -64,11 +64,22 @@ export function openWorkspaceCreateModal() {
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
   overlay.querySelectorAll('[data-create-close]').forEach(b => b.addEventListener('click', close));
 
+  let busy = false;
   async function save() {
+    /*
+     * ⚠️ NOT GUARDED BY saveBtn.disabled. A disabled button ignores clicks, but the document-level
+     * Enter binding calls save() directly and key auto-repeat fires it continuously — so holding
+     * Enter in the name field posted one create per repeat. Create is NOT idempotent (the rename
+     * modal this was modelled on is, which is how the shape got copied), there is no rate limit on
+     * the route, and there is no self-service delete: one held key could consume the organization's
+     * entire workspace cap, permanently, needing a platform admin to clean up.
+     */
+    if (busy) return;
+    busy = true;
     errorEl.style.display = 'none';
     const name = nameInput.value.trim();
     const slug = slugInput.value.trim();
-    if (!name) { showError(t('switcher.create_name_required')); return; }
+    if (!name) { showError(t('switcher.create_name_required')); busy = false; return; }
     saveBtn.disabled = true;
     saveBtn.textContent = t('switcher.create_working');
     try {
@@ -94,8 +105,20 @@ export function openWorkspaceCreateModal() {
          */
         if (sw && sw.token) localStorage.setItem('token', sw.token);
       } catch (e) { /* created; the switcher can still reach it */ }
+      /*
+       * ⚠️ DROP ANY SELECTED REMOTE SERVER BEFORE RELOADING — the switcher's own switch path states
+       * the rule: "clear before the reload, or the local workspace renders under the remote banner
+       * and an operator is looking at their own data labelled as somebody else's." A workspace is
+       * always created LOCALLY (/workspaces is ALWAYS_LOCAL), so landing in it while a customer's
+       * server is still selected is exactly that failure.
+       */
+      try {
+        const { clearRemoteOrg } = await import('./workspace-switcher.js');
+        clearRemoteOrg();
+      } catch (e) { /* nothing selected, or the module moved — the reload is still correct */ }
       window.location.reload();
     } catch (err) {
+      busy = false;
       saveBtn.disabled = false;
       saveBtn.textContent = t('switcher.create_submit');
       // The server's own words — it distinguishes a duplicate slug from a bad one from the per-org

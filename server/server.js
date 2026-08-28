@@ -1149,6 +1149,17 @@ app.get('/api/widgets/:id/data.json', (req, res, next) => { req._skipAuth = true
 app.post('/api/widgets/:id/telemetry', (req, res, next) => { req._skipAuth = true; next(); }); // diag widget reports frame stats (null-origin iframe)
 app.get('/api/widgets/:id/telemetry', (req, res, next) => { req._skipAuth = true; next(); });
 app.get('/api/widgets/preview-session/:id', (req, res, next) => { req._skipAuth = true; next(); });
+/*
+ * ⚠️ AI GENERATION IS HEAVIER THAN THE PREVIEW ROUTES BELOW AND WAS THE ONLY ONE UNLIMITED.
+ *
+ * Each call makes an OUTBOUND fetch with a 180-second budget to an operator-configured endpoint and
+ * buffers the whole reply. Nothing serialises them, so an editor with several tabs — or a held
+ * Enter key in the generate box — holds that many sockets open and that many response bodies in
+ * heap, on a host shared with every other tenant. Ten a minute is generous for a person describing
+ * a slide and ruinous for a loop.
+ */
+app.use('/api/ai/generate-slide', rateLimit(60000, 10));
+app.use('/api/ai/generate-design', rateLimit(60000, 10));
 app.use('/api/widgets/preview', rateLimit(60000, 30)); // base64 inline = memory-intensive
 app.use('/api/widgets/preview-session', rateLimit(60000, 30)); // preview session creation retains rendered HTML in memory for 5min
 app.get('/api/kiosk/:id/render', (req, res, next) => { req._skipAuth = true; next(); });

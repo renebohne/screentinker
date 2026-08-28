@@ -1,6 +1,11 @@
 import { api } from '../api.js';
 import { t } from '../i18n.js';
 import { showToast } from './toast.js';
+/* ⚠️ esc CAME WITH THE CODE AND THE IMPORT DID NOT. Extracting this dialog out of designer.js left
+ * five esc() calls behind their import, so opening it threw ReferenceError while building the
+ * markup — before appendChild — which broke the Designer's OWN settings button as well as the new
+ * one in Slides. Exactly the defect of 2026-08-11, in a file the guard could not see. */
+import { esc } from '../utils.js';
 
 /*
  * The AI endpoint/model settings dialog, shared by the Designer and the Slides editor.

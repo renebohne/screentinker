@@ -9,6 +9,7 @@ export default {
   'slides.ai.working': '生成中...',
   'slides.ai.need_prompt': 'スライドの内容を先に入力してください',
   'slides.ai.done': '{n} 個の要素を生成しました。気に入った場合のみ保存してください',
+  'slides.ai.moved_on': '生成中にスライドが変わったため、何も置き換えていません',
   'slides.ai.failed': 'スライドを生成できませんでした',
   'slides.ai.replace_warn': '現在のスライドの内容がすべて置き換わります。',
   'switcher.create_title': '新しいワークスペース',

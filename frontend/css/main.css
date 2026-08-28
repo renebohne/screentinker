@@ -143,6 +143,14 @@ body {
 }
 .workspace-switcher-create:hover { color: var(--accent); }
 .workspace-switcher-create svg { flex-shrink: 0; }
+/* ⚠️ THE MENU ANCHORS TO THE CONTAINER, SO THIS CONTROL MUST NOT ADD TO ITS HEIGHT.
+   .workspace-switcher-menu is absolutely positioned at top: calc(100% + 4px) against
+   .workspace-switcher. Adding an in-flow row after the menu grew that container by ~30px, so the
+   dropdown opened BELOW the "New workspace" line instead of directly under its own button — the
+   action wedged between the selector and the list it opens. Taking the control out of flow keeps
+   the anchor where the menu expects it, and the container reserves the space instead. */
+.workspace-switcher { padding-bottom: 28px; }
+.workspace-switcher-create { position: absolute; left: 0; bottom: 0; margin-top: 0; }
 /* Members icon - same shape as the pencil; navigates to #/workspace/:id/members. */
 .workspace-switcher-members {
   flex-shrink: 0; visibility: hidden;

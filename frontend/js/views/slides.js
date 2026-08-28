@@ -271,10 +271,10 @@ function renderEditor(container) {
       </div>
       <div class="settings-section" style="padding:0">
         <div style="display:flex;border-bottom:1px solid var(--border)" id="tabs">
-          ${['content', 'style', 'motion', 'slide'].map((t) => `
-            <button class="tabBtn" data-tab="${t}" style="flex:1;padding:8px 2px;border:0;background:none;
+          ${['content', 'style', 'motion', 'slide'].map((tab) => `
+            <button class="tabBtn" data-tab="${tab}" style="flex:1;padding:8px 2px;border:0;background:none;
               cursor:pointer;font-size:12px;font-weight:600;border-bottom:2px solid transparent">
-              ${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}
+              ${tab[0].toUpperCase() + tab.slice(1)}</button>`).join('')}
         </div>
         <div id="layers" style="max-height:170px;overflow-y:auto;border-bottom:1px solid var(--border)"></div>
         <div id="props" style="padding:11px 12px 14px;display:grid;gap:9px"></div>
@@ -1011,7 +1011,17 @@ async function publish(container) {
  * who dislikes it can navigate away and lose nothing. Generating straight into a save would make
  * the model's output authoritative before anyone had looked at it.
  */
+let aiBusy = false;
+
 async function aiGenerate(container) {
+  /*
+   * ⚠️ ONE AT A TIME, AND THE FLAG IS NOT btn.disabled. A disabled button ignores clicks but the
+   * Enter binding calls this directly, and key auto-repeat fires it continuously — so a held Enter
+   * launched one 180-second request per repeat. It also corrupted the button permanently: the
+   * second call read `label` from the DOM AFTER the first had set it to "Generating…", so `finally`
+   * restored that as the resting text for ever.
+   */
+  if (aiBusy) return;
   const promptEl = container.querySelector('#aiPrompt');
   const statusEl = container.querySelector('#aiStatus');
   const btn = container.querySelector('#aiGenBtn');
@@ -1032,36 +1042,60 @@ async function aiGenerate(container) {
     state.deck.doc.slides.push(newSlide(`Slide ${state.deck.doc.slides.length + 1}`));
     state.si = state.deck.doc.slides.length - 1;
     state.ei = 0;
+    /*
+     * ⚠️ MARKED AND PAINTED BEFORE THE REQUEST, NOT AFTER. Without this the strip and the header
+     * describe the old empty deck for the whole generation, and if the generation then FAILS the
+     * slide stays in the document with dirty still false — invisible, unwarned, and swept into
+     * whatever save happens next.
+     */
+    touch(container);
   }
   const s = slide();
   const untouched = elementsOf(s).length <= 1
     && Object.values(s.fields || {}).every((v) => !String(v || '').trim() || String(v) === 'New slide');
   if (!untouched && !window.confirm(t('slides.ai.replace_warn'))) return;
 
+  aiBusy = true;
   btn.disabled = true;
-  const label = btn.textContent;
   btn.textContent = t('slides.ai.working');
   say('');
+  /* The slide is identified by ID, not by object, for the re-check after the await below. */
+  const targetId = s.id;
+  const targetDeckId = state.deck && state.deck.id;
   try {
     const out = await api.aiGenerateSlide(prompt);
+
+    /*
+     * ⚠️ THE USER HAS HAD UP TO 180 SECONDS TO MOVE. Writing to the captured slide object would
+     * replace whichever slide they navigated to — or one they deleted, or a slide in another deck —
+     * silently, while repainting something else and reporting success. The confirmation they gave
+     * was about THIS slide; if it is no longer the one in front of them, the answer is dropped and
+     * said so, not applied somewhere they did not ask for.
+     */
+    if (!state.deck || state.deck.id !== targetDeckId) return;
+    const idx = state.deck.doc.slides.findIndex((x) => x.id === targetId);
+    if (idx === -1 || idx !== state.si) { say(t('slides.ai.moved_on'), true); return; }
+    const s2 = state.deck.doc.slides[idx];
     /*
      * ⚠️ The slide KEEPS ITS OWN identity — id, name and dwell. Those belong to the deck, not to
      * the generated content, and replacing them would renumber the strip and reset a dwell the
      * operator had already tuned for this slot.
      */
-    s.template = out.template;
-    s.fields = out.fields || {};
+    s2.template = out.template;
+    s2.fields = out.fields || {};
     state.ei = 0;
     state.dirty = true;
     paintAll(container);
-    say(t('slides.ai.done', { n: out.elements != null ? out.elements : elementsOf(s).length }));
+    say(t('slides.ai.done', { n: out.elements != null ? out.elements : elementsOf(s2).length }));
   } catch (err) {
     // The server distinguishes "AI is not configured" from "timed out" from "returned nonsense",
     // and each needs a different action from the person reading it.
     say((err && err.message) || t('slides.ai.failed'), true);
   } finally {
+    aiBusy = false;
+    // Read the resting label from i18n rather than from a variable captured mid-flight.
     btn.disabled = false;
-    btn.textContent = label;
+    btn.textContent = t('slides.ai.generate');
   }
 }
 

@@ -10,6 +10,7 @@ export default {
   'slides.ai.working': 'Gerando...',
   'slides.ai.need_prompt': 'Escreva primeiro o que o slide deve dizer',
   'slides.ai.done': '{n} elementos gerados - salve apenas se gostar',
+  'slides.ai.moved_on': 'O slide mudou durante a geracao, nada foi substituido',
   'slides.ai.failed': 'Nao foi possivel gerar esse slide',
   'slides.ai.replace_warn': 'Isto substitui tudo no slide atual.',
   'switcher.create_title': 'Novo espaco de trabalho',

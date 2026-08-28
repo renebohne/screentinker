@@ -9,6 +9,7 @@ export default {
   'slides.ai.working': 'Generating...',
   'slides.ai.need_prompt': 'Type what the slide should say first',
   'slides.ai.done': 'Generated {n} elements — Undo replaces nothing, so save only if you like it',
+  'slides.ai.moved_on': 'The slide changed while that was generating, so nothing was replaced',
   'slides.ai.failed': 'Could not generate that slide',
   'slides.ai.replace_warn': 'This replaces everything on the current slide.',
   'switcher.create_title': 'New workspace',

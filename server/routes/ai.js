@@ -301,7 +301,10 @@ function normalizeSlideSpec(raw) {
       slot, kind,
       box: {
         x: clampN(box.x, 0, 96, 5),
-        y: clampN(box.y, 0, 96, 5 + i * 14),
+        // ⚠️ The DEFAULT is clamped too. clampN returns `d` untouched when the input is not finite,
+        // so a stacked default of 5 + i*14 reaches 103 at the eighth element and lands the whole
+        // thing below the slide — a fallback that puts content off-screen is not a fallback.
+        y: clampN(box.y, 0, 96, Math.min(96, 5 + i * 11)),
         w: clampN(box.w, 3, 100, isText ? 60 : 30),
         h: isText ? undefined : clampN(box.h, 1, 100, 6),
       },
@@ -322,8 +325,15 @@ function normalizeSlideSpec(raw) {
     });
 
     if (isText) {
-      const raw = fieldsIn[o.slot] != null ? fieldsIn[o.slot] : (o.text != null ? o.text : '');
-      fields[slot] = cleanText(raw);
+      /*
+       * ⚠️ hasOwnProperty, NOT map[key]. Both `fieldsIn` and `o.slot` are model-controlled, so a
+       * slot of "constructor" or "toString" reads a prototype member and renders
+       * `function Object() { [native code] }` on a wall in place of the operator's words. The same
+       * hazard lib/slide-render.js and lib/html-bundle.js already guard against by hand.
+       */
+      const has = Object.prototype.hasOwnProperty.call(fieldsIn, o.slot);
+      const text = has ? fieldsIn[o.slot] : (Object.prototype.hasOwnProperty.call(o, 'text') ? o.text : '');
+      fields[slot] = cleanText(text);
     }
   });
 
@@ -410,7 +420,14 @@ router.post('/generate-slide', async (req, res) => {
   if (out.error) return res.status(out.status || 502).json({ error: out.error });
 
   const spec = normalizeSlideSpec(out.parsed);
-  if (!spec.template.elements.length) {
+  /*
+   * ⚠️ COUNT WORDS, NOT ELEMENTS. A model that answers entirely in `image` elements has every one
+   * of them demoted to `body` (an image needs a content_id no model can know), leaving text
+   * elements with nothing to say — which passed an element-count check as a success and put a
+   * blank stage in front of somebody who had just been told "Generated 2 elements".
+   */
+  const withWords = Object.values(spec.fields).filter((v) => String(v || '').trim()).length;
+  if (!spec.template.elements.length || !withWords) {
     return res.status(502).json({ error: 'AI returned an empty slide. Try a more specific prompt.' });
   }
 
@@ -421,12 +438,39 @@ router.post('/generate-slide', async (req, res) => {
    * reject is a slide that looks fine until it reaches a screen.
    */
   const settled = SLIDE_RENDER.normalizeSlide(spec);
-  res.json({
-    template: spec.template,
-    fields: spec.fields,
-    elements: settled.elements.length,
-    settle_sec: SLIDE_RENDER.settleTime ? SLIDE_RENDER.settleTime(settled) : null,
-  });
+
+  /*
+   * ⚠️ ANSWER WITH WHAT THE RENDERER SETTLED ON — NOT WITH THE FIRST PASS.
+   *
+   * The two normalizers disagree on the edges: this file's hex() accepts 3-8 hex digits while the
+   * renderer's color() accepts 3 or 6, so an #RRGGBBAA from a model survives here, is accepted by
+   * the editor, previews correctly in a browser that understands 8-digit hex — and renders BLACK on
+   * the wall. Returning spec.template made normalizeSlide a formality whose verdict was discarded,
+   * which is precisely the "the editor would accept this and the renderer will render this are
+   * different claims" failure this route claims to prevent.
+   */
+  const template = {
+    background: settled.background,
+    elements: settled.elements.map((e) => ({
+      slot: e.slot, kind: e.kind,
+      box: { x: e.x, y: e.y, w: e.w, ...(e.h == null ? {} : { h: e.h }) },
+      style: {
+        color: e.style.color, size_cqw: e.style.size, weight: e.style.weight,
+        align: e.style.align, opacity: e.style.opacity, radius_cqw: e.style.radius,
+      },
+      motion: e.motion,
+    })),
+  };
+  /* Words only survive for slots the renderer kept. */
+  const fields = {};
+  for (const e of template.elements) {
+    if (Object.prototype.hasOwnProperty.call(spec.fields, e.slot)) fields[e.slot] = spec.fields[e.slot];
+  }
+
+  logActivity(req.user.id, 'ai_generate_slide',
+    `Generated a slide from a prompt (${template.elements.length} elements)`, null, getClientIp(req), req.workspaceId);
+
+  res.json({ template, fields, elements: template.elements.length, settle_sec: SLIDE_RENDER.settleTime(settled) });
 });
 
 // POST /api/ai/generate-design — editor+; proxies the workspace's endpoint

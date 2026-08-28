@@ -111,7 +111,16 @@ test('⚠️ every shared helper a frontend file calls is in that file\'s scope'
 
   const offenders = [];
   for (const file of jsFiles(FRONTEND)) {
-    if (SOURCES.includes(file)) continue;
+    /*
+     * ⚠️ NO FILE IS EXEMPT — AND SKIPPING SOURCES WAS A HOLE BIG ENOUGH TO DRIVE THE SAME BUG
+     * THROUGH TWICE. SOURCES holds the helper modules AND every file in components/, so every
+     * modal in this codebase was excluded from the scan. The AI settings dialog was then extracted
+     * from views/ (scanned) into components/ (not scanned) with its esc() import left behind, and
+     * this guard reported green over a ReferenceError that broke two features.
+     *
+     * A source file does not need exempting: inScope() already counts what a file DECLARES,
+     * including its own exports, so utils.js using its own esc() resolves normally.
+     */
     const src = code(fs.readFileSync(file, 'utf8'));
     const scope = inScope(src);
     for (const name of shared) {
