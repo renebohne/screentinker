@@ -226,6 +226,209 @@ router.post('/models', async (req, res) => {
   res.json({ models: models.slice(0, 300) });
 });
 
+/*
+ * The renderer's own vocabularies, imported rather than restated.
+ *
+ * ⚠️ A LIST TYPED OUT HERE WOULD DRIFT. Offering the model an animation the renderer does not
+ * implement produces a slide that validates, ships, and then animates nothing — and the editor
+ * would show the same nothing, so there is no moment at which anyone notices. Reading them from
+ * the source of truth makes that impossible by construction.
+ *
+ * `image` is deliberately EXCLUDED from what the model may choose: an image element is meaningless
+ * without a content_id pointing at a real upload in this workspace, and a model cannot know one.
+ * ⚠️ Declared before the functions that read it — a TDZ on a module-level const is how a boot
+ * brick happened here once.
+ */
+const SLIDE_RENDER = require('../lib/slide-render');
+const SLIDE_ANIMATIONS = Object.keys(SLIDE_RENDER.ANIMATIONS || {}).filter((a) => a !== 'none');
+const SLIDE_KINDS = Object.keys(SLIDE_RENDER.KINDS || {}).filter((k) => k !== 'image');
+
+/*
+ * The slide schema, described to a model.
+ *
+ * ⚠️ DIFFERENT FROM THE DESIGNER'S, AND THE DIFFERENCE IS THE WHOLE POINT OF SLIDES. A designer
+ * element carries its own text; a slide keeps LAYOUT in `template.elements` and WORDS in `fields`,
+ * joined at render time. That separation is what lets somebody change a headline later without
+ * rebuilding the layout — so the model is asked for both halves and told how they join, rather than
+ * being allowed to bake text into the layout the way the designer's schema does.
+ *
+ * Sizes are cqw (percent of the container's width), never px: a slide is authored once and lands on
+ * panels from 720p to 4K.
+ */
+function slideSystemPrompt() {
+  return `You are a presentation designer. The slide is 16:9. Respond with ONLY a JSON object (no prose, no markdown fences) shaped exactly:
+{"background":"#RRGGBB","elements":[ELEMENT,...],"fields":{"SLOT":"TEXT",...}}
+ELEMENT is:
+{"slot":"SLOT","kind":"${SLIDE_KINDS.join('|')}","box":{"x":N,"y":N,"w":N,"h":N},"style":{"color":"#RRGGBB","size_cqw":N,"weight":N,"align":"left|center|right","opacity":N,"radius_cqw":N},"motion":{"animation":"ANIM","delay":N,"duration":N}}
+SLOT is a short lowercase identifier like "title" or "point_1"; every TEXT element's slot must also appear in "fields" with its wording. "rule" and "box" are decoration and take no field.
+box.x/y/w/h are PERCENTAGES of the slide (0-100). size_cqw is text size as a percent of slide width: a headline is about 6, body about 3, a big stat about 12. weight is 100-900.
+ANIM is one of: ${SLIDE_ANIMATIONS.join(', ')}. Use motion sparingly — at most half the elements, delays under 1.5s.
+Use 2 to 6 elements: one "head", 1-4 "body" or "stat", and 0-2 "rule"/"box" as accent bands. Keep everything within 2-96 on both axes, pick a high-contrast palette, and put every word in "fields". Output JSON only.`;
+}
+
+/*
+ * Turn whatever the model said into something normalizeSlide will accept.
+ *
+ * ⚠️ NEVER TRUST RAW MODEL OUTPUT — the same rule normalizeDesign states. Everything is clamped,
+ * every kind and animation is checked against the real vocabularies, slots are regenerated to a
+ * safe pattern, and text is stripped of markup. A model that returns 40 elements, negative sizes or
+ * a slot named "../../x" produces a small valid slide rather than an error or a render exploit.
+ *
+ * The output is a slide CONFIG (template + fields), which lib/slide-render.normalizeSlide then
+ * re-validates on its own terms — this is a first pass, not the last line of defence.
+ */
+function normalizeSlideSpec(raw) {
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  const KINDS = SLIDE_KINDS;
+  const anims = SLIDE_ANIMATIONS;
+  const els = Array.isArray(src.elements) ? src.elements.slice(0, 8) : [];
+  const fieldsIn = (src.fields && typeof src.fields === 'object' && !Array.isArray(src.fields)) ? src.fields : {};
+
+  const elements = [];
+  const fields = {};
+  els.forEach((e, i) => {
+    const o = (e && typeof e === 'object') ? e : {};
+    const kind = KINDS.includes(o.kind) ? o.kind : 'body';
+    // Slots are regenerated from a safe pattern rather than sanitised: the model's slot is only a
+    // key, and inventing our own removes an entire class of question about what it may contain.
+    const slot = `s${i + 1}_${kind}`;
+    const box = (o.box && typeof o.box === 'object') ? o.box : {};
+    const st = (o.style && typeof o.style === 'object') ? o.style : {};
+    const mo = (o.motion && typeof o.motion === 'object') ? o.motion : null;
+    const isText = kind === 'head' || kind === 'body' || kind === 'stat';
+
+    elements.push({
+      slot, kind,
+      box: {
+        x: clampN(box.x, 0, 96, 5),
+        y: clampN(box.y, 0, 96, 5 + i * 14),
+        w: clampN(box.w, 3, 100, isText ? 60 : 30),
+        h: isText ? undefined : clampN(box.h, 1, 100, 6),
+      },
+      style: {
+        color: hex(st.color, '#FFFFFF'),
+        size_cqw: clampN(st.size_cqw, 0.5, 30, kind === 'head' ? 6 : kind === 'stat' ? 12 : 3),
+        weight: Math.round(clampN(st.weight, 100, 900, kind === 'head' ? 700 : 400) / 100) * 100,
+        align: ['left', 'center', 'right'].includes(st.align) ? st.align : 'left',
+        opacity: clampN(st.opacity, 0, 1, 1),
+        radius_cqw: clampN(st.radius_cqw, 0, 20, 0),
+      },
+      motion: (mo && anims.includes(mo.animation)) ? {
+        animation: mo.animation,
+        delay: clampN(mo.delay, 0, 5, 0),
+        duration: clampN(mo.duration, 0.05, 5, 0.5),
+        easing: 'ease-out',
+      } : null,
+    });
+
+    if (isText) {
+      const raw = fieldsIn[o.slot] != null ? fieldsIn[o.slot] : (o.text != null ? o.text : '');
+      fields[slot] = cleanText(raw);
+    }
+  });
+
+  return {
+    template: { background: hex(src.background, '#0B1220'), elements },
+    fields,
+  };
+}
+
+/*
+ * Ask the workspace's configured model for a JSON object, and hand back something already parsed.
+ *
+ * ⚠️ EXTRACTED SO THE SECOND CALLER IS NOT A SECOND COPY. Everything up to "the model replied" is
+ * identical for any generate-* route — settings lookup, the endpoint allowlist, the long timeout
+ * local models need, the non-JSON and non-OK paths, and digging the content out of a
+ * chat-completions envelope. What differs is the system prompt and how the reply is sanitised, and
+ * those are the only things a caller supplies.
+ *
+ * Errors come back as {error, status} rather than thrown, because every one of them is a specific
+ * message an operator can act on ("AI is not configured", "timed out", "returned non-JSON") and
+ * flattening them into a 500 is how a misconfigured endpoint becomes an unexplainable failure.
+ */
+async function askModelForJson({ workspaceId, system, user, timeoutMs = 180000 }) {
+  const row = db.prepare('SELECT base_url, api_key_enc, model, image_base_url, image_model, image_provider, image_api_key_enc FROM ai_settings WHERE workspace_id = ?').get(workspaceId);
+  if (!row || !row.base_url || !row.model) {
+    return { error: 'AI is not configured. Set an endpoint and model in AI settings first.', status: 400 };
+  }
+  if (!endpointAllowed(row.base_url)) return { error: 'Configured endpoint is not allowed.', status: 400 };
+
+  const key = decrypt(row.api_key_enc) || 'none';
+  const url = row.base_url.replace(/\/+$/, '') + '/chat/completions';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let aiRes;
+  try {
+    aiRes = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: row.model, temperature: 0.6, stream: false,
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      }),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    return { error: 'Could not reach the AI endpoint: ' + (e.name === 'AbortError' ? 'timed out' : e.message), status: 502 };
+  }
+  clearTimeout(timer);
+  if (!aiRes.ok) {
+    const t = await aiRes.text().catch(() => '');
+    return { error: `AI endpoint error ${aiRes.status}: ${t.slice(0, 150)}`, status: 502 };
+  }
+  let json;
+  try { json = await aiRes.json(); } catch { return { error: 'AI returned non-JSON.', status: 502 }; }
+  const content = (json && json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content) || '';
+  try {
+    // Models wrap JSON in prose or fences no matter how firmly the prompt says not to; take the
+    // outermost object rather than failing on the packaging.
+    const m = content.match(/\{[\s\S]*\}/);
+    return { parsed: JSON.parse(m ? m[0] : content), row, key };
+  } catch {
+    return { error: 'AI did not return a usable answer. Try rephrasing.', status: 502 };
+  }
+}
+
+/*
+ * POST /api/ai/generate-slide — editor+; a whole slide from a sentence.
+ *
+ * Returns a slide CONFIG ({template, fields}) ready to drop onto the editor's canvas, not HTML and
+ * not a widget. The caller decides whether that replaces the current slide or becomes a new one —
+ * this route has no opinion about the deck, which keeps it usable for both.
+ */
+router.post('/generate-slide', async (req, res) => {
+  if (!canEdit(req)) return res.status(403).json({ error: 'Editor access required' });
+  const prompt = String(req.body && req.body.prompt || '').trim().slice(0, 500);
+  if (!prompt) return res.status(400).json({ error: 'Prompt required' });
+
+  const out = await askModelForJson({
+    workspaceId: req.workspaceId,
+    system: slideSystemPrompt(),
+    user: prompt,
+  });
+  if (out.error) return res.status(out.status || 502).json({ error: out.error });
+
+  const spec = normalizeSlideSpec(out.parsed);
+  if (!spec.template.elements.length) {
+    return res.status(502).json({ error: 'AI returned an empty slide. Try a more specific prompt.' });
+  }
+
+  /*
+   * ⚠️ RUN IT THROUGH THE RENDERER'S OWN NORMALIZER BEFORE ANSWERING. normalizeSlideSpec is a first
+   * pass over model output; normalizeSlide is what every render and every save goes through, and it
+   * is total by contract. Answering with something the editor would accept but the renderer would
+   * reject is a slide that looks fine until it reaches a screen.
+   */
+  const settled = SLIDE_RENDER.normalizeSlide(spec);
+  res.json({
+    template: spec.template,
+    fields: spec.fields,
+    elements: settled.elements.length,
+    settle_sec: SLIDE_RENDER.settleTime ? SLIDE_RENDER.settleTime(settled) : null,
+  });
+});
+
 // POST /api/ai/generate-design — editor+; proxies the workspace's endpoint
 router.post('/generate-design', async (req, res) => {
   if (!canEdit(req)) return res.status(403).json({ error: 'Editor access required' });

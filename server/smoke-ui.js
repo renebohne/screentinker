@@ -510,6 +510,80 @@ const check = (name, ok, detail) => {
       `insideMenu=${rows.createInsideMenu} everyItemFilterable=${rows.everyItemFilterable}`);
   }
 
+
+  // ---- the slide editor's AI panel is wired, and reports the server's reason -------------------
+  //
+  // ⚠️ THE MODEL IS NOT UNDER TEST — there is no AI endpoint configured here, and asserting on
+  // generated content would be asserting on a language model. What IS testable, and is the part
+  // that breaks silently, is the wiring: the control exists, the empty-prompt guard fires without
+  // a round trip, and a real failure surfaces the SERVER'S words rather than a blank status line.
+  // "AI is not configured" is a sentence an operator can act on; a silent no-op is not.
+  await page.goto(BASE + '/app#/slides', { waitUntil: 'networkidle2' });
+  await page.reload({ waitUntil: 'networkidle2' });
+  await new Promise(r => setTimeout(r, 900));
+
+  // Create the deck, THEN reload — assigning location.hash to the hash you are already on fires no
+  // hashchange, so the list would never re-render and the new deck would never appear.
+  const made = await page.evaluate(async () => {
+    const auth = { Authorization: 'Bearer ' + localStorage.getItem('token'), 'Content-Type': 'application/json' };
+    const deck = await (await fetch('/api/slide-decks', {
+      method: 'POST', headers: auth, body: JSON.stringify({ name: 'AI smoke deck' }) })).json();
+    return deck && deck.id ? { id: deck.id } : { err: 'could not create a deck: ' + JSON.stringify(deck).slice(0, 120) };
+  });
+  await page.reload({ waitUntil: 'networkidle2' });
+  await new Promise(r => setTimeout(r, 900));
+
+  const ai = await page.evaluate(async (deck) => {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    if (deck.err) return { err: deck.err };
+    // The list renders an "Edit" button carrying data-open=<deckId>; that is the way in.
+    let openBtn = null;
+    for (let i = 0; i < 40 && !openBtn; i++) {
+      openBtn = [...document.querySelectorAll('[data-open]')].find((b) => b.dataset.open === deck.id);
+      if (!openBtn) await sleep(150);
+    }
+    if (!openBtn) return { err: 'the new deck never appeared in the list' };
+    openBtn.click();
+    for (let i = 0; i < 40 && !document.getElementById('aiPrompt'); i++) await sleep(150);
+
+    const prompt = document.getElementById('aiPrompt');
+    const btn = document.getElementById('aiGenBtn');
+    const cfg = document.getElementById('aiCfgBtn');
+    const status = document.getElementById('aiStatus');
+    if (!prompt || !btn) return { err: 'the editor opened but has no AI controls' };
+
+    // 1. empty prompt: refused locally, no request made.
+    btn.click();
+    await sleep(200);
+    const emptyMsg = (status.textContent || '').trim();
+
+    // 2. a real prompt with no AI configured: the server's reason must reach the status line.
+    prompt.value = 'autumn sale, 40% off, bold';
+    prompt.dispatchEvent(new Event('input', { bubbles: true }));
+    btn.click();
+    /*
+     * ⚠️ WAIT FOR A NON-EMPTY RESULT, not merely for the text to CHANGE. aiGenerate clears the
+     * status line before it starts the request, so "different from the last message" is satisfied
+     * instantly by the empty string and the poll reads nothing.
+     */
+    let failMsg = '';
+    for (let i = 0; i < 80; i++) {
+      await sleep(150);
+      const cur = (status.textContent || '').trim();
+      if (cur && cur !== emptyMsg) { failMsg = cur; break; }
+    }
+
+    return { ok: true, hasCfg: !!cfg, emptyMsg, failMsg };
+  }, made);
+
+  check('the slide editor offers AI generation', !ai.err && ai.hasCfg,
+    ai.err || 'the prompt/generate/settings controls are not all present');
+  check('an empty prompt is refused without a round trip', !ai.err && /first|prompt|say/i.test(ai.emptyMsg || ''),
+    `status said ${JSON.stringify(ai.emptyMsg)}`);
+  check("⚠️ a generation failure shows the SERVER'S reason, not a blank line",
+    !ai.err && /not configured|endpoint|AI/i.test(ai.failMsg || ''),
+    `status said ${JSON.stringify(ai.failMsg)} — a silent no-op here is indistinguishable from a broken button`);
+
   // ---- the calendar binds its pointer handlers ONCE -------------------------------------------
   await page.goto(BASE + '/app#/schedule', { waitUntil: 'networkidle2' });
   await page.reload({ waitUntil: 'networkidle2' });

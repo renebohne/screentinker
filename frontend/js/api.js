@@ -574,6 +574,9 @@ export const api = {
   aiGetSettings: () => request('/ai/settings'),
   aiSaveSettings: (data) => request('/ai/settings', { method: 'PUT', body: JSON.stringify(data) }),
   aiGenerateDesign: (prompt) => request('/ai/generate-design', { method: 'POST', body: JSON.stringify({ prompt }) }),
+  /* A whole SLIDE from a sentence: {template, fields}, ready to drop onto the editor's canvas.
+   * Shaped differently from generate-design because a slide keeps layout and words apart. */
+  aiGenerateSlide: (prompt) => request('/ai/generate-slide', { method: 'POST', body: JSON.stringify({ prompt }) }),
   aiListModels: (base_url, api_key) => request('/ai/models', { method: 'POST', body: JSON.stringify({ base_url, api_key }) }),
 
   // Instance-level default branding (#15, platform admin).

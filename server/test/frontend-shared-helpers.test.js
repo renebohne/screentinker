@@ -73,6 +73,19 @@ function inScope(src) {
   }
   for (const m of src.matchAll(/import\s+([A-Za-z_$][\w$]*)\s*(?:,|from)/g)) names.add(m[1]);
   /*
+   * ⚠️ A DYNAMIC IMPORT BRINGS NAMES INTO SCOPE TOO, and missing this made the guard cry wolf.
+   * `const { openThing } = await import('./thing.js')` is how every modal in this codebase is
+   * loaded — lazily, so a dialog nobody opens is never fetched — and a guard that calls that an
+   * unimported call is a guard people learn to ignore, which is worse than not having one.
+   */
+  for (const m of src.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*await\s+import\s*\(/g)) {
+    for (const part of m[1].split(',')) {
+      const as = part.split(/\bas\b|:/);
+      const name = (as[as.length - 1] || '').trim();
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) names.add(name);
+    }
+  }
+  /*
    * Declared locally — a file is free to define its own helper, and several do.
    *
    * ⚠️ ANCHORED AT THE START OF A LINE, and the first version of this guard was not, which made it
