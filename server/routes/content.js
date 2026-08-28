@@ -8,7 +8,7 @@ const { devicesPlayingContent } = require('../lib/devices-playing');
 const upload = require('../middleware/upload');
 const config = require('../config');
 const { checkStorageLimit, checkRemoteUrl } = require('../middleware/subscription');
-const { sanitizeString } = require('../middleware/sanitize');
+const { cleanUserText } = require('../middleware/sanitize');
 const { PLATFORM_ROLES, ELEVATED_ROLES } = require('../middleware/auth');
 // Phase 2.2b: workspace-aware access. Mirrors the pattern from devices.js.
 const { accessContext } = require('../lib/tenancy');
@@ -20,10 +20,13 @@ const { digestFile } = require('../lib/content-digest');
 const { unlinkIfUnreferenced, releaseMeshProvenance } = require('../lib/content-files');
 
 // Multer captures file.originalname directly from the multipart filename header,
-// bypassing sanitizeBody. Apply the same HTML-escape here so a filename like
-// `"><img src=x onerror=alert(1)>.jpg` is stored as `&quot;&gt;&lt;img...` and
-// renders as text in every UI sink. Umlauts, spaces, dots, and other unicode are
-// preserved - sanitizeString only touches `& < > " '`.
+// bypassing sanitizeBody, so it is cleaned here instead.
+//
+// ⚠️ IT IS NO LONGER HTML-ESCAPED, AND THAT IS THE POINT. Escaping on the way in and again at the
+// sink is double encoding, not defence: a file called `Q&A.jpg` was stored as `Q&amp;A.jpg` and
+// shown to the operator as `Q&amp;A.jpg`. The name is stored as typed and escaped where it is
+// rendered — every library sink already does. What is stripped is control characters, which is what
+// actually matters for a value that reaches a log line and a Content-Disposition header.
 //
 // .normalize('NFC') first: macOS clients send NFD-decomposed filenames (an
 // umlaut like "u" + combining diaeresis U+0308 instead of the precomposed
@@ -33,7 +36,7 @@ const { unlinkIfUnreferenced, releaseMeshProvenance } = require('../lib/content-
 // site (POST /, POST /remote, POST /embed, PUT /:id rename) flows through
 // safeFilename, so normalizing here covers all paths.
 function safeFilename(name) {
-  return sanitizeString((name || '').normalize('NFC'));
+  return cleanUserText((name || '').normalize('NFC'));
 }
 
 // SSRF gate for remote_url. Returns null if valid, else { status, error }.
