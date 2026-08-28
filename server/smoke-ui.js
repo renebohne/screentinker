@@ -490,11 +490,24 @@ const check = (name, ok, detail) => {
 
     // And with two of them the switcher must become a real dropdown carrying both.
     const rows = await page.evaluate(() => {
-      const items = [...document.querySelectorAll('.workspace-switcher-item:not(.workspace-switcher-newrow)')];
-      return { items: items.length, hasNewRow: !!document.querySelector('.workspace-switcher-newrow') };
+      const items = [...document.querySelectorAll('.workspace-switcher-item')];
+      const create = document.querySelector('[data-create-workspace]');
+      const menu = document.querySelector('.workspace-switcher-menu');
+      return {
+        items: items.length,
+        hasCreate: !!create,
+        // ⚠️ It must live UNDER the selector, not among the things being chosen between. Inside the
+        // menu it reads as a workspace you can switch to, and every item in there is required to
+        // carry data-search or the filter throws on the first keystroke.
+        createInsideMenu: !!(create && menu && menu.contains(create)),
+        everyItemFilterable: items.every((i) => typeof i.dataset.search === 'string' && !!i.dataset.workspaceId),
+      };
     });
-    check('the switcher lists both workspaces and still offers a third', rows.items === 2 && rows.hasNewRow,
-      `rows=${rows.items} newRow=${rows.hasNewRow}`);
+    check('the switcher lists both workspaces and still offers a third', rows.items === 2 && rows.hasCreate,
+      `rows=${rows.items} create=${rows.hasCreate}`);
+    check('⚠️ "New workspace" sits under the selector, not among the workspaces', !rows.createInsideMenu
+      && rows.everyItemFilterable,
+      `insideMenu=${rows.createInsideMenu} everyItemFilterable=${rows.everyItemFilterable}`);
   }
 
   // ---- the calendar binds its pointer handlers ONCE -------------------------------------------

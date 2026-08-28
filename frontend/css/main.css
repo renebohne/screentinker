@@ -128,25 +128,21 @@ body {
 }
 .workspace-switcher-item:hover .workspace-switcher-pencil { visibility: visible; }
 .workspace-switcher-pencil:hover { color: var(--accent); background: var(--bg-input); }
-/* "New workspace" — same shape as the pencil and members icons.
-   ⚠️ ALWAYS VISIBLE in the single-workspace view, unlike those two. They are hover-revealed
-   affordances ON a row you can already see; this one is the only route to a capability that is
-   otherwise invisible, and hiding it until hover is how 313 organizations ended up with one
-   workspace each. */
+/* "New workspace" — a full-width action UNDER the selector, in both the single and dropdown views.
+   ⚠️ ALWAYS VISIBLE, unlike the rename/members icons beside it, which reveal on hover. Those
+   decorate a row you can already see; this is the only route to a capability that is otherwise
+   invisible, and hiding it is how 313 organizations ended up with one workspace each.
+   ⚠️ AND IT IS NOT IN THE DROPDOWN. Inside the menu it read as a workspace you could switch to,
+   and in the single-workspace case — the common one — there is no menu to open at all. */
 .workspace-switcher-create {
-  flex-shrink: 0;
-  background: none; border: none; padding: 4px;
-  color: var(--text-muted); cursor: pointer;
-  border-radius: 4px; transition: all var(--transition);
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; margin-top: 6px; padding: 5px 2px;
+  background: none; border: none;
+  color: var(--text-muted); font-size: 12px; text-align: left;
+  cursor: pointer; border-radius: 4px; transition: all var(--transition);
 }
-.workspace-switcher-create:hover { color: var(--accent); background: var(--bg-input); }
-/* In the dropdown it is a row, separated from the workspaces it is not one of. */
-.workspace-switcher-newrow {
-  border-top: 1px solid var(--border);
-  color: var(--text-muted);
-}
-.workspace-switcher-newrow:hover { color: var(--accent); }
-.workspace-switcher-newrow .check { visibility: visible; }
+.workspace-switcher-create:hover { color: var(--accent); }
+.workspace-switcher-create svg { flex-shrink: 0; }
 /* Members icon - same shape as the pencil; navigates to #/workspace/:id/members. */
 .workspace-switcher-members {
   flex-shrink: 0; visibility: hidden;
