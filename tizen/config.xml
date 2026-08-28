@@ -9,6 +9,25 @@
     <icon src="icon.png"/>
     <content src="index.html"/>
 
+    <!--
+      ⚠️ DECLARED EXPLICITLY, BECAUSE THE DEFAULT ONE BLOCKS data: AND THAT IS WHAT A BUNDLE IS.
+
+      A widget declaring required_version 2.4 with no policy of its own gets the WRT default, which
+      permits 'self' and 'unsafe-inline' for scripts but NOT the data: scheme. An offline HTML
+      bundle is mounted as srcdoc, a srcdoc frame INHERITS THIS POLICY, and a flattened bundle is
+      nothing but data: URIs — so under the default every script and stylesheet in it is dropped and
+      the frame renders a styled, DEAD page with nothing in any log. That is not a guess: the same
+      document was measured running on the web player's CSP-exempt /player and doing exactly this on
+      the CSP-bearing dashboard.
+
+      data: is granted to script/style/img/font/media and NOT to connect-src or frame-src — a
+      bundle may carry its own assets; it may not open channels or nest frames.
+
+      ⚠️ SHIPPING THIS NEEDS A NEW .wgt. There is no in-app OTA for this player (README), so a panel
+      already in the field keeps the old policy until somebody reinstalls it.
+    -->
+    <tizen:content-security-policy>default-src 'self' *; script-src 'self' 'unsafe-inline' 'unsafe-eval' data:; style-src 'self' 'unsafe-inline' data:; img-src 'self' data: blob: https: http:; font-src 'self' data:; media-src 'self' data: blob: https: http:; connect-src 'self' https: http: ws: wss:; frame-src 'self' https: http:; object-src 'none'</tizen:content-security-policy>
+
     <!-- Landscape signage, no context menu, allow background, keep app full-screen -->
     <tizen:setting screen-orientation="landscape" context-menu="disable"
                    background-support="enable" encryption="disable"

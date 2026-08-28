@@ -287,6 +287,43 @@ class MediaPlayerManager(
         }
     }
 
+    /**
+     * Show a flattened HTML bundle from a string rather than a URL.
+     *
+     * ⚠️ loadDataWithBaseURL WITH A NULL BASE URL, DELIBERATELY. A null base gives the document an
+     * OPAQUE origin, so operator-uploaded bundle scripts cannot reach this app's WebView storage or
+     * issue same-origin requests against the ScreenTinker server — the same isolation the web
+     * player gets from `sandbox="allow-scripts"`. Passing the server URL as the base would be the
+     * obvious way to "make relative paths work" and would hand a bundle the server's origin; there
+     * are no relative paths left to fix, because the server already inlined everything.
+     *
+     * Idempotent on [key] for the reason showWidget is idempotent on its URL: a solo-item playlist
+     * re-shows the same item every duration_sec, and re-loading a running document restarts any
+     * animation or state it was holding.
+     */
+    fun showBundle(html: String, key: String) {
+        if (currentType == MediaType.WIDGET && key == currentWidgetUrl && youtubeWebView != null) {
+            Log.i("MediaPlayerManager", "Bundle already showing, not reloading: $key")
+            youtubeWebView?.visibility = android.view.View.VISIBLE
+            return
+        }
+        Log.i("MediaPlayerManager", "Showing HTML bundle: $key (${html.length} chars)")
+        mountGeneration++
+        currentType = MediaType.WIDGET
+        currentWidgetUrl = key
+
+        playerView.visibility = android.view.View.GONE
+        imageView.visibility = android.view.View.GONE
+        youtubeWebView?.visibility = android.view.View.VISIBLE
+
+        exoPlayer?.stop()
+
+        youtubeWebView?.apply {
+            com.remotedisplay.player.util.WebViewSupport.configure(this, "Bundle")
+            loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+        }
+    }
+
     fun playVideoFromUrl(url: String, muted: Boolean = false) {
         Log.i("MediaPlayerManager", "Streaming video from URL: $url (muted=$muted)")
         mountGeneration++

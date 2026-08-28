@@ -112,7 +112,22 @@ the player can **mount** one — today that is the server's flattened single-doc
 `/api/content/:id/bundle`, which is the widget iframe with a different URL. It deliberately does
 **not** imply the player can unpack an archive locally, so a bundle is currently online-only on
 every platform and `offline.cache` still answers only for media. All four mount the same
-server-rendered document; none of them unpacks an archive locally yet.
+server-rendered document; none of them unpacks an archive locally.
+
+**Offline, per platform** — the render, not the archive, is what has to survive:
+
+| | how a bundle survives an outage | verified |
+|---|---|---|
+| Web / Vega / BrightSign | player fetches the render SAME-ORIGIN and mounts srcdoc, so it lands in the service worker's Cache API (one of the three stores BrightSign documents as reboot-persistent) | ✅ measured with the network cut |
+| Android | `BundleCache` stores the render under `filesDir/bundle_render/<id>.<rev>.html`, warmed by the playlist sweep; `loadDataWithBaseURL(null, …)` mounts it at an opaque origin | ✅ unit-tested against a real local server, incl. server-gone |
+| Tizen | `BundleStore` writes it to `wgt-private/st-bundles`; the cached copy mounts as srcdoc, the online path stays `src=` | ⚠️ **never run on a panel** |
+
+⚠️ Tizen's offline path is unproven in two specific ways, both of which fail SILENTLY. `srcdoc`
+inherits the widget's CSP and a flattened bundle is entirely `data:` URIs, so `config.xml` now
+declares a policy granting `data:` to script/style/img/font — untested on real hardware. And
+shipping that policy needs a **new `.wgt`**, which the fleet has no in-app OTA to receive. The
+online `src=` path is deliberately left as the default so the unproven path can only ever replace
+"nothing to show at all".
 
 ⚠️ Baselines: `playback.bundle` is in the **web** and **brightsign** baselines only. Those two are
 served from this server, so there is no such thing as a panel stuck on last release's player.

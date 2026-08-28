@@ -952,7 +952,50 @@ PlaylistPlayer.prototype.renderBundle = function (item, single) {
   // flattened bundle's means "the parser walked a document full of data: URIs", and TV silicon is
   // slow at that. Revealing early shows a half-painted page.
   setTimeout(reveal, 8000);
-  f.src = src;
+
+  /*
+   * ⚠️ CACHED COPY FIRST, NETWORK SECOND — and the ORDER is the offline story.
+   *
+   * There is no service worker in this runtime (app:// origin, see media-cache.js), so nothing
+   * caches the render for us the way it does on the web player. BundleStore keeps it on disk; if a
+   * copy for THIS revision is there, the bundle plays with the WAN down.
+   *
+   * ⚠️ AND THE ONLINE PATH IS DELIBERATELY LEFT AS src=. srcdoc is used ONLY for a cached document,
+   * because a srcdoc frame inherits its parent's CSP and a flattened bundle is nothing but data:
+   * URIs — measured on the web player, where the same document runs on the CSP-exempt /player and
+   * is silently script-dead on the dashboard. config.xml now declares a policy that permits data:,
+   * but that is NOT confirmed on a panel, so the proven path stays the default and the unproven one
+   * only ever replaces "nothing to show at all".
+   */
+  var cached = null;
+  try {
+    cached = (typeof BundleStore !== 'undefined' && BundleStore.available())
+      ? BundleStore.load(item.content_id, item.content_rev || 0) : null;
+  } catch (e) { cached = null; }
+
+  if (cached) {
+    f.srcdoc = cached;
+  } else {
+    f.src = src;
+    // Warm the store for next time, including the next power cut. Fire-and-forget: a failure here
+    // must never touch playback, and the item is already rendering from the network.
+    try {
+      if (typeof BundleStore !== 'undefined' && BundleStore.available()) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', src, true);
+        xhr.timeout = 30000;
+        xhr.onload = function () {
+          if (xhr.status >= 200 && xhr.status < 300 && xhr.responseText) {
+            BundleStore.save(item.content_id, item.content_rev || 0, xhr.responseText);
+          }
+        };
+        xhr.onerror = function () {};
+        xhr.ontimeout = function () {};
+        xhr.send();
+      }
+    } catch (e) { /* never let caching break playback */ }
+  }
+
   this.stage.appendChild(f);
   if (!single) this.schedule(this.durationMs(item));
 };
