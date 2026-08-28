@@ -36,6 +36,43 @@ function adminIconsHtml(w) {
     </button>`;
 }
 
+/*
+ * May this person create a workspace?
+ *
+ * ⚠️ NOT `can_admin`. That flag is true for a workspace_admin too, and creating a SIBLING workspace
+ * is an organization-level act — a delegated admin handed one workspace must not be able to grow
+ * the tenant around it. The server enforces exactly this; the button only mirrors it, so that a
+ * button which is visible is a button that works.
+ */
+function canCreateWorkspace(me) {
+  if (!me) return false;
+  if (me.is_platform_admin) return true;
+  return me.current_org_role === 'org_owner' || me.current_org_role === 'org_admin';
+}
+
+/** The "+" affordance. Returns '' when the caller may not create, so both views can call it. */
+function createButtonHtml(me) {
+  if (!canCreateWorkspace(me)) return '';
+  return `
+    <button class="workspace-switcher-create" type="button" data-create-workspace aria-label="${t('switcher.create_title')}" title="${t('switcher.create_title')}">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+      </svg>
+    </button>`;
+}
+
+/** Wire every create affordance inside `scope`. Safe to call when there are none. */
+function wireCreateButtons(scope) {
+  scope.querySelectorAll('[data-create-workspace]').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();          // never let it also trigger a row's switch handler
+      scope.classList.remove('open');
+      const { openWorkspaceCreateModal } = await import('./workspace-create-modal.js');
+      openWorkspaceCreateModal();
+    });
+  });
+}
+
 // Wire the manage-members + rename buttons within `scope`. `list` resolves a
 // workspace id to its object (for the rename modal). stopPropagation so a click
 // on an icon never triggers the row's switch handler.
@@ -144,8 +181,10 @@ export function renderWorkspaceSwitcher(me, remoteOrgs = []) {
       <div class="workspace-switcher-single">
         <span class="workspace-switcher-static">${esc(only.name)}</span>
         ${adminIconsHtml(only)}
+        ${createButtonHtml(me)}
       </div>`;
     wireAdminIcons(container, [only]);
+    wireCreateButtons(container);
     return;
   }
 
@@ -198,6 +237,13 @@ export function renderWorkspaceSwitcher(me, remoteOrgs = []) {
       `;
       }).join('')}
       <div class="workspace-switcher-noresults" style="display:none">${t('switcher.no_matches')}</div>
+      ${canCreateWorkspace(me) ? `
+      <div class="workspace-switcher-item workspace-switcher-newrow" data-create-workspace role="option">
+        <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+        <div class="ws-meta"><div class="ws-name">${t('switcher.create_title')}</div></div>
+      </div>` : ''}
     </div>
   `;
 
@@ -254,7 +300,15 @@ export function renderWorkspaceSwitcher(me, remoteOrgs = []) {
   }
 
   // ---- type-to-filter + keyboard navigation (only when the search box renders) ----
-  const allItems = Array.from(container.querySelectorAll('.workspace-switcher-item'));
+  /*
+   * ⚠️ THE "NEW WORKSPACE" ROW IS EXCLUDED, AND BOTH REASONS ARE BUGS IF IT IS NOT.
+   *
+   * applyFilter reads `it.dataset.search` — a row without that attribute makes `undefined.includes`
+   * THROW the moment anybody types in the search box, killing the filter for every real workspace.
+   * And the keyboard Enter path calls switchTo(dataset.workspaceId), which for this row is
+   * undefined. It is an action, not a result: it belongs to neither list.
+   */
+  const allItems = Array.from(container.querySelectorAll('.workspace-switcher-item:not(.workspace-switcher-newrow)'));
   const noResults = container.querySelector('.workspace-switcher-noresults');
   let highlightIdx = -1;
   const visibleItems = () => allItems.filter(it => it.style.display !== 'none');
@@ -315,13 +369,14 @@ export function renderWorkspaceSwitcher(me, remoteOrgs = []) {
   // Manage-members + rename icons (shared with the single-workspace view).
   wireAdminIcons(container, sorted);
 
-  container.querySelectorAll('.workspace-switcher-item').forEach(item => {
+  container.querySelectorAll('.workspace-switcher-item:not(.workspace-switcher-newrow)').forEach(item => {
     item.addEventListener('click', (e) => {
       // Ignore clicks that originated on an icon button (each has its own handler).
       if (e.target.closest('.workspace-switcher-pencil, .workspace-switcher-members')) return;
       switchTo(item.dataset.workspaceId);
     });
   });
+  wireCreateButtons(container);
 
   // Click-outside closes the menu.
   document.addEventListener('click', (e) => {

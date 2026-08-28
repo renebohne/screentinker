@@ -427,6 +427,76 @@ const check = (name, ok, detail) => {
     && offline.control === 'network down' && offline.served === true && offline.hasScript === true,
     `worker=${sw} control=${offline.control} served=${offline.served} hasScript=${offline.hasScript} ${offline.err || ''}`);
 
+
+  // ---- a second workspace can be created, from the UI, by an ordinary signup -------------------
+  //
+  // ⚠️ THE BUG THIS GUARDS IS AN ABSENCE, WHICH IS THE HARDEST KIND TO NOTICE. Production had 313
+  // organizations and 313 workspaces — one each, all named "Default" — which reads like nobody
+  // wanted a second one and actually meant no route existed to create one. Everything underneath
+  // (scoping, invites, the switcher, the JWT context) was built and working the whole time. So the
+  // assertion that matters is not "the endpoint returns 201" but "a person who just signed up can
+  // find it and use it", which is the part that was missing.
+  await page.goto(BASE + '/app#/', { waitUntil: 'networkidle2' });
+  await page.reload({ waitUntil: 'networkidle2' });
+  await new Promise(r => setTimeout(r, 900));
+
+  const affordance = await page.evaluate(() => {
+    const btn = document.querySelector('[data-create-workspace]');
+    return { present: !!btn, visible: !!(btn && btn.offsetParent !== null) };
+  });
+  check('a new signup is offered "New workspace" in the switcher', affordance.present && affordance.visible,
+    affordance.present ? 'the control exists but is not visible' : 'no [data-create-workspace] in the switcher');
+
+  const modalOpened = await page.evaluate(async () => {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const btn = document.querySelector('[data-create-workspace]');
+    if (!btn) return { err: 'no create control' };
+    btn.click();
+    for (let i = 0; i < 40 && !document.getElementById('createWsName'); i++) await sleep(100);
+    const input = document.getElementById('createWsName');
+    if (!input) return { err: 'the modal never opened' };
+    // t() returns the KEY itself when a string is missing, so a new key ships as visible text.
+    const bare = [...document.querySelectorAll('.modal *')]
+      .filter((e) => e.children.length === 0)
+      .map((e) => (e.textContent || '').trim())
+      .filter((s) => /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/.test(s));
+    return { ok: true, bare };
+  });
+  check('the create dialog opens and is fully translated', !modalOpened.err && (modalOpened.bare || []).length === 0,
+    modalOpened.err || 'untranslated keys rendered: ' + (modalOpened.bare || []).join(', '));
+
+  if (!modalOpened.err) {
+    await page.evaluate(() => {
+      document.getElementById('createWsName').value = 'Retail Floor';
+      document.getElementById('createWsName').dispatchEvent(new Event('input', { bubbles: true }));
+      document.getElementById('createWsSave').click();
+    });
+    // The modal switches into the new workspace and reloads, so wait the navigation out.
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 1200));
+
+    const after = await page.evaluate(async () => {
+      const me = await (await fetch('/api/auth/me', {
+        headers: { Authorization: 'Bearer ' + localStorage.getItem('token') } })).json();
+      return {
+        current: me.current_workspace && me.current_workspace.name,
+        count: (me.accessible_workspaces || []).length,
+        names: (me.accessible_workspaces || []).map((w) => w.name).sort(),
+      };
+    });
+    check('the new workspace exists and the operator is left standing in it', after.count === 2
+      && after.current === 'Retail Floor',
+      `workspaces=${after.count} (${(after.names || []).join(', ')}) current=${after.current} — landing back in the OLD one reads as "nothing happened"`);
+
+    // And with two of them the switcher must become a real dropdown carrying both.
+    const rows = await page.evaluate(() => {
+      const items = [...document.querySelectorAll('.workspace-switcher-item:not(.workspace-switcher-newrow)')];
+      return { items: items.length, hasNewRow: !!document.querySelector('.workspace-switcher-newrow') };
+    });
+    check('the switcher lists both workspaces and still offers a third', rows.items === 2 && rows.hasNewRow,
+      `rows=${rows.items} newRow=${rows.hasNewRow}`);
+  }
+
   // ---- the calendar binds its pointer handlers ONCE -------------------------------------------
   await page.goto(BASE + '/app#/schedule', { waitUntil: 'networkidle2' });
   await page.reload({ waitUntil: 'networkidle2' });

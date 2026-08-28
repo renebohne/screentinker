@@ -37,6 +37,113 @@ const INVITE_EXPIRY_DAYS = (() => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 7;
 })();
 
+/*
+ * How many workspaces one organization may create.
+ *
+ * Not a plan limit — the plans table has no such column, and inventing one here would put a
+ * billing decision in a routes file. This is a runaway guard: without any cap, a scripted caller
+ * can mint workspaces until the switcher is unusable and the /me query that lists them is the
+ * slowest thing on the dashboard. Same env-configurable shape as the invite limits above.
+ */
+const MAX_WORKSPACES_PER_ORG = (() => {
+  const parsed = parseInt(process.env.MAX_WORKSPACES_PER_ORG, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 25;
+})();
+
+/*
+ * Which organization a create lands in.
+ *
+ * ⚠️ NEVER THE BODY ALONE. `organization_id` is honoured only after confirming the caller actually
+ * administers that org — otherwise this endpoint mints a workspace inside somebody else's tenant,
+ * and every workspace-scoped route downstream would treat it as legitimately theirs.
+ *
+ * With no id supplied we resolve it from membership, which is the normal case: one org, one
+ * owner. Several orgs and no id is AMBIGUOUS and says so rather than guessing — picking "the first
+ * one" would silently create the workspace in the wrong tenant.
+ */
+function resolveTargetOrg(req) {
+  const requested = req.body && req.body.organization_id ? String(req.body.organization_id) : null;
+
+  if (requested) {
+    const org = db.prepare('SELECT id FROM organizations WHERE id = ?').get(requested);
+    if (!org) return { error: { status: 404, message: 'Organization not found' } };
+    if (isPlatformRole(req.user.role)) return { organizationId: org.id };
+    const om = db.prepare('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?')
+      .get(org.id, req.user.id);
+    if (!om || (om.role !== 'org_owner' && om.role !== 'org_admin')) {
+      return { error: { status: 403, message: 'You do not administer that organization' } };
+    }
+    return { organizationId: org.id };
+  }
+
+  const owned = db.prepare(
+    "SELECT organization_id FROM organization_members WHERE user_id = ? AND role IN ('org_owner','org_admin')"
+  ).all(req.user.id);
+  if (owned.length === 1) return { organizationId: owned[0].organization_id };
+  if (owned.length === 0) {
+    return { error: { status: 403, message: 'Only an organization owner or admin can create a workspace' } };
+  }
+  return { error: { status: 400, message: 'You administer more than one organization — specify organization_id' } };
+}
+
+/*
+ * Create a workspace inside an organization the caller administers.
+ *
+ * ⚠️ ORG-LEVEL, SO IT NEEDS AN ORG ROLE. A workspace_admin administers ONE workspace; letting that
+ * mint siblings would let a delegated editor grow the tenant they were given a corner of. Same
+ * reasoning the org security-settings route already applies.
+ *
+ * The creator is added as workspace_admin, or they would create a workspace they cannot administer
+ * and cannot invite anyone into — reachable only via their org role, which is a confusing half-state
+ * for anyone who is org_admin today and not tomorrow.
+ */
+router.post('/', (req, res) => {
+  const target = resolveTargetOrg(req);
+  if (target.error) return res.status(target.error.status).json({ error: target.error.message });
+  const organizationId = target.organizationId;
+
+  const name = String((req.body && req.body.name) || '').trim();
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  if (name.length > NAME_MAX) return res.status(400).json({ error: `Name must be ${NAME_MAX} characters or fewer` });
+
+  let slug = null;
+  if (req.body && req.body.slug !== undefined && String(req.body.slug).trim() !== '') {
+    slug = String(req.body.slug).trim().toLowerCase();
+    if (slug.length > SLUG_MAX) return res.status(400).json({ error: `Slug must be ${SLUG_MAX} characters or fewer` });
+    if (!SLUG_RE.test(slug)) {
+      return res.status(400).json({ error: 'Slug must be lowercase letters, digits, and hyphens (no leading/trailing/double hyphens)' });
+    }
+  }
+
+  const existing = db.prepare('SELECT COUNT(*) AS c FROM workspaces WHERE organization_id = ?').get(organizationId);
+  if (existing.c >= MAX_WORKSPACES_PER_ORG) {
+    return res.status(409).json({ error: `This organization already has the maximum of ${MAX_WORKSPACES_PER_ORG} workspaces` });
+  }
+
+  const id = crypto.randomUUID();
+  try {
+    db.transaction(() => {
+      db.prepare('INSERT INTO workspaces (id, organization_id, name, slug, created_by) VALUES (?, ?, ?, ?, ?)')
+        .run(id, organizationId, name, slug, req.user.id);
+      db.prepare("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_admin')")
+        .run(id, req.user.id);
+    })();
+  } catch (e) {
+    if (e.code === 'SQLITE_CONSTRAINT_UNIQUE' || /UNIQUE/i.test(e.message)) {
+      return res.status(409).json({ error: 'Slug already used in this organization' });
+    }
+    throw e;
+  }
+
+  // Attribute the audit row to the workspace that was just created, not to whatever the caller
+  // happened to be looking at — this router has no resolveTenancy, so nothing else would.
+  req.workspaceId = id;
+  logActivity(req.user.id, 'workspace_created', `Created workspace "${name}"`, null, getClientIp(req), id);
+
+  const created = db.prepare('SELECT id, name, slug, organization_id, created_at FROM workspaces WHERE id = ?').get(id);
+  res.status(201).json({ ...created, can_admin: true });
+});
+
 // Rename a workspace. MVP scope: name + slug only. Permission: platform_admin,
 // org_owner/admin of the parent org, or workspace_admin of the target ws.
 router.patch('/:id', (req, res) => {

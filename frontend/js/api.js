@@ -538,6 +538,12 @@ export const api = {
   getMe: () => request('/auth/me'),
   updateMe: (data) => request('/auth/me', { method: 'PUT', body: JSON.stringify(data) }),
   switchWorkspace: (workspaceId) => request('/auth/switch-workspace', { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) }),
+  /*
+   * ⚠️ THE ORG IS NOT SENT. The server resolves it from the caller's own membership — a body-supplied
+   * organization_id is honoured only after it verifies the caller administers that org, so passing
+   * one from here would buy nothing and invite the mistake. See routes/workspaces.js.
+   */
+  createWorkspace: (data) => request('/workspaces', { method: 'POST', body: JSON.stringify(data ?? {}) }),
   renameWorkspace: (id, data) => request(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   updateWorkspaceSecuritySettings: (workspaceId, data) => request(`/workspaces/${workspaceId}/security-settings`, { method: 'PUT', body: JSON.stringify(data) }),
 
