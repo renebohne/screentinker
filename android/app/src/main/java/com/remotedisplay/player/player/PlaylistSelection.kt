@@ -162,9 +162,17 @@ object PendingSwap {
  *
  * Local and remote video deliberately stay OFF the timer path — the player reports STATE_ENDED for
  * those and a timer would cut a clip short at its configured duration.
+ *
+ * An HTML bundle is a WebView page like a widget: it reports no completion either, so it belongs on
+ * the timer for exactly the reason YouTube does. Leaving it off is not a slow rotation, it is a
+ * stopped one.
  */
 object ItemTiming {
+    /** The mime the server stamps on an uploaded HTML bundle (lib/html-bundle.js). */
+    const val BUNDLE_MIME = "application/vnd.screentinker.bundle+zip"
+
     fun endsOnTimer(mimeType: String, isWidget: Boolean): Boolean =
-        mimeType.startsWith("image/") || isWidget || mimeType == "video/youtube"
+        mimeType.startsWith("image/") || isWidget || mimeType == "video/youtube" ||
+            mimeType == BUNDLE_MIME
 }
 

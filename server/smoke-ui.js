@@ -224,6 +224,209 @@ const check = (name, ok, detail) => {
   check('the picker renders no untranslated keys', (picker.bareKeys || []).length === 0,
     (picker.bareKeys || []).join(', '));
 
+
+  // ---- an HTML bundle uploads, flattens, runs, and stays out of the player's origin -------------
+  //
+  // ⚠️ THE ISOLATION HALF OF THIS IS THE POINT. A bundle is operator-uploaded HTML that runs its own
+  // scripts, and the only thing between it and the player's localStorage — which holds the device
+  // token — is the frame's sandbox attribute. That is worth asserting in a real browser rather than
+  // trusting, and it has to be asserted with the RIGHT property: `location.origin` returns the
+  // origin of the URL, not of the document, so it reads as the real host even inside an opaque
+  // frame. `self.origin` and an actual localStorage access are what answer the question.
+  const bundleZip = (() => {
+    const files = {
+      'index.html': '<!doctype html><link rel="stylesheet" href="s.css"><h1 id="h">waiting</h1><script src="p.js"></script>',
+      's.css': 'body{background:rgb(1,2,3)}',
+      'p.js': "document.getElementById('h').textContent='ran';"
+        + "var r={st:'bundle-ran',viaPreview:location.hash==='#preview',selfOrigin:String(self.origin),bg:getComputedStyle(document.body).backgroundColor};"
+        + "try{localStorage.setItem('x','1');r.storage='READABLE'}catch(e){r.storage='blocked'}"
+        + "try{r.parentDom=String(parent.document.title)}catch(e){r.parentDom='blocked'}"
+        + "try{parent.postMessage(r,'*')}catch(e){}",
+    };
+    const zlib = require('node:zlib');
+    const locals = [], central = [];
+    let offset = 0;
+    for (const [name, data] of Object.entries(files)) {
+      const raw = Buffer.from(data), nb = Buffer.from(name);
+      const crc = zlib.crc32 ? zlib.crc32(raw) >>> 0 : 0;
+      const lh = Buffer.alloc(30);
+      lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x800, 6);
+      lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(raw.length, 18); lh.writeUInt32LE(raw.length, 22);
+      lh.writeUInt16LE(nb.length, 26);
+      locals.push(lh, nb, raw);
+      const ch = Buffer.alloc(46);
+      ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(0x031e, 4); ch.writeUInt16LE(20, 6);
+      ch.writeUInt16LE(0x800, 8); ch.writeUInt32LE(crc, 16);
+      ch.writeUInt32LE(raw.length, 20); ch.writeUInt32LE(raw.length, 24);
+      ch.writeUInt16LE(nb.length, 28); ch.writeUInt32LE((0o100644 << 16) >>> 0, 38);
+      ch.writeUInt32LE(offset, 42);
+      central.push(ch, nb);
+      offset += lh.length + nb.length + raw.length;
+    }
+    const cd = Buffer.concat(central);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(Object.keys(files).length, 8); eocd.writeUInt16LE(Object.keys(files).length, 10);
+    eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(offset, 16);
+    return Buffer.concat([...locals, cd, eocd]).toString('base64');
+  })();
+
+  await page.goto(BASE + '/app#/content', { waitUntil: 'networkidle2' });
+  const bundleResult = await page.evaluate(async (b64) => {
+    const auth = { Authorization: 'Bearer ' + localStorage.getItem('token') };
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const fd = new FormData();
+    fd.append('files', new File([bytes], 'smoke-bundle.zip', { type: 'application/zip' }));
+    const up = await fetch('/api/content', { method: 'POST', headers: auth, body: fd });
+    if (!up.ok) return { err: 'upload ' + up.status + ' ' + (await up.text()).slice(0, 120) };
+    const row = await up.json();
+
+    // The public render gate needs the content referenced by a playlist, exactly like /file.
+    const pl = await (await fetch('/api/playlists', {
+      method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'smoke bundle' }) })).json();
+    await fetch(`/api/playlists/${pl.id}/items`, {
+      method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content_id: row.id, duration_sec: 15 }) });
+
+    const got = new Promise((r) => {
+      window.addEventListener('message', (e) => { if (e.data && e.data.st === 'bundle-ran') r(e.data); });
+      setTimeout(() => r(null), 9000);
+    });
+    const f = document.createElement('iframe');
+    f.setAttribute('sandbox', 'allow-scripts');   // exactly what the player sets
+    f.style.cssText = 'position:fixed;left:-9999px;width:640px;height:360px';
+    f.src = `/api/content/${row.id}/bundle?rev=${row.updated_at || 0}`;
+    document.body.appendChild(f);
+    const msg = await got;
+
+    /*
+     * ⚠️ AND THE DASHBOARD'S OWN PREVIEW, WHICH TAKES A DIFFERENT ROUTE. The public /bundle URL is
+     * gated on the content being in a playlist; a just-uploaded bundle is not, which is exactly the
+     * "preview shows an empty box" trap the directory-board backgrounds had. The library mints an
+     * ephemeral session instead — and that path needed its own dashboard-CSP exemption, which is
+     * invisible until something actually mounts it.
+     */
+    const got2 = new Promise((r) => {
+      window.addEventListener('message', (e) => { if (e.data && e.data.st === 'bundle-ran' && e.data.viaPreview) r(e.data); });
+      setTimeout(() => r(null), 9000);
+    });
+    let previewErr = null, session = null;
+    try {
+      const pr = await fetch(`/api/content/${row.id}/bundle-preview`, { method: 'POST', headers: auth });
+      if (!pr.ok) previewErr = 'mint ' + pr.status;
+      else session = await pr.json();
+    } catch (e) { previewErr = String(e && e.message); }
+    if (session) {
+      const f2 = document.createElement('iframe');
+      f2.setAttribute('sandbox', 'allow-scripts');
+      f2.style.cssText = 'position:fixed;left:-9999px;width:640px;height:360px';
+      // Mark it so the two frames' messages cannot be confused for one another.
+      f2.src = session.url + '#preview';
+      document.body.appendChild(f2);
+    }
+    const previewMsg = await got2;
+
+    return { contentId: row.id, mime: row.mime_type, entry: row.bundle_entry, msg, previewErr, previewUrl: session && session.url, previewMsg };
+  }, bundleZip);
+
+  check('an HTML bundle uploads and is typed as one', !bundleResult.err
+    && bundleResult.mime === 'application/vnd.screentinker.bundle+zip' && bundleResult.entry === 'index.html',
+    bundleResult.err || `mime=${bundleResult.mime} entry=${bundleResult.entry}`);
+  check('a flattened bundle RUNS its own scripts in the player\'s sandbox',
+    !!(bundleResult.msg && bundleResult.msg.bg === 'rgb(1, 2, 3)'),
+    bundleResult.msg ? `no stylesheet applied (bg=${bundleResult.msg.bg})` : 'the bundle never reported back — it did not run');
+  check('a bundle previews from the content library before it is assigned anywhere',
+    !bundleResult.previewErr && !!bundleResult.previewMsg && bundleResult.previewMsg.bg === 'rgb(1, 2, 3)',
+    bundleResult.previewErr || (bundleResult.previewUrl
+      ? 'the preview session minted but the frame never ran — check the dashboard CSP exemption'
+      : 'no preview session was minted'));
+  check('⚠️ and it CANNOT reach the player origin', !!(bundleResult.msg
+    && bundleResult.msg.selfOrigin === 'null'
+    && bundleResult.msg.storage === 'blocked'
+    && bundleResult.msg.parentDom === 'blocked'),
+    bundleResult.msg
+      ? `origin=${bundleResult.msg.selfOrigin} storage=${bundleResult.msg.storage} parent=${bundleResult.msg.parentDom}`
+      : 'no report');
+
+
+  // ---- a bundle plays OFFLINE, and the CSP trap that decides how it is mounted ----------------
+  //
+  // ⚠️ TWO CLAIMS, BOTH MEASURED, BECAUSE BOTH LOOK FINE WHEN THEY ARE BROKEN.
+  //
+  // 1. The player mounts a bundle by fetching it SAME-ORIGIN and setting srcdoc, not by pointing
+  //    iframe.src at it. That is the whole offline story: a URL-mounted sandboxed frame is an
+  //    opaque-origin client and the service worker does not control it (sw.js records the
+  //    measurement), so a src= mount never reaches the Cache API. The fetch does.
+  // 2. srcdoc INHERITS THE PARENT'S CSP. It runs on /player, which is CSP-exempt, and is silently
+  //    script-dead on any page that has a policy — which is why the dashboard preview navigates to
+  //    an ephemeral URL instead. Both directions are asserted here; getting this backwards produces
+  //    a page that renders, is styled, and does nothing.
+  const playerPage = await browser.newPage();
+  await playerPage.goto(BASE + '/player', { waitUntil: 'networkidle2' });
+  const sw = await playerPage.evaluate(async () => {
+    if (!navigator.serviceWorker) return 'no serviceWorker';
+    try { await navigator.serviceWorker.register('/sw.js'); } catch (e) { return 'register failed'; }
+    await navigator.serviceWorker.ready;
+    for (let i = 0; i < 40 && !navigator.serviceWorker.controller; i++) await new Promise(s => setTimeout(s, 250));
+    return navigator.serviceWorker.controller ? 'controlling' : 'not controlling';
+  });
+
+  const bundleId = bundleResult.contentId;
+  const mountOnPlayer = await playerPage.evaluate(async (id) => {
+    const got = new Promise((r) => {
+      window.addEventListener('message', (e) => { if (e.data && e.data.st === 'bundle-ran') r(e.data); });
+      setTimeout(() => r(null), 9000);
+    });
+    const html = await (await fetch(`/api/content/${id}/bundle?rev=0`, { credentials: 'omit' })).text();
+    const f = document.createElement('iframe');
+    f.setAttribute('sandbox', 'allow-scripts');
+    f.style.cssText = 'position:fixed;left:-9999px;width:640px;height:360px';
+    f.srcdoc = html;
+    document.body.appendChild(f);
+    return await got;
+  }, bundleId);
+
+  check('a bundle runs when mounted as srcdoc on the player', !!(mountOnPlayer && mountOnPlayer.bg === 'rgb(1, 2, 3)'),
+    mountOnPlayer ? `mounted but wrong style (${mountOnPlayer.bg})` : 'the srcdoc frame never ran — check that /player is still CSP-exempt');
+  check('⚠️ and is still isolated from the player origin',
+    !!(mountOnPlayer && mountOnPlayer.selfOrigin === 'null' && mountOnPlayer.storage === 'blocked'),
+    mountOnPlayer ? `origin=${mountOnPlayer.selfOrigin} storage=${mountOnPlayer.storage}` : 'no report');
+
+  // Now cut the network and ask for the same render again.
+  await playerPage.setOfflineMode(true);
+  const offline = await playerPage.evaluate(async (id) => {
+    const out = {};
+    try { await fetch('/api/status'); out.control = 'REACHED SERVER — offline mode did not take'; }
+    catch (e) { out.control = 'network down'; }
+    try {
+      const r = await fetch(`/api/content/${id}/bundle?rev=0`, { credentials: 'omit' });
+      const t = await r.text();
+      out.served = r.ok; out.hasScript = /data:text\/javascript/.test(t);
+    } catch (e) { out.served = false; out.err = String(e.message); }
+    return out;
+  }, bundleId);
+  await playerPage.setOfflineMode(false);
+  /*
+   * ⚠️ UNREGISTER BEFORE LEAVING. sw.js takes scope '/' deliberately (server.js serves it from the
+   * root so it can control the whole origin), so a worker registered here keeps intercepting every
+   * later page in this run — which wedged the calendar reload below the first time. The worker is
+   * the thing under test, not a fixture; it does not get to outlive its test.
+   */
+  await playerPage.evaluate(async () => {
+    try {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.unregister()));
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    } catch (e) { /* best effort */ }
+  });
+  await playerPage.close();
+
+  check('⚠️ the bundle render survives the network going away', sw === 'controlling'
+    && offline.control === 'network down' && offline.served === true && offline.hasScript === true,
+    `worker=${sw} control=${offline.control} served=${offline.served} hasScript=${offline.hasScript} ${offline.err || ''}`);
+
   // ---- the calendar binds its pointer handlers ONCE -------------------------------------------
   await page.goto(BASE + '/app#/schedule', { waitUntil: 'networkidle2' });
   await page.reload({ waitUntil: 'networkidle2' });

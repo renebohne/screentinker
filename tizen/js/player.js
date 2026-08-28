@@ -5,6 +5,8 @@
  *   video/youtube-> iframe embed; single item loops, multi advances after duration
  *   remote_url   -> same as image/video but src = remote_url
  *   widget       -> iframe of {server}/api/widgets/{id}/render for duration_sec
+ *   html bundle  -> sandboxed iframe of {server}/api/content/{content_id}/bundle for duration_sec
+ *                   (the server flattens the .wgt/.zip; this player unpacks nothing)
  * Content file URL: {server}/api/content/{content_id}/file  (public)
  */
 // Minimal i18n for the Tizen player (no shared i18n module here). Falls back to en.
@@ -15,6 +17,9 @@ var TIZEN_I18N = {
   de: { nothing_scheduled: 'Derzeit ist nichts geplant', no_content: 'Noch kein Inhalt zugewiesen', portrait_video_unsupported: 'Hochformat-Video wird auf diesem TV nicht unterstützt – nutze Querformat oder drehe die Datei und markiere sie als Querformat.' },
   pt: { nothing_scheduled: 'Nada programado no momento', no_content: 'Nenhum conteúdo atribuído ainda', portrait_video_unsupported: 'Vídeo em retrato não é suportado nesta TV — use paisagem ou gire o arquivo e marque-o como Paisagem.' }
 };
+/* The mime lib/html-bundle.js stamps on an uploaded HTML bundle. Matches no image/ or video/
+ * prefix, so nothing in the dispatch chains below routes it as media by accident. */
+var BUNDLE_MIME = 'application/vnd.screentinker.bundle+zip';
 var TZ_LANG = (function () { try { return (localStorage.getItem('rd_lang') || navigator.language || 'en').split('-')[0]; } catch (e) { return 'en'; } })();
 function tzt(k) { return (TIZEN_I18N[TZ_LANG] && TIZEN_I18N[TZ_LANG][k]) || TIZEN_I18N.en[k] || k; }
 
@@ -440,14 +445,19 @@ PlaylistPlayer.prototype.playCurrent = function () {
   // Widgets also buffer-swap (renderWidget reveals the new iframe on load, then clears), so they skip
   // the pre-dispatch clearStage too — kills the black flash on directory-board/widget reloads.
   var isWidget = !!(item.widget_id && !item.content_id);
+  // An HTML bundle buffer-swaps for the same reason a widget does — renderBundle reveals on load —
+  // so it must skip the pre-dispatch clearStage too, or it black-flashes for as long as the
+  // flattened document takes to parse, which on a TV is longer than a widget's.
+  var isBundle = mime === BUNDLE_MIME;
   // Skip the pre-dispatch clearStage for an image (it decode-gates + swaps inside renderImage) AND for a
   // landscape video that will composite into a wipe (renderVideoBuffered needs the outgoing frame to
   // capture as `from`, then clears inside its own mount). Everything else clears up front as before.
-  if (!isImage && !isWidget && !this._videoWillComposite(item)) this.clearStage();
+  if (!isImage && !isWidget && !isBundle && !this._videoWillComposite(item)) this.clearStage();
 
   try {
     if (mime === 'video/youtube') return this.renderYouTube(item, single);
     if (item.widget_id && !item.content_id) return this.renderWidget(item, single);
+    if (isBundle) return this.renderBundle(item, single);
     if (mime.indexOf('video/') === 0) return this.renderVideo(item, single);
     if (mime.indexOf('image/') === 0) return this.renderImage(item, single);
     // Fallback: a remote_url with unknown mime -> try iframe
@@ -909,6 +919,87 @@ PlaylistPlayer.prototype.renderWidget = function (item, single) {
   if (!single) this.schedule(this.durationMs(item));
 };
 
+/*
+ * An HTML bundle, mounted the way a widget is.
+ *
+ * The server flattens the archive into one self-contained document; this player unpacks nothing.
+ * `rev` is content_rev, so replacing the archive replaces what is framed — the same contract the
+ * media cache uses to decide a re-download.
+ *
+ * ⚠️ SANDBOXED, WHICH NO OTHER IFRAME IN THIS FILE IS. Widgets and YouTube here are network-origin
+ * URLs, cross-origin to this widget's app:// origin, so the same-origin policy already isolates
+ * them and no sandbox attribute was ever needed. A bundle is operator-uploaded HTML, and the day it
+ * is ever mounted from local storage rather than over HTTP that free isolation disappears — so the
+ * attribute is set here, now, while the reason is written down, rather than left as a gap for the
+ * offline work to walk into.
+ */
+PlaylistPlayer.prototype.renderBundle = function (item, single) {
+  var self = this;
+  var src = this.getBase() + '/api/content/' + item.content_id + '/bundle?rev=' + (item.content_rev || 0);
+  var f = document.createElement('iframe');
+  f.setAttribute('frameborder', '0');
+  f.setAttribute('sandbox', 'allow-scripts');
+  f.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;border:0;opacity:0';
+  var revealed = false;
+  var reveal = function () {
+    if (revealed) return; revealed = true;
+    var kids = self.stage.children;
+    for (var i = kids.length - 1; i >= 0; i--) { if (kids[i] !== f) self.stage.removeChild(kids[i]); }
+    f.style.opacity = '1';
+  };
+  f.addEventListener('load', reveal, { once: true });
+  // Longer than the widget path's 4s: a widget's `load` means "the server answered", but a
+  // flattened bundle's means "the parser walked a document full of data: URIs", and TV silicon is
+  // slow at that. Revealing early shows a half-painted page.
+  setTimeout(reveal, 8000);
+
+  /*
+   * ⚠️ CACHED COPY FIRST, NETWORK SECOND — and the ORDER is the offline story.
+   *
+   * There is no service worker in this runtime (app:// origin, see media-cache.js), so nothing
+   * caches the render for us the way it does on the web player. BundleStore keeps it on disk; if a
+   * copy for THIS revision is there, the bundle plays with the WAN down.
+   *
+   * ⚠️ AND THE ONLINE PATH IS DELIBERATELY LEFT AS src=. srcdoc is used ONLY for a cached document,
+   * because a srcdoc frame inherits its parent's CSP and a flattened bundle is nothing but data:
+   * URIs — measured on the web player, where the same document runs on the CSP-exempt /player and
+   * is silently script-dead on the dashboard. config.xml now declares a policy that permits data:,
+   * but that is NOT confirmed on a panel, so the proven path stays the default and the unproven one
+   * only ever replaces "nothing to show at all".
+   */
+  var cached = null;
+  try {
+    cached = (typeof BundleStore !== 'undefined' && BundleStore.available())
+      ? BundleStore.load(item.content_id, item.content_rev || 0) : null;
+  } catch (e) { cached = null; }
+
+  if (cached) {
+    f.srcdoc = cached;
+  } else {
+    f.src = src;
+    // Warm the store for next time, including the next power cut. Fire-and-forget: a failure here
+    // must never touch playback, and the item is already rendering from the network.
+    try {
+      if (typeof BundleStore !== 'undefined' && BundleStore.available()) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', src, true);
+        xhr.timeout = 30000;
+        xhr.onload = function () {
+          if (xhr.status >= 200 && xhr.status < 300 && xhr.responseText) {
+            BundleStore.save(item.content_id, item.content_rev || 0, xhr.responseText);
+          }
+        };
+        xhr.onerror = function () {};
+        xhr.ontimeout = function () {};
+        xhr.send();
+      }
+    } catch (e) { /* never let caching break playback */ }
+  }
+
+  this.stage.appendChild(f);
+  if (!single) this.schedule(this.durationMs(item));
+};
+
 PlaylistPlayer.prototype.renderFrame = function (src, advanceMs, allow, vertical) {
   var f = document.createElement('iframe');
   f.setAttribute('frameborder', '0');
@@ -1111,6 +1202,14 @@ ZoneRenderer.prototype.showItem = function (zone, list, index) {
       if (multi) this.scheduleAdvance(zone, dur, advance);
     } else if (a.widget_type || (a.widget_id && !a.content_id)) {
       zone.el.appendChild(zrFrame(this.getBase() + '/api/widgets/' + a.widget_id + '/render' + (this.getDeviceId() ? '?device=' + encodeURIComponent(this.getDeviceId()) : '?d=') + '&rev=' + (a.widget_rev || 0)));
+      if (multi) this.scheduleAdvance(zone, dur, advance);
+    } else if (mime === BUNDLE_MIME) {
+      // A zone bundle is the same server-flattened document as the fullscreen one, sandboxed for
+      // the reason renderBundle records. Without this branch a bundle in a zone matched nothing and
+      // the zone rendered an empty div that never advanced.
+      var bf = zrFrame(this.getBase() + '/api/content/' + a.content_id + '/bundle?rev=' + (a.content_rev || 0));
+      bf.setAttribute('sandbox', 'allow-scripts');
+      zone.el.appendChild(bf);
       if (multi) this.scheduleAdvance(zone, dur, advance);
     } else if (mime.indexOf('video/') === 0) {
       var v = document.createElement('video');

@@ -35,6 +35,20 @@ const MIME_TO_EXT = {
   'video/ogg': '.ogv',
   'video/x-msvideo': '.avi',
   'video/quicktime': '.mov',
+  /*
+   * ⚠️ A ZIP LANDS ON `.zip` AND STAYS OUT OF INLINE_SAFE_EXTS, WHICH IS THE WHOLE POINT.
+   *
+   * An HTML bundle (a .wgt or a plain .zip of index.html + assets) is stored as an ordinary content
+   * row and shipped to players as opaque bytes. Served from this origin it must therefore be
+   * application/octet-stream + attachment, which is exactly what hardenUploadResponse does for
+   * anything not in that set. A `.wgt` extension would buy nothing — both answers are identical —
+   * and would double the surface this map exists to keep small, so the flavour is recorded in
+   * lib/html-bundle.js's metadata instead of in the type.
+   *
+   * The magic bytes can only say "this is a zip". Whether it is a BUNDLE is a question about the
+   * central directory, and lib/html-bundle.js answers it in a second stage.
+   */
+  'application/zip': '.zip',
 };
 
 // Extensions served INLINE with their real media type. Anything outside this set is
@@ -78,6 +92,9 @@ function sniffMime(buf) {
     if (brand === 'qt  ') return 'video/quicktime';
     return 'video/mp4';
   }
+  // Zip container: `PK\x03\x04` is a local file header. `PK\x05\x06` (empty archive) and
+  // `PK\x07\x08` (spanned) are deliberately NOT accepted — neither can be a bundle.
+  if (b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04) return 'application/zip';
   if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return 'video/webm'; // EBML (webm/mkv)
   if (a4 === 'OggS') return 'video/ogg';
 

@@ -32,16 +32,30 @@ const storage = multer.diskStorage({
   }
 });
 
+/*
+ * ⚠️ THIS GATE READS A HEADER THE CALLER WROTE, so it is a courtesy, not a control. The authority
+ * is lib/upload-sniff.finalizeUpload, which reads the bytes on disk and unlinks anything it does
+ * not recognise. This exists to reject the obvious early and cheaply.
+ *
+ * HTML bundles are admitted by EXTENSION as well as mimetype, because browsers are inconsistent
+ * about a .wgt: Chrome sends application/octet-stream, some send application/x-zip-compressed, and
+ * a few send nothing useful at all. Admitting bare octet-stream on its own would let every curl
+ * default upload reach the disk before the sniffer refused it, so the extension has to agree.
+ */
+const ZIP_MIMETYPES = ['application/zip', 'application/x-zip-compressed', 'application/octet-stream', ''];
 const fileFilter = (req, file, cb) => {
   const allowedTypes = [
     'video/mp4', 'video/webm', 'video/avi', 'video/mkv', 'video/mov',
     'video/x-msvideo', 'video/quicktime', 'video/x-matroska',
     'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'
   ];
-  if (allowedTypes.includes(file.mimetype) || file.mimetype.startsWith('video/') || file.mimetype.startsWith('image/')) {
+  const looksLikeBundle = /\.(zip|wgt)$/i.test(file.originalname || '')
+    && ZIP_MIMETYPES.includes(String(file.mimetype || '').toLowerCase());
+  if (allowedTypes.includes(file.mimetype) || file.mimetype.startsWith('video/') || file.mimetype.startsWith('image/')
+      || looksLikeBundle) {
     cb(null, true);
   } else {
-    cb(new Error('Only video and image files are allowed'), false);
+    cb(new Error('Only video, image and HTML-bundle files are allowed'), false);
   }
 };
 

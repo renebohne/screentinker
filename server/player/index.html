@@ -502,6 +502,25 @@
         // a new randomly-named file, so the old copy is not merely a different revision of the same
         // URL — it is a different URL entirely, and nothing keyed on the asset path can find it.
         sw.postMessage({ type: 'st-cache-playlist', urls, prune: true });
+
+        /*
+         * ⚠️ AND WARM EACH BUNDLE'S RENDER, because the archive alone is not playable.
+         *
+         * The loop above pins /uploads/content/<file> — for a bundle that is the .zip, which
+         * nothing on this player can open. What actually renders is the server's flattened
+         * document at /api/content/:id/bundle, a different URL the worker only sees once something
+         * asks for it. Without this warm-up the first play of a bundle after an outage begins is a
+         * black frame, and the operator's assumption ("it downloaded, so it will play") is wrong in
+         * the one situation the cache exists for.
+         *
+         * Fire-and-forget: the worker's rev-pinned branch stores whatever comes back, and a failure
+         * here must never touch playback.
+         */
+        for (const it of all) {
+          if (!it || it.mime_type !== BUNDLE_MIME || !it.content_id) continue;
+          fetch(`${config.serverUrl}/api/content/${it.content_id}/bundle?rev=${it.content_rev || 0}`,
+            { credentials: 'omit' }).catch(() => {});
+        }
       } catch (e) { /* never let caching break playback */ }
     }
 
@@ -1006,6 +1025,13 @@
     // network hang must not leave a frozen/blank board). A solo/held widget re-fetches its
     // data every WIDGET_SOLO_REFRESH_MS — decoupled from duration_sec, because a static
     // board re-querying the DB + re-rendering every few seconds, fleet-wide, is pure waste.
+    /* How long a single-item playlist waits before retrying an item it cannot render. In a
+     * multi-item playlist an unknown type advances immediately; alone there is nothing to advance
+     * to, so it must not spin. */
+    const UNKNOWN_ITEM_HOLD_MS = 15000;
+    /* The mime lib/html-bundle.js stamps on an uploaded HTML bundle. Deliberately matches no
+     * image/ or video/ prefix, so nothing routes it as media by accident. */
+    const BUNDLE_MIME = 'application/vnd.screentinker.bundle+zip';
     const WIDGET_SWAP_TIMEOUT_MS = 8000;
     const WIDGET_SOLO_REFRESH_MS = 60000;
     let pendingWidgetSwap = null;   // { iframe, timer } while a new widget iframe loads
@@ -3146,6 +3172,11 @@
         // Render paths that exist in this file unconditionally.
         'playback.video', 'playback.image', 'playback.widget', 'playback.youtube',
         'playback.zones', 'playback.pip',
+        /* Mounting a server-flattened bundle needs nothing this player does not already have — it
+         * is the widget iframe with a different URL. Claimed unconditionally for that reason, and
+         * deliberately NOT taken to mean the bundle is available offline: nothing here unpacks an
+         * archive yet, so offline.cache still answers only for media. */
+        'playback.bundle',
         // #129 per-item mute plus the operator volume added alongside it.
         'audio.mute', 'audio.volume',
         // CSS transform in a browser; the host rotates the output on BrightSign. Both real.
@@ -4586,6 +4617,81 @@
       pendingWidgetSwap = { iframe, timer: setTimeout(discardPendingSwap, WIDGET_SWAP_TIMEOUT_MS) };
     }
 
+    /*
+     * An HTML bundle, mounted the same way a widget is.
+     *
+     * ⚠️ IT GOES THROUGH THE SAME BUFFERED SWAP ON PURPOSE. The naive version — clear the stage,
+     * then append an iframe — shows black for as long as the document takes to parse, and a
+     * flattened bundle is a big document full of data: URIs, so that gap is far longer than a
+     * widget's. Building hidden on top and revealing on load is what the widget path already
+     * learned; a second, simpler copy here would re-introduce the flash it exists to prevent.
+     *
+     * ⚠️ AND THE SANDBOX IS THE WHOLE ISOLATION STORY. This is operator-uploaded HTML that runs its
+     * own scripts. widgetSandboxAttr gives `allow-scripts` with no `allow-same-origin`, so the frame
+     * is an opaque origin that cannot read this player's localStorage — which holds the device
+     * token. The org-level opt-out that relaxes this for widgets exists so a player can embed an
+     * origin-strict third-party SITE; a bundle is code the operator uploaded to us, so it must
+     * never take that path. It is passed an item with no widget_allow_same_origin for that reason.
+     */
+    function renderBundleBuffered(item) {
+      const container = document.getElementById('playerContainer');
+      container.style.display = 'block';
+      discardPendingSwap();
+
+      const iframe = document.createElement('iframe');
+      iframe.style.background = '#000';
+      iframe.style.visibility = 'hidden';
+      iframe.allow = 'autoplay; fullscreen';
+      iframe.setAttribute('sandbox', 'allow-scripts');
+
+      const reveal = () => {
+        if (!pendingWidgetSwap || pendingWidgetSwap.iframe !== iframe) return;
+        clearTimeout(pendingWidgetSwap.timer);
+        pendingWidgetSwap = null;
+        iframe.style.visibility = 'visible';
+        teardownCurrentMedia(iframe);
+      };
+      iframe.addEventListener('load', reveal);
+      container.appendChild(iframe);
+      pendingWidgetSwap = { iframe, timer: setTimeout(discardPendingSwap, WIDGET_SWAP_TIMEOUT_MS) };
+
+      /*
+       * ⚠️ FETCHED HERE AND MOUNTED AS srcdoc, RATHER THAN POINTING iframe.src AT IT — and that one
+       * difference is the entire offline story.
+       *
+       * A widget is mounted by URL into a sandboxed frame, which is an OPAQUE-ORIGIN client, and a
+       * service worker does not control those: sw.js records the measurement (a clock widget
+       * mounted five times, zero entries in the cache). So widgets survive an outage only on the
+       * HTTP cache, which BrightSign does not guarantee across a reboot.
+       *
+       * This fetch is issued by the PLAYER PAGE — same-origin, controlled by the worker — so it
+       * DOES reach the worker's rev-pinned branch and DOES land in the Cache API, one of the three
+       * stores BrightSign documents as persistent. Same bytes, same sandbox, same isolation; the
+       * only thing that changed is who asked for them.
+       *
+       * The URL is rev-pinned (content_rev), so the cached copy can never be a stale bundle: new
+       * bytes mean a new rev mean a new cache key.
+       *
+       * ⚠️ AND srcdoc WORKS HERE ONLY BECAUSE /player IS CSP-EXEMPT (server.js skips dashboardCsp
+       * for this path). A srcdoc frame INHERITS ITS PARENT'S CSP, and a flattened bundle is nothing
+       * but data: URIs — so under the dashboard's `script-src 'self'` every script in it is
+       * silently blocked and the frame renders a styled, dead page. Measured, both ways. That is
+       * why the dashboard's own preview navigates to an ephemeral URL instead of reusing this
+       * trick, and why moving this mount to any page that has a CSP would break it invisibly.
+       */
+      const url = `${config.serverUrl}/api/content/${item.content_id}/bundle?rev=${item.content_rev || 0}`;
+      fetch(url, { credentials: 'omit' })
+        .then((r) => (r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status))))
+        .then((html) => { iframe.srcdoc = html; })
+        .catch((e) => {
+          // Fall back to a plain navigation. Loses the Cache API benefit, but a bundle that renders
+          // from the HTTP cache beats a black rectangle, and this is also the path on any player
+          // whose worker never registered.
+          console.log('[player] bundle fetch failed, falling back to src:', e && e.message);
+          iframe.src = url;
+        });
+    }
+
     // A held widget/board is left mounted (it self-refreshes its own data in place — no iframe
     // reload, so its scroll is never reset). This just re-checks the schedule on the slow cadence:
     // if it's still the sole active item, leave the live iframe alone and re-arm; if its daypart
@@ -5024,12 +5130,38 @@
       // than fall through every branch and leave a blank container.
       const hasRenderableType = item && (
         item.widget_id ||
+        item.mime_type === BUNDLE_MIME ||
         item.mime_type === 'video/youtube' ||
         (typeof item.mime_type === 'string' && (item.mime_type.startsWith('video/') || item.mime_type.startsWith('image/')))
       );
       if (!hasRenderableType) {
+        /*
+         * ⚠️ THIS USED TO RETURN WITHOUT ARMING ANYTHING, AND THAT STOPPED THE PLAYLIST DEAD.
+         *
+         * There is no media element here, so no `error` event fires and mediaFailureSkip is
+         * unreachable; there is no advance timer, and neither watchdog in this file re-arms the
+         * rotation. So ONE item with a mime nobody recognises blanked the screen and froze the loop
+         * on "Waiting for content..." until a socket push or a restart — and it is reachable in a
+         * single call, because POST /api/content/remote stores mime_type verbatim from the request
+         * body with no validation. An unknown type must be a SKIPPED ITEM, never a stopped playlist.
+         *
+         * A single-item playlist still holds (there is nothing to advance to), so it retries slowly
+         * rather than spinning.
+         */
         showStatus('Waiting for content...');
         isPlaying = false;
+        const onlyItem = !playlist || playlist.length <= 1;
+        console.log('[player] skipping item with unrecognised type:', item && item.mime_type);
+        scheduleAdvance(nextItem, onlyItem ? UNKNOWN_ITEM_HOLD_MS : 0);
+        return;
+      }
+
+      // An HTML bundle: the server flattens the archive into one self-contained document and this
+      // mounts it exactly like a widget — same buffered swap, same sandbox, same rev-pinned
+      // immutable caching. `rev` is content_rev, so replacing the archive replaces what is framed.
+      if (item.mime_type === BUNDLE_MIME) {
+        renderBundleBuffered(item);
+        if (!groupSync) scheduleAdvance(nextItem, (item.duration_sec || 10) * 1000);
         return;
       }
 

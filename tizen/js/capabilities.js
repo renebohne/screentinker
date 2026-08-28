@@ -38,6 +38,11 @@
       // Playback surface — all implemented in player.js on every Tizen build.
       'playback.video', 'playback.image', 'playback.widget', 'playback.youtube',
       'playback.zones', 'playback.transitions', 'playback.pip',
+      /* Mounting a server-flattened HTML bundle needs nothing this player does not already have —
+       * it is the widget iframe with a different URL and a sandbox attribute. Declared statically
+       * for that reason. It says nothing about offline: nothing here unpacks an archive, so a
+       * bundle is online-only even on a panel that reports offline.cache. */
+      'playback.bundle',
 
       /*
        * ⚠️ NOT trigger.http / trigger.udp, and this is a platform limit rather than an omission.

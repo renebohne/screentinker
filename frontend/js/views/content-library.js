@@ -3,6 +3,11 @@ import { showToast } from '../components/toast.js';
 import { esc, hydrateAuthImages } from '../utils.js';
 import { t } from '../i18n.js';
 
+/* The mime lib/html-bundle.js stamps on an uploaded HTML bundle. Kept as a constant rather than
+ * spelled out at each site: it is compared in three places here, and a typo in one of them is a
+ * card that renders an <img> pointed at a zip. */
+const BUNDLE_MIME = 'application/vnd.screentinker.bundle+zip';
+
 // #216: languages offered in the caption/subtitle pickers. Codes are BCP-47 primary tags —
 // enough for signage; extend as needed.
 const SUBTITLE_LANGS = [
@@ -60,7 +65,7 @@ export function render(container) {
         </svg>
         <p>${t('content.drop')}</p>
         <p class="upload-hint">${t('content.upload_hint')}</p>
-        <input type="file" id="fileInput" style="display:none" multiple accept="video/*,image/*">
+        <input type="file" id="fileInput" style="display:none" multiple accept="video/*,image/*,.zip,.wgt">
         <div class="upload-progress" id="uploadProgress" style="display:none">
           <div class="upload-progress-bar">
             <div class="upload-progress-fill" id="uploadProgressFill" style="width:0%"></div>
@@ -111,6 +116,7 @@ export function render(container) {
         <option value="image" ${state.type === 'image' ? 'selected' : ''}>${t('content.filter_type_image')}</option>
         <option value="youtube" ${state.type === 'youtube' ? 'selected' : ''}>${t('content.filter_type_youtube')}</option>
         <option value="web" ${state.type === 'web' ? 'selected' : ''}>${t('content.filter_type_web')}</option>
+        <option value="bundle" ${state.type === 'bundle' ? 'selected' : ''}>${t('content.filter_type_bundle')}</option>
       </select>
       <select id="contentSort" class="input btn-sm" style="width:auto;background:var(--bg-input)">
         <option value="date_desc" ${state.sort === 'date_desc' ? 'selected' : ''}>${t('content.sort_newest')}</option>
@@ -445,6 +451,14 @@ async function loadContent() {
                   </svg>
                 </div>
               </div>`
+          : c.mime_type === BUNDLE_MIME
+            ? `<div class="video-icon" style="flex-direction:column;gap:4px">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                  <polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>
+                </svg>
+                <span style="font-size:10px;color:var(--text-muted)">${t('content.type_bundle_short')}</span>
+              </div>`
           : c.remote_url
             ? `<div class="video-icon" style="flex-direction:column;gap:4px">
                 <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -467,7 +481,7 @@ async function loadContent() {
         <div class="content-item-body">
           <div class="content-item-name" title="${esc(c.filename)}">${esc(c.filename)}</div>
           <div class="content-item-size">
-            ${c.mime_type === 'video/youtube' ? t('content.type_youtube') : c.remote_url ? t('content.type_remote') : (c.mime_type?.startsWith('video/') ? t('content.type_video') : t('content.type_image'))}
+            ${c.mime_type === 'video/youtube' ? t('content.type_youtube') : c.mime_type === BUNDLE_MIME ? t('content.type_bundle') : c.remote_url ? t('content.type_remote') : (c.mime_type?.startsWith('video/') ? t('content.type_video') : t('content.type_image'))}
             ${c.duration_sec ? ` &middot; ${Math.floor(c.duration_sec / 60)}:${String(Math.floor(c.duration_sec % 60)).padStart(2, '0')}` : ''}
             ${c.file_size ? ' &middot; ' + formatFileSize(c.file_size) : ''}
             ${c.width && c.height ? ` &middot; ${c.width}x${c.height}` : ''}
@@ -775,7 +789,7 @@ function showEditModal(contentItem, onSave) {
         ${!isRemote ? `
         <div class="form-group">
           <label>${t('content.label_replace_file')}</label>
-          <input type="file" id="editFileReplace" accept="video/*,image/*" style="font-size:13px;color:var(--text-secondary)">
+          <input type="file" id="editFileReplace" accept="video/*,image/*,.zip,.wgt" style="font-size:13px;color:var(--text-secondary)">
           <p style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('content.replace_file_hint')}</p>
         </div>
         ` : ''}
@@ -884,7 +898,52 @@ function showEditModal(contentItem, onSave) {
   };
 }
 
-function showPreview(content) {
+async function showPreview(content) {
+  /*
+   * ⚠️ A BUNDLE IS PREVIEWED THROUGH AN EPHEMERAL SESSION, NOT ITS PUBLIC URL. /api/content/:id/
+   * bundle is gated on the content being referenced by a playlist — which a just-uploaded bundle is
+   * not — so pointing an iframe at it here would 403 and show an empty box. That is the same
+   * "preview shows nothing" trap the directory-board backgrounds had.
+   *
+   * The frame is sandboxed to allow-scripts with NO allow-same-origin, exactly as a player mounts
+   * it. This is the dashboard origin, where the session JWT lives in localStorage, so that is not
+   * a detail: an operator-uploaded bundle must never run with access to it.
+   *
+   * ⚠️ AND IT MUST BE src=, NOT srcdoc, even though the player uses srcdoc for the same bytes. A
+   * srcdoc frame inherits ITS PARENT'S CSP; this page has one (`script-src 'self'`) and a flattened
+   * bundle is entirely data: URIs, so every script in it would be blocked and the preview would
+   * render a styled, dead page with nothing in any log. The player gets away with srcdoc only
+   * because /player is CSP-exempt. Measured both ways — do not "simplify" this to srcdoc.
+   */
+  if (content.mime_type === BUNDLE_MIME) {
+    let session;
+    try {
+      session = await api.post(`/content/${content.id}/bundle-preview`);
+    } catch (err) {
+      showToast(err.message || t('content.bundle_preview_failed'), 'error');
+      return;
+    }
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.style.display = 'flex';
+    overlay.innerHTML = `
+      <div style="background:var(--bg-secondary);border-radius:var(--radius-lg);max-width:90vw;max-height:90vh;overflow:hidden;position:relative">
+        <button style="position:absolute;top:8px;right:8px;z-index:1;background:rgba(0,0,0,0.7);border:none;color:white;width:32px;height:32px;border-radius:50%;font-size:18px;cursor:pointer" id="closePreview">&times;</button>
+        <iframe sandbox="allow-scripts" src="${esc(session.url)}" style="width:80vw;height:45vw;max-height:80vh;display:block;border:none;background:#000"></iframe>
+        <div style="padding:12px 16px;border-top:1px solid var(--border)">
+          <div style="font-weight:500">${esc(content.filename)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${t('content.type_bundle')} — ${t('content.bundle_entry', { entry: esc(content.bundle_entry || 'index.html') })}</div>
+          ${(session.skipped && session.skipped.length)
+            ? `<div style="font-size:12px;color:#f59e0b;margin-top:6px">${t('content.bundle_skipped', { n: session.skipped.length })}</div>`
+            : ''}
+        </div>
+      </div>`;
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+    overlay.querySelector('#closePreview').onclick = () => overlay.remove();
+    document.body.appendChild(overlay);
+    return;
+  }
+
   const isYoutube = content.mime_type === 'video/youtube';
   const isVideo = !isYoutube && content.mime_type?.startsWith('video/');
   const src = content.remote_url || `/uploads/content/${content.filepath}`;

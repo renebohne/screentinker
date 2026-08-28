@@ -28,6 +28,11 @@ const CAPABILITIES = [
   // playback surface
   'playback.video', 'playback.image', 'playback.widget', 'playback.youtube',
   'playback.zones', 'playback.transitions', 'playback.pip',
+  /* An uploaded HTML bundle (.wgt / .zip) played as a playlist item. Declared by a player that can
+   * MOUNT one — today that means loading the server's flattened single-document render, which every
+   * player with an iframe can do. It does NOT imply the player can unpack an archive locally, so it
+   * says nothing about whether a bundle survives an outage; that is offline.cache's job. */
+  'playback.bundle',
   // audio
   'audio.mute', 'audio.volume',
   // display
@@ -161,6 +166,7 @@ const BASELINE = {
   brightsign: [
     'playback.video', 'playback.image', 'playback.widget', 'playback.youtube',
     'playback.zones', 'playback.transitions', 'playback.pip',
+    'playback.bundle',
     'audio.mute',
     // CSS transform. Graphics rotate; with hwz the video sits on a hardware plane that ignores it,
     // so this is partial — but nothing routes a COMMAND to display.rotation and no control is
@@ -215,6 +221,7 @@ const BASELINE = {
   web: [
     'playback.video', 'playback.image', 'playback.widget', 'playback.youtube',
     'playback.zones', 'playback.transitions', 'playback.pip',
+    'playback.bundle',
     'audio.mute',
     'display.rotation',
     'remote.screenshot', 'remote.stream', 'remote.input',

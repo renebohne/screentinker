@@ -37,6 +37,7 @@ import com.remotedisplay.player.player.PipOverlay
 import com.remotedisplay.player.player.WallController
 import com.remotedisplay.player.player.GroupScheduleController
 import com.remotedisplay.player.player.ZoneManager
+import com.remotedisplay.player.player.ItemTiming
 import com.remotedisplay.player.remote.ScreenshotCapture
 import com.remotedisplay.player.remote.TouchInjector
 import com.remotedisplay.player.service.UpdateChecker
@@ -48,6 +49,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var config: ServerConfig
     private lateinit var contentCache: ContentCache
+    private lateinit var bundleCache: com.remotedisplay.player.data.BundleCache
     private lateinit var downloadCoordinator: com.remotedisplay.player.data.DownloadCoordinator
     // #170: content-id signature of the last processed playlist, to detect a genuine content change
     // (first load / reassignment / toggle-back) vs the routine 60s same-playlist refresh.
@@ -191,6 +193,7 @@ class MainActivity : AppCompatActivity() {
         try { systemControl.applyPersistedWindowBrightness(window) } catch (_: Throwable) {}
 
         contentCache = ContentCache(this)
+        bundleCache = com.remotedisplay.player.data.BundleCache(this)
         // Coordinated background downloads (single-flight + bounded pool + backoff) — reconnect-safe.
         downloadCoordinator = com.remotedisplay.player.data.DownloadCoordinator(
             cache = contentCache,
@@ -841,7 +844,37 @@ class MainActivity : AppCompatActivity() {
                     // downloads at most once. It acks ready/failed itself (deduped via onAck).
                     if (contentChanged) downloadCoordinator.resetBackoff(contentId) // #170: retry now, don't wait out a stale backoff
                     downloadCoordinator.ensure(contentId, filename, contentRev)
+
+                    /*
+                     * ⚠️ A BUNDLE NEEDS A SECOND THING FETCHED, AND THE LOOP ABOVE CANNOT KNOW IT.
+                     *
+                     * ensure() pulls /api/content/:id/file — for a bundle that is the .zip, which
+                     * nothing here can open. What renders is the server's flattened document at
+                     * /api/content/:id/bundle, a URL this sweep has never heard of. Without warming
+                     * it, a bundle plays only while the server is reachable, and the first play
+                     * after an outage starts is a black frame — on the exact feature whose whole
+                     * point is that a screen keeps working when the WAN does not.
+                     *
+                     * Already on a background thread here, so the fetch is inline and its failure
+                     * is nothing: playBundle retries on demand and falls back to the URL.
+                     */
+                    if (item.optString("mime_type", "") == ItemTiming.BUNDLE_MIME
+                        && !bundleCache.isCached(contentId, contentRev)) {
+                        bundleCache.fetch(config.serverUrl, contentId, contentRev)
+                    }
                 }
+
+                // Reclaim renders for bundles that have left the playlist. The media cache has no
+                // eviction at all, but this store is small and bounded by the playlist, so keeping
+                // it tidy costs one pass and stops a long-lived panel accreting dead documents.
+                try {
+                    val live = mutableSetOf<String>()
+                    for (i in 0 until assignments.length()) {
+                        val a = assignments.getJSONObject(i)
+                        if (!a.isNull("content_id")) live.add(a.optString("content_id", ""))
+                    }
+                    if (live.isNotEmpty()) bundleCache.pruneToPlaylist(live)
+                } catch (e: Exception) { /* reclaim is best-effort */ }
 
                 // Start/resume playback immediately — do NOT wait on downloads (they're async now).
                 // Screen-resilience plays whatever is cached and skips not-yet-ready items; the 3s
@@ -860,6 +893,7 @@ class MainActivity : AppCompatActivity() {
         wsService?.onContentDelete = { contentId ->
             downloadCoordinator.forget(contentId) // drop in-flight/backoff state so a re-add re-downloads
             contentCache.deleteContent(contentId)
+            bundleCache.delete(contentId)          // its render lives in a separate store, so it needs saying
             playlistController.removeContent(contentId)
             // Update cached playlist to reflect deletion
             try {
@@ -1094,6 +1128,16 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // HTML bundle - the server flattens the uploaded .wgt/.zip into one self-contained
+        // document and this mounts it exactly like a widget. `rev` is contentRev, so replacing the
+        // archive changes the URL; without it MediaPlayerManager.showWidget's same-URL reuse would
+        // keep the OLD bundle on screen after a replace, which is the same trap widget_rev exists
+        // for.
+        if (item.mimeType == ItemTiming.BUNDLE_MIME) {
+            playBundle(item)
+            return
+        }
+
         // YouTube content - play in WebView
         if (item.mimeType == "video/youtube" && !item.remoteUrl.isNullOrEmpty()) {
             Log.i("MainActivity", "Playing YouTube: ${item.remoteUrl}")
@@ -1131,11 +1175,63 @@ class MainActivity : AppCompatActivity() {
         playFile(item, file)
     }
 
+    /**
+     * Play an HTML bundle: the server's flattened document, from disk when we have it.
+     *
+     * ⚠️ CACHE FIRST, AND SYNCHRONOUSLY, because this is the offline path. A cached render is shown
+     * immediately on the main thread — no fetch, no await, nothing that can fail with the WAN down.
+     * Only a MISS goes to the network, and it does so on a background thread so a slow or dead
+     * server cannot stall playback; the item advances on its timer either way (ItemTiming).
+     *
+     * The last-resort fallback loads the URL directly. That path cannot work offline, but it is
+     * strictly better than a black screen on a player whose cache was evicted while online.
+     */
+    private fun playBundle(item: PlaylistItem) {
+        val key = "${item.contentId}@${item.contentRev}"
+        val cached = bundleCache.cachedHtml(item.contentId, item.contentRev)
+        if (cached != null) {
+            Log.i("MainActivity", "Playing HTML bundle from cache: $key")
+            mediaPlayer.showBundle(cached, key)
+            wsService?.sendPlaybackState(item.contentId, 0f)
+            return
+        }
+        Log.i("MainActivity", "HTML bundle not cached ($key) — fetching")
+        Thread {
+            val html = bundleCache.fetch(config.serverUrl, item.contentId, item.contentRev)
+            handler.post {
+                // The playlist may have moved on while we were fetching; mounting then would yank
+                // whatever is now on screen. Only show it if this item is still the current one.
+                if (playlistController.currentItem?.contentId != item.contentId) return@post
+                if (html != null) {
+                    mediaPlayer.showBundle(html, key)
+                } else {
+                    Log.w("MainActivity", "Bundle fetch failed for $key — falling back to direct URL")
+                    mediaPlayer.showWidget("${config.serverUrl}/api/content/${item.contentId}/bundle?rev=${item.contentRev}")
+                }
+                wsService?.sendPlaybackState(item.contentId, 0f)
+            }
+        }.start()
+    }
+
     private fun playFile(item: PlaylistItem, file: java.io.File) {
         if (item.mimeType.startsWith("video/")) {
             mediaPlayer.playVideo(file, item.muted, item.transition)
         } else if (item.mimeType.startsWith("image/")) {
             mediaPlayer.showImage(file, item.transition)
+        } else {
+            /*
+             * ⚠️ AN UNRECOGNISED MIME MUST ADVANCE, NOT SIT THERE.
+             *
+             * This chain had no else, so an item of any other type mounted NOTHING — and
+             * ItemTiming.endsOnTimer returns false for it, so no advance was armed either. The
+             * playlist stopped on that item permanently, which is precisely the YouTube defect
+             * documented in PlaylistSelection.kt in a new place. It is reachable in one call:
+             * POST /api/content/remote stores mime_type verbatim from the request body with no
+             * validation, so a typo is enough.
+             */
+            Log.w("MainActivity", "Unrecognised item type ${item.mimeType} (${item.filename}) — skipping")
+            handler.post { playlistController.next() }
+            return
         }
 
         // Report playback state

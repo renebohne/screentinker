@@ -144,6 +144,15 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/api/widgets/') && req.path.endsWith('/data.json')) return next();
   if (req.path.startsWith('/api/widgets/preview-session/')) return next();
   if (req.path.startsWith('/api/kiosk/') && req.path.endsWith('/render')) return next();
+  /*
+   * ⚠️ AN HTML BUNDLE IS THE SAME CASE AS A WIDGET RENDER, and it fails the same way without this.
+   * The document is flattened to data: URIs, so the dashboard's `script-src 'self'` blocks every
+   * script in it, and `frame-ancestors 'self'` refuses the null-origin frame a player mounts it in
+   * — a blank rectangle with nothing in any log. What contains a bundle is the frame's sandbox
+   * attribute (allow-scripts, no allow-same-origin), not this policy.
+   */
+  if (req.path.startsWith('/api/content/') && req.path.endsWith('/bundle')) return next();
+  if (/^\/api\/content\/[^/]+\/bundle-preview\//.test(req.path)) return next();
   return dashboardCsp(req, res, next);
 });
 // CORS policy.
@@ -902,6 +911,87 @@ app.get('/api/content/:id/file', (req, res) => {
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   hardenUploadResponse(res, content.filepath);
   res.sendFile(safePath);
+});
+
+/*
+ * Previewing a bundle from the dashboard, before it is assigned to anything.
+ *
+ * ⚠️ THIS EXISTS BECAUSE THE PUBLIC ROUTE CANNOT ANSWER IT. /bundle is gated on the content being
+ * referenced by a playlist or a widget, because a player's frame carries no credentials — so a
+ * freshly uploaded bundle, which is exactly the one an operator wants to look at, is a 403 there.
+ * Relaxing that gate to allow previewing would make every uploaded archive world-readable by uuid.
+ *
+ * Same shape as the widget preview session (routes/widgets.js): an authenticated POST mints an
+ * ephemeral id, and that id — not a token, not a session — is what the iframe loads. The mint lives
+ * in routes/content.js behind auth; only the read is here, with the other public content routes.
+ */
+app.get('/api/content/:id/bundle-preview/:token', (req, res) => {
+  const html = require('./lib/bundle-preview-store').get(req.params.token, req.params.id);
+  if (html == null) return res.status(410).send('Preview expired');
+  res.removeHeader('X-Frame-Options');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(html);
+});
+
+/*
+ * An HTML bundle, flattened into one self-contained document.
+ *
+ * ⚠️ GATED EXACTLY LIKE /file AND /thumbnail, and for the same unavoidable reason: the frame that
+ * loads this is a player's sandboxed iframe, which carries no credentials and cannot be made to.
+ * So the rule is the same one those two use — the content must be referenced by a playlist, or by a
+ * widget in its own workspace, or the caller must hold a session for that workspace.
+ *
+ * ⚠️ AND IT MUST NOT GET `Content-Security-Policy: sandbox`. Every other response from the upload
+ * paths does, via hardenUploadResponse, because uploaded bytes must never execute. A bundle is the
+ * one exception in the product: it is HTML whose whole purpose is to run its own scripts. What
+ * keeps it contained is the frame's sandbox attribute — allow-scripts with NO allow-same-origin, so
+ * an opaque origin with no access to the player's storage — chosen by the player, not by us.
+ *
+ * The bytes are never extracted to disk; lib/bundle-inline.js reads entries out of the stored
+ * archive in memory. Rate limiting comes from the /api/content mount above, which matters here
+ * because inlining is the one memory-hungry thing on this route.
+ */
+app.get('/api/content/:id/bundle', async (req, res) => {
+  const { db } = require('./db/database');
+  const content = db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id);
+  if (!content) return res.status(404).json({ error: 'Content not found' });
+  const htmlBundle = require('./lib/html-bundle');
+  if (content.mime_type !== htmlBundle.BUNDLE_MIME || !content.filepath) {
+    return res.status(404).json({ error: 'Not an HTML bundle' });
+  }
+  const inPlaylist = db.prepare('SELECT id FROM playlist_items WHERE content_id = ? LIMIT 1').get(req.params.id);
+  const inWidget = inPlaylist ? null : db.prepare('SELECT id FROM widgets WHERE workspace_id = ? AND config LIKE ? LIMIT 1').get(content.workspace_id, `%/api/content/${req.params.id}/%`);
+  if (!inPlaylist && !inWidget && !requesterCanAccessContent(req, content)) {
+    return res.status(403).json({ error: 'Content not assigned to any playlist or widget' });
+  }
+
+  const safePath = path.resolve(config.contentDir, path.basename(content.filepath));
+  if (!safePath.startsWith(path.resolve(config.contentDir))) return res.status(403).json({ error: 'Invalid path' });
+
+  try {
+    const { inlineBundle } = require('./lib/bundle-inline');
+    const entry = content.bundle_entry || 'index.html';
+    const out = await inlineBundle(safePath, entry);
+    // Framed by a player at a null origin, so SAMEORIGIN would refuse it — the same reason the
+    // widget render route drops this header.
+    res.removeHeader('X-Frame-Options');
+    // A rev-pinned URL is content-addressed and may be cached hard; an unpinned one may not.
+    // Identical rule to routes/widgets.js, and the players' offline story depends on it.
+    if (req.query.rev) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    else res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (out.skipped.length) res.setHeader('X-Bundle-Skipped', String(out.skipped.length));
+    return res.send(out.html);
+  } catch (err) {
+    if (err && err.status === 413) return res.status(413).json({ error: err.message });
+    console.error('[bundle] inline failed for', req.params.id, err && err.message);
+    return res.status(500).json({ error: 'Bundle could not be rendered' });
+  }
 });
 
 // Proxy a remote thumbnail (e.g. YouTube's img.youtube.com/.../hqdefault.jpg, which
