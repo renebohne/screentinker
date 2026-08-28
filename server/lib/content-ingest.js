@@ -10,19 +10,22 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
 const config = require('../config');
-const { sanitizeString } = require('../middleware/sanitize');
+const { cleanUserText } = require('../middleware/sanitize');
 const { videoDisplayDims, imageDisplayDims } = require('./media-orientation');
 const { digestFile } = require('./content-digest');
 const { finalizeUpload } = require('./upload-sniff');
 const htmlBundle = require('./html-bundle');
 const fs = require('fs');
 
-// Multer takes file.originalname from the multipart header, bypassing sanitizeBody, so
-// HTML-escape here (renders as text in every UI sink). .normalize('NFC') first: macOS
-// sends NFD-decomposed names; Linux/renderers expect NFC. Single point - every filename
-// storage site flows through here.
+// Multer takes file.originalname from the multipart header, bypassing sanitizeBody, so it is
+// cleaned here instead.
+//
+// ⚠️ NOT HTML-ESCAPED ANY MORE — see middleware/sanitize.js. Escaping at ingest and again at the
+// sink is double encoding, and it compounded on every re-save. Stored as typed; escaped where it
+// is rendered. .normalize('NFC') first: macOS sends NFD-decomposed names; Linux/renderers expect
+// NFC. Single point - every filename storage site flows through here.
 function safeFilename(name) {
-  return sanitizeString((name || '').normalize('NFC'));
+  return cleanUserText((name || '').normalize('NFC'));
 }
 
 /*

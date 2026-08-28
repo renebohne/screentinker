@@ -60,12 +60,63 @@ function normalizeDeck(raw) {
       // Carried through publish so a republish updates the same widget rather than making another.
       // Never trusted for authorization — publish re-checks that the widget is this workspace's.
       widget_id: typeof src.widget_id === 'string' && src.widget_id.length <= 64 ? src.widget_id : null,
-      template: (src.template && typeof src.template === 'object') ? src.template : { elements: [] },
-      fields: (src.fields && typeof src.fields === 'object' && !Array.isArray(src.fields)) ? src.fields : {},
+      ...sanitizeStored(src.template, src.fields),
     };
   });
 
   return { slides };
+}
+
+/*
+ * Store only what the RENDERER would accept.
+ *
+ * ⚠️ THIS USED TO KEEP `template` EXACTLY AS SENT, AND THAT WAS STORED XSS. The slide editor draws
+ * the filmstrip by interpolating a style string into an innerHTML attribute, so a colour of
+ * `x" onmouseover="…` in a saved deck broke out of `style="…"` and ran script in the DASHBOARD
+ * origin — where the session JWT lives — for whoever opened the deck next. An editor could write
+ * it; an admin would run it. The wall was never at risk (routes/widgets.js re-normalises before
+ * rendering), which is exactly why it could sit here unnoticed.
+ *
+ * ⚠️ NORMALIZE, THEN MAP BACK TO THE STORED SHAPE — do not simply store normalizeSlide's output.
+ * That function is the renderer's view of a slide and renames things on the way (`backgroundDim`,
+ * `backgroundContentId`, `contentId`); writing its output straight back would silently drop the
+ * picture background an operator had set, because the editor reads the snake_case keys. So the
+ * values are validated by the one authority that matters and then rewritten in the shape the
+ * document has always used.
+ */
+function sanitizeStored(templateIn, fieldsIn) {
+  const rawTemplate = (templateIn && typeof templateIn === 'object' && !Array.isArray(templateIn)) ? templateIn : { elements: [] };
+  const rawFields = (fieldsIn && typeof fieldsIn === 'object' && !Array.isArray(fieldsIn)) ? fieldsIn : {};
+  const settled = normalizeSlide({ template: rawTemplate, fields: rawFields });
+
+  const template = {
+    background: settled.background,
+    background_content_id: settled.backgroundContentId,
+    background_dim: settled.backgroundDim,
+    elements: settled.elements.map((e) => ({
+      slot: e.slot,
+      kind: e.kind,
+      box: { x: e.x, y: e.y, w: e.w, ...(e.h == null ? {} : { h: e.h }) },
+      content_id: e.contentId,
+      style: {
+        color: e.style.color,
+        font: e.style.font,
+        size_cqw: e.style.size,
+        weight: e.style.weight,
+        align: e.style.align,
+        radius_cqw: e.style.radius,
+        opacity: e.style.opacity,
+      },
+      motion: e.motion,
+    })),
+  };
+
+  /* Words survive only for slots that survived, and only as the renderer accepted them. */
+  const fields = {};
+  for (const e of template.elements) {
+    if (Object.prototype.hasOwnProperty.call(settled.fields, e.slot)) fields[e.slot] = settled.fields[e.slot];
+  }
+  return { template, fields };
 }
 
 /**

@@ -73,6 +73,19 @@ function inScope(src) {
   }
   for (const m of src.matchAll(/import\s+([A-Za-z_$][\w$]*)\s*(?:,|from)/g)) names.add(m[1]);
   /*
+   * ⚠️ A DYNAMIC IMPORT BRINGS NAMES INTO SCOPE TOO, and missing this made the guard cry wolf.
+   * `const { openThing } = await import('./thing.js')` is how every modal in this codebase is
+   * loaded — lazily, so a dialog nobody opens is never fetched — and a guard that calls that an
+   * unimported call is a guard people learn to ignore, which is worse than not having one.
+   */
+  for (const m of src.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*await\s+import\s*\(/g)) {
+    for (const part of m[1].split(',')) {
+      const as = part.split(/\bas\b|:/);
+      const name = (as[as.length - 1] || '').trim();
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) names.add(name);
+    }
+  }
+  /*
    * Declared locally — a file is free to define its own helper, and several do.
    *
    * ⚠️ ANCHORED AT THE START OF A LINE, and the first version of this guard was not, which made it
@@ -98,7 +111,16 @@ test('⚠️ every shared helper a frontend file calls is in that file\'s scope'
 
   const offenders = [];
   for (const file of jsFiles(FRONTEND)) {
-    if (SOURCES.includes(file)) continue;
+    /*
+     * ⚠️ NO FILE IS EXEMPT — AND SKIPPING SOURCES WAS A HOLE BIG ENOUGH TO DRIVE THE SAME BUG
+     * THROUGH TWICE. SOURCES holds the helper modules AND every file in components/, so every
+     * modal in this codebase was excluded from the scan. The AI settings dialog was then extracted
+     * from views/ (scanned) into components/ (not scanned) with its esc() import left behind, and
+     * this guard reported green over a ReferenceError that broke two features.
+     *
+     * A source file does not need exempting: inScope() already counts what a file DECLARES,
+     * including its own exports, so utils.js using its own esc() resolves normally.
+     */
     const src = code(fs.readFileSync(file, 'utf8'));
     const scope = inScope(src);
     for (const name of shared) {

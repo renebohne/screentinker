@@ -1,6 +1,7 @@
 import { api } from '../api.js';
 import { esc } from '../utils.js';
 import { showToast } from '../components/toast.js';
+import { t } from '../i18n.js';
 
 /*
  * The slide deck editor.
@@ -250,13 +251,30 @@ function renderEditor(container) {
           <button class="btn btn-secondary btn-sm" id="playBtn">▶ Play entrance</button>
           <span style="margin-left:auto;font-size:12px;color:var(--text-muted)" id="settleLabel"></span>
         </div>
+        <!--
+          ⚠️ UNDER THE STAGE, NOT IN THE INSPECTOR. The inspector edits the SELECTED ELEMENT; this
+          replaces the whole slide, and putting a whole-slide action among per-element controls is
+          how somebody loses a layout while thinking they were restyling one heading.
+        -->
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);flex-wrap:wrap">
+          <input id="aiPrompt" class="input" style="flex:1;min-width:180px;margin:0"
+                 placeholder="${esc(t('slides.ai.placeholder'))}" maxlength="500">
+          <button class="btn btn-secondary btn-sm" id="aiGenBtn">${esc(t('slides.ai.generate'))}</button>
+          <button class="btn-icon" id="aiCfgBtn" title="${esc(t('slides.ai.settings'))}" aria-label="${esc(t('slides.ai.settings'))}" style="padding:4px 8px">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        </div>
+        <div id="aiStatus" style="font-size:12px;color:var(--text-muted);margin-top:6px;min-height:16px"></div>
       </div>
       <div class="settings-section" style="padding:0">
         <div style="display:flex;border-bottom:1px solid var(--border)" id="tabs">
-          ${['content', 'style', 'motion', 'slide'].map((t) => `
-            <button class="tabBtn" data-tab="${t}" style="flex:1;padding:8px 2px;border:0;background:none;
+          ${['content', 'style', 'motion', 'slide'].map((tab) => `
+            <button class="tabBtn" data-tab="${tab}" style="flex:1;padding:8px 2px;border:0;background:none;
               cursor:pointer;font-size:12px;font-weight:600;border-bottom:2px solid transparent">
-              ${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}
+              ${tab[0].toUpperCase() + tab.slice(1)}</button>`).join('')}
         </div>
         <div id="layers" style="max-height:170px;overflow-y:auto;border-bottom:1px solid var(--border)"></div>
         <div id="props" style="padding:11px 12px 14px;display:grid;gap:9px"></div>
@@ -271,6 +289,14 @@ function renderEditor(container) {
   container.querySelector('#saveBtn').addEventListener('click', () => save(container));
   container.querySelector('#pubBtn').addEventListener('click', () => publish(container));
   container.querySelector('#playBtn').addEventListener('click', play);
+  container.querySelector('#aiGenBtn').addEventListener('click', () => aiGenerate(container));
+  container.querySelector('#aiPrompt').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); aiGenerate(container); }
+  });
+  container.querySelector('#aiCfgBtn').addEventListener('click', async () => {
+    const { openAiSettingsModal } = await import('../components/ai-settings-modal.js');
+    openAiSettingsModal();
+  });
   container.querySelectorAll('.tabBtn').forEach((b) => b.addEventListener('click', () => {
     state.tab = b.dataset.tab; paintTabs(container); renderProps(container);
   }));
@@ -334,6 +360,16 @@ function touchValue(container) {
 
 /* ============================================================ stage */
 
+/*
+ * ⚠️ THE RESULT IS A STRING THAT REACHES AN ATTRIBUTE, SO EVERY CALLER MUST ESCAPE IT.
+ *
+ * It interpolates stored values (colour, font, numbers) straight into CSS declarations. Assigned to
+ * `.style.cssText` that is safe — the CSS parser cannot produce markup. Interpolated into an
+ * innerHTML `style="…"` it is NOT: a colour containing a double quote closes the attribute and the
+ * rest becomes markup, which is stored XSS in the dashboard origin. Server-side sanitising in
+ * lib/slide-deck.js now means a stored colour is always hex, and the escape here is the second lock
+ * on the same door — decks saved before that fix still exist.
+ */
 function styleFor(e) {
   const s = e.style || {};
   const out = [`left:${e.box.x}%`, `top:${e.box.y}%`, `width:${e.box.w}%`];
@@ -481,7 +517,7 @@ function renderStrip(container) {
       <div style="position:relative;aspect-ratio:16/9;container-type:size;background:${esc(s.template.background || '#000')}">
         ${contentUrl(s.template.background_content_id) ? `<div style="position:absolute;inset:0;background-size:cover;background-position:center;background-image:url(${esc(contentUrl(s.template.background_content_id))})"></div>` : ''}
         ${(s.template.background_dim || 0) > 0 && contentUrl(s.template.background_content_id) ? `<div style="position:absolute;inset:0;background:rgba(0,0,0,${s.template.background_dim})"></div>` : ''}
-        ${elementsOf(s).map((e) => `<div style="position:absolute;overflow:hidden;${styleFor(e)}">${
+        ${elementsOf(s).map((e) => `<div style="position:absolute;overflow:hidden;${esc(styleFor(e))}">${
           TEXT_KINDS.includes(e.kind) ? esc(s.fields[e.slot] || '') : ''}</div>`).join('')}
       </div>
       <div style="display:flex;gap:6px;padding:4px 6px;border-top:1px solid var(--border)">
@@ -969,6 +1005,107 @@ async function publish(container) {
     showToast(`Published ${n} slide${n === 1 ? '' : 's'} to a playlist`, 'success');
   } catch (e) {
     showToast(e.message || 'Could not publish', 'error');
+  }
+}
+
+/*
+ * Generate the CURRENT slide from a sentence.
+ *
+ * ⚠️ IT REPLACES THE SLIDE, AND SAYS SO BEFORE IT DOES. The server returns a whole {template,
+ * fields} pair — layout and words together — so applying it discards whatever was there. There is
+ * no undo in this editor, so the confirmation is the undo: the one thing worse than a mediocre
+ * generated slide is a good hand-built one silently overwritten by it. An EMPTY slide (one default
+ * element, no words typed) is not worth asking about, so it is replaced without ceremony.
+ *
+ * ⚠️ THE DECK IS NOT SAVED HERE. The result lands as an unsaved edit like any other, so an operator
+ * who dislikes it can navigate away and lose nothing. Generating straight into a save would make
+ * the model's output authoritative before anyone had looked at it.
+ */
+let aiBusy = false;
+
+async function aiGenerate(container) {
+  /*
+   * ⚠️ ONE AT A TIME, AND THE FLAG IS NOT btn.disabled. A disabled button ignores clicks but the
+   * Enter binding calls this directly, and key auto-repeat fires it continuously — so a held Enter
+   * launched one 180-second request per repeat. It also corrupted the button permanently: the
+   * second call read `label` from the DOM AFTER the first had set it to "Generating…", so `finally`
+   * restored that as the resting text for ever.
+   */
+  if (aiBusy) return;
+  const promptEl = container.querySelector('#aiPrompt');
+  const statusEl = container.querySelector('#aiStatus');
+  const btn = container.querySelector('#aiGenBtn');
+  const prompt = (promptEl.value || '').trim();
+  const say = (msg, bad) => {
+    statusEl.textContent = msg || '';
+    statusEl.style.color = bad ? '#ff6b6b' : 'var(--text-muted)';
+  };
+  if (!prompt) { say(t('slides.ai.need_prompt'), true); promptEl.focus(); return; }
+
+  /*
+   * ⚠️ A DECK CAN HAVE NO SLIDES, and this used to return silently when it did — a Generate button
+   * that does nothing, on the one occasion (an empty deck) when generating is most obviously what
+   * you want. A deck created through the API carries no slides at all unless a doc is supplied, so
+   * this is a reachable state and not a theoretical one. Make the slide, then fill it.
+   */
+  if (!slide()) {
+    state.deck.doc.slides.push(newSlide(`Slide ${state.deck.doc.slides.length + 1}`));
+    state.si = state.deck.doc.slides.length - 1;
+    state.ei = 0;
+    /*
+     * ⚠️ MARKED AND PAINTED BEFORE THE REQUEST, NOT AFTER. Without this the strip and the header
+     * describe the old empty deck for the whole generation, and if the generation then FAILS the
+     * slide stays in the document with dirty still false — invisible, unwarned, and swept into
+     * whatever save happens next.
+     */
+    touch(container);
+  }
+  const s = slide();
+  const untouched = elementsOf(s).length <= 1
+    && Object.values(s.fields || {}).every((v) => !String(v || '').trim() || String(v) === 'New slide');
+  if (!untouched && !window.confirm(t('slides.ai.replace_warn'))) return;
+
+  aiBusy = true;
+  btn.disabled = true;
+  btn.textContent = t('slides.ai.working');
+  say('');
+  /* The slide is identified by ID, not by object, for the re-check after the await below. */
+  const targetId = s.id;
+  const targetDeckId = state.deck && state.deck.id;
+  try {
+    const out = await api.aiGenerateSlide(prompt);
+
+    /*
+     * ⚠️ THE USER HAS HAD UP TO 180 SECONDS TO MOVE. Writing to the captured slide object would
+     * replace whichever slide they navigated to — or one they deleted, or a slide in another deck —
+     * silently, while repainting something else and reporting success. The confirmation they gave
+     * was about THIS slide; if it is no longer the one in front of them, the answer is dropped and
+     * said so, not applied somewhere they did not ask for.
+     */
+    if (!state.deck || state.deck.id !== targetDeckId) return;
+    const idx = state.deck.doc.slides.findIndex((x) => x.id === targetId);
+    if (idx === -1 || idx !== state.si) { say(t('slides.ai.moved_on'), true); return; }
+    const s2 = state.deck.doc.slides[idx];
+    /*
+     * ⚠️ The slide KEEPS ITS OWN identity — id, name and dwell. Those belong to the deck, not to
+     * the generated content, and replacing them would renumber the strip and reset a dwell the
+     * operator had already tuned for this slot.
+     */
+    s2.template = out.template;
+    s2.fields = out.fields || {};
+    state.ei = 0;
+    state.dirty = true;
+    paintAll(container);
+    say(t('slides.ai.done', { n: out.elements != null ? out.elements : elementsOf(s2).length }));
+  } catch (err) {
+    // The server distinguishes "AI is not configured" from "timed out" from "returned nonsense",
+    // and each needs a different action from the person reading it.
+    say((err && err.message) || t('slides.ai.failed'), true);
+  } finally {
+    aiBusy = false;
+    // Read the resting label from i18n rather than from a variable captured mid-flight.
+    btn.disabled = false;
+    btn.textContent = t('slides.ai.generate');
   }
 }
 
