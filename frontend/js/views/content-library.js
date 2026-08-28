@@ -908,6 +908,12 @@ async function showPreview(content) {
    * The frame is sandboxed to allow-scripts with NO allow-same-origin, exactly as a player mounts
    * it. This is the dashboard origin, where the session JWT lives in localStorage, so that is not
    * a detail: an operator-uploaded bundle must never run with access to it.
+   *
+   * ⚠️ AND IT MUST BE src=, NOT srcdoc, even though the player uses srcdoc for the same bytes. A
+   * srcdoc frame inherits ITS PARENT'S CSP; this page has one (`script-src 'self'`) and a flattened
+   * bundle is entirely data: URIs, so every script in it would be blocked and the preview would
+   * render a styled, dead page with nothing in any log. The player gets away with srcdoc only
+   * because /player is CSP-exempt. Measured both ways — do not "simplify" this to srcdoc.
    */
   if (content.mime_type === BUNDLE_MIME) {
     let session;

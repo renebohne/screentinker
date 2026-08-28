@@ -327,7 +327,7 @@ const check = (name, ok, detail) => {
     }
     const previewMsg = await got2;
 
-    return { mime: row.mime_type, entry: row.bundle_entry, msg, previewErr, previewUrl: session && session.url, previewMsg };
+    return { contentId: row.id, mime: row.mime_type, entry: row.bundle_entry, msg, previewErr, previewUrl: session && session.url, previewMsg };
   }, bundleZip);
 
   check('an HTML bundle uploads and is typed as one', !bundleResult.err
@@ -348,6 +348,84 @@ const check = (name, ok, detail) => {
     bundleResult.msg
       ? `origin=${bundleResult.msg.selfOrigin} storage=${bundleResult.msg.storage} parent=${bundleResult.msg.parentDom}`
       : 'no report');
+
+
+  // ---- a bundle plays OFFLINE, and the CSP trap that decides how it is mounted ----------------
+  //
+  // ⚠️ TWO CLAIMS, BOTH MEASURED, BECAUSE BOTH LOOK FINE WHEN THEY ARE BROKEN.
+  //
+  // 1. The player mounts a bundle by fetching it SAME-ORIGIN and setting srcdoc, not by pointing
+  //    iframe.src at it. That is the whole offline story: a URL-mounted sandboxed frame is an
+  //    opaque-origin client and the service worker does not control it (sw.js records the
+  //    measurement), so a src= mount never reaches the Cache API. The fetch does.
+  // 2. srcdoc INHERITS THE PARENT'S CSP. It runs on /player, which is CSP-exempt, and is silently
+  //    script-dead on any page that has a policy — which is why the dashboard preview navigates to
+  //    an ephemeral URL instead. Both directions are asserted here; getting this backwards produces
+  //    a page that renders, is styled, and does nothing.
+  const playerPage = await browser.newPage();
+  await playerPage.goto(BASE + '/player', { waitUntil: 'networkidle2' });
+  const sw = await playerPage.evaluate(async () => {
+    if (!navigator.serviceWorker) return 'no serviceWorker';
+    try { await navigator.serviceWorker.register('/sw.js'); } catch (e) { return 'register failed'; }
+    await navigator.serviceWorker.ready;
+    for (let i = 0; i < 40 && !navigator.serviceWorker.controller; i++) await new Promise(s => setTimeout(s, 250));
+    return navigator.serviceWorker.controller ? 'controlling' : 'not controlling';
+  });
+
+  const bundleId = bundleResult.contentId;
+  const mountOnPlayer = await playerPage.evaluate(async (id) => {
+    const got = new Promise((r) => {
+      window.addEventListener('message', (e) => { if (e.data && e.data.st === 'bundle-ran') r(e.data); });
+      setTimeout(() => r(null), 9000);
+    });
+    const html = await (await fetch(`/api/content/${id}/bundle?rev=0`, { credentials: 'omit' })).text();
+    const f = document.createElement('iframe');
+    f.setAttribute('sandbox', 'allow-scripts');
+    f.style.cssText = 'position:fixed;left:-9999px;width:640px;height:360px';
+    f.srcdoc = html;
+    document.body.appendChild(f);
+    return await got;
+  }, bundleId);
+
+  check('a bundle runs when mounted as srcdoc on the player', !!(mountOnPlayer && mountOnPlayer.bg === 'rgb(1, 2, 3)'),
+    mountOnPlayer ? `mounted but wrong style (${mountOnPlayer.bg})` : 'the srcdoc frame never ran — check that /player is still CSP-exempt');
+  check('⚠️ and is still isolated from the player origin',
+    !!(mountOnPlayer && mountOnPlayer.selfOrigin === 'null' && mountOnPlayer.storage === 'blocked'),
+    mountOnPlayer ? `origin=${mountOnPlayer.selfOrigin} storage=${mountOnPlayer.storage}` : 'no report');
+
+  // Now cut the network and ask for the same render again.
+  await playerPage.setOfflineMode(true);
+  const offline = await playerPage.evaluate(async (id) => {
+    const out = {};
+    try { await fetch('/api/status'); out.control = 'REACHED SERVER — offline mode did not take'; }
+    catch (e) { out.control = 'network down'; }
+    try {
+      const r = await fetch(`/api/content/${id}/bundle?rev=0`, { credentials: 'omit' });
+      const t = await r.text();
+      out.served = r.ok; out.hasScript = /data:text\/javascript/.test(t);
+    } catch (e) { out.served = false; out.err = String(e.message); }
+    return out;
+  }, bundleId);
+  await playerPage.setOfflineMode(false);
+  /*
+   * ⚠️ UNREGISTER BEFORE LEAVING. sw.js takes scope '/' deliberately (server.js serves it from the
+   * root so it can control the whole origin), so a worker registered here keeps intercepting every
+   * later page in this run — which wedged the calendar reload below the first time. The worker is
+   * the thing under test, not a fixture; it does not get to outlive its test.
+   */
+  await playerPage.evaluate(async () => {
+    try {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.unregister()));
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    } catch (e) { /* best effort */ }
+  });
+  await playerPage.close();
+
+  check('⚠️ the bundle render survives the network going away', sw === 'controlling'
+    && offline.control === 'network down' && offline.served === true && offline.hasScript === true,
+    `worker=${sw} control=${offline.control} served=${offline.served} hasScript=${offline.hasScript} ${offline.err || ''}`);
 
   // ---- the calendar binds its pointer handlers ONCE -------------------------------------------
   await page.goto(BASE + '/app#/schedule', { waitUntil: 'networkidle2' });

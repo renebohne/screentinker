@@ -502,6 +502,25 @@
         // a new randomly-named file, so the old copy is not merely a different revision of the same
         // URL — it is a different URL entirely, and nothing keyed on the asset path can find it.
         sw.postMessage({ type: 'st-cache-playlist', urls, prune: true });
+
+        /*
+         * ⚠️ AND WARM EACH BUNDLE'S RENDER, because the archive alone is not playable.
+         *
+         * The loop above pins /uploads/content/<file> — for a bundle that is the .zip, which
+         * nothing on this player can open. What actually renders is the server's flattened
+         * document at /api/content/:id/bundle, a different URL the worker only sees once something
+         * asks for it. Without this warm-up the first play of a bundle after an outage begins is a
+         * black frame, and the operator's assumption ("it downloaded, so it will play") is wrong in
+         * the one situation the cache exists for.
+         *
+         * Fire-and-forget: the worker's rev-pinned branch stores whatever comes back, and a failure
+         * here must never touch playback.
+         */
+        for (const it of all) {
+          if (!it || it.mime_type !== BUNDLE_MIME || !it.content_id) continue;
+          fetch(`${config.serverUrl}/api/content/${it.content_id}/bundle?rev=${it.content_rev || 0}`,
+            { credentials: 'omit' }).catch(() => {});
+        }
       } catch (e) { /* never let caching break playback */ }
     }
 
@@ -4620,7 +4639,6 @@
       discardPendingSwap();
 
       const iframe = document.createElement('iframe');
-      iframe.src = `${config.serverUrl}/api/content/${item.content_id}/bundle?rev=${item.content_rev || 0}`;
       iframe.style.background = '#000';
       iframe.style.visibility = 'hidden';
       iframe.allow = 'autoplay; fullscreen';
@@ -4636,6 +4654,42 @@
       iframe.addEventListener('load', reveal);
       container.appendChild(iframe);
       pendingWidgetSwap = { iframe, timer: setTimeout(discardPendingSwap, WIDGET_SWAP_TIMEOUT_MS) };
+
+      /*
+       * ⚠️ FETCHED HERE AND MOUNTED AS srcdoc, RATHER THAN POINTING iframe.src AT IT — and that one
+       * difference is the entire offline story.
+       *
+       * A widget is mounted by URL into a sandboxed frame, which is an OPAQUE-ORIGIN client, and a
+       * service worker does not control those: sw.js records the measurement (a clock widget
+       * mounted five times, zero entries in the cache). So widgets survive an outage only on the
+       * HTTP cache, which BrightSign does not guarantee across a reboot.
+       *
+       * This fetch is issued by the PLAYER PAGE — same-origin, controlled by the worker — so it
+       * DOES reach the worker's rev-pinned branch and DOES land in the Cache API, one of the three
+       * stores BrightSign documents as persistent. Same bytes, same sandbox, same isolation; the
+       * only thing that changed is who asked for them.
+       *
+       * The URL is rev-pinned (content_rev), so the cached copy can never be a stale bundle: new
+       * bytes mean a new rev mean a new cache key.
+       *
+       * ⚠️ AND srcdoc WORKS HERE ONLY BECAUSE /player IS CSP-EXEMPT (server.js skips dashboardCsp
+       * for this path). A srcdoc frame INHERITS ITS PARENT'S CSP, and a flattened bundle is nothing
+       * but data: URIs — so under the dashboard's `script-src 'self'` every script in it is
+       * silently blocked and the frame renders a styled, dead page. Measured, both ways. That is
+       * why the dashboard's own preview navigates to an ephemeral URL instead of reusing this
+       * trick, and why moving this mount to any page that has a CSP would break it invisibly.
+       */
+      const url = `${config.serverUrl}/api/content/${item.content_id}/bundle?rev=${item.content_rev || 0}`;
+      fetch(url, { credentials: 'omit' })
+        .then((r) => (r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status))))
+        .then((html) => { iframe.srcdoc = html; })
+        .catch((e) => {
+          // Fall back to a plain navigation. Loses the Cache API benefit, but a bundle that renders
+          // from the HTTP cache beats a black rectangle, and this is also the path on any player
+          // whose worker never registered.
+          console.log('[player] bundle fetch failed, falling back to src:', e && e.message);
+          iframe.src = url;
+        });
     }
 
     // A held widget/board is left mounted (it self-refreshes its own data in place — no iframe
