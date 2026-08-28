@@ -50,14 +50,25 @@ function canCreateWorkspace(me) {
   return me.current_org_role === 'org_owner' || me.current_org_role === 'org_admin';
 }
 
-/** The "+" affordance. Returns '' when the caller may not create, so both views can call it. */
+/*
+ * The "New workspace" control, rendered UNDER the selector in both views.
+ *
+ * ⚠️ NOT INSIDE THE DROPDOWN. It lived there first and was wrong twice over: it is an action, not
+ * one of the things you are choosing between, so it read as a workspace you could switch to — and
+ * it was only reachable by opening a menu, which is no use at all in the single-workspace case
+ * where the menu does not exist. Under the selector it is in one predictable place whether you
+ * have one workspace or twenty.
+ *
+ * Returns '' when the caller may not create, so both views can call it unconditionally.
+ */
 function createButtonHtml(me) {
   if (!canCreateWorkspace(me)) return '';
   return `
-    <button class="workspace-switcher-create" type="button" data-create-workspace aria-label="${t('switcher.create_title')}" title="${t('switcher.create_title')}">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <button class="workspace-switcher-create" type="button" data-create-workspace>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
       </svg>
+      <span>${t('switcher.create_title')}</span>
     </button>`;
 }
 
@@ -181,8 +192,8 @@ export function renderWorkspaceSwitcher(me, remoteOrgs = []) {
       <div class="workspace-switcher-single">
         <span class="workspace-switcher-static">${esc(only.name)}</span>
         ${adminIconsHtml(only)}
-        ${createButtonHtml(me)}
-      </div>`;
+      </div>
+      ${createButtonHtml(me)}`;
     wireAdminIcons(container, [only]);
     wireCreateButtons(container);
     return;
@@ -237,14 +248,8 @@ export function renderWorkspaceSwitcher(me, remoteOrgs = []) {
       `;
       }).join('')}
       <div class="workspace-switcher-noresults" style="display:none">${t('switcher.no_matches')}</div>
-      ${canCreateWorkspace(me) ? `
-      <div class="workspace-switcher-item workspace-switcher-newrow" data-create-workspace role="option">
-        <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        <div class="ws-meta"><div class="ws-name">${t('switcher.create_title')}</div></div>
-      </div>` : ''}
     </div>
+    ${createButtonHtml(me)}
   `;
 
   const button = container.querySelector('.workspace-switcher-button');
@@ -301,14 +306,14 @@ export function renderWorkspaceSwitcher(me, remoteOrgs = []) {
 
   // ---- type-to-filter + keyboard navigation (only when the search box renders) ----
   /*
-   * ⚠️ THE "NEW WORKSPACE" ROW IS EXCLUDED, AND BOTH REASONS ARE BUGS IF IT IS NOT.
-   *
-   * applyFilter reads `it.dataset.search` — a row without that attribute makes `undefined.includes`
-   * THROW the moment anybody types in the search box, killing the filter for every real workspace.
-   * And the keyboard Enter path calls switchTo(dataset.workspaceId), which for this row is
-   * undefined. It is an action, not a result: it belongs to neither list.
+   * ⚠️ EVERY .workspace-switcher-item MUST CARRY data-search AND data-workspace-id. applyFilter
+   * reads `it.dataset.search` — an item without it makes `undefined.includes` THROW on the first
+   * keystroke in the search box, killing the filter for every real workspace — and the keyboard
+   * Enter path calls switchTo(dataset.workspaceId). That is why "New workspace" is a control under
+   * the selector rather than a row in here: it is an action, not one of the things being chosen
+   * between, and it belongs to neither list.
    */
-  const allItems = Array.from(container.querySelectorAll('.workspace-switcher-item:not(.workspace-switcher-newrow)'));
+  const allItems = Array.from(container.querySelectorAll('.workspace-switcher-item'));
   const noResults = container.querySelector('.workspace-switcher-noresults');
   let highlightIdx = -1;
   const visibleItems = () => allItems.filter(it => it.style.display !== 'none');
@@ -369,7 +374,7 @@ export function renderWorkspaceSwitcher(me, remoteOrgs = []) {
   // Manage-members + rename icons (shared with the single-workspace view).
   wireAdminIcons(container, sorted);
 
-  container.querySelectorAll('.workspace-switcher-item:not(.workspace-switcher-newrow)').forEach(item => {
+  container.querySelectorAll('.workspace-switcher-item').forEach(item => {
     item.addEventListener('click', (e) => {
       // Ignore clicks that originated on an icon button (each has its own handler).
       if (e.target.closest('.workspace-switcher-pencil, .workspace-switcher-members')) return;
