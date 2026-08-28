@@ -360,6 +360,16 @@ function touchValue(container) {
 
 /* ============================================================ stage */
 
+/*
+ * ⚠️ THE RESULT IS A STRING THAT REACHES AN ATTRIBUTE, SO EVERY CALLER MUST ESCAPE IT.
+ *
+ * It interpolates stored values (colour, font, numbers) straight into CSS declarations. Assigned to
+ * `.style.cssText` that is safe — the CSS parser cannot produce markup. Interpolated into an
+ * innerHTML `style="…"` it is NOT: a colour containing a double quote closes the attribute and the
+ * rest becomes markup, which is stored XSS in the dashboard origin. Server-side sanitising in
+ * lib/slide-deck.js now means a stored colour is always hex, and the escape here is the second lock
+ * on the same door — decks saved before that fix still exist.
+ */
 function styleFor(e) {
   const s = e.style || {};
   const out = [`left:${e.box.x}%`, `top:${e.box.y}%`, `width:${e.box.w}%`];
@@ -507,7 +517,7 @@ function renderStrip(container) {
       <div style="position:relative;aspect-ratio:16/9;container-type:size;background:${esc(s.template.background || '#000')}">
         ${contentUrl(s.template.background_content_id) ? `<div style="position:absolute;inset:0;background-size:cover;background-position:center;background-image:url(${esc(contentUrl(s.template.background_content_id))})"></div>` : ''}
         ${(s.template.background_dim || 0) > 0 && contentUrl(s.template.background_content_id) ? `<div style="position:absolute;inset:0;background:rgba(0,0,0,${s.template.background_dim})"></div>` : ''}
-        ${elementsOf(s).map((e) => `<div style="position:absolute;overflow:hidden;${styleFor(e)}">${
+        ${elementsOf(s).map((e) => `<div style="position:absolute;overflow:hidden;${esc(styleFor(e))}">${
           TEXT_KINDS.includes(e.kind) ? esc(s.fields[e.slot] || '') : ''}</div>`).join('')}
       </div>
       <div style="display:flex;gap:6px;padding:4px 6px;border-top:1px solid var(--border)">
