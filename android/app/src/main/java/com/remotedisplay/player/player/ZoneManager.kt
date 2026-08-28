@@ -221,6 +221,17 @@ class ZoneManager(
                 container.addView(webView); zoneViews[zone.id] = webView
                 if (multi) scheduleZoneAdvance(zone.id, durationMs, advance)
             }
+            // HTML bundle - the server's flattened document, in a WebView like a widget. `rev` is
+            // content_rev so a replaced archive actually reloads; without this branch a bundle in a
+            // zone matched nothing, rendered an empty view and never advanced.
+            mimeType == ItemTiming.BUNDLE_MIME -> {
+                val webView = createWebView()
+                val bRev = a.optLong("content_rev", 0L)
+                webView.loadUrl("$renderServerUrl/api/content/" + a.optString("content_id", "") + "/bundle?rev=" + bRev)
+                webView.layoutParams = params
+                container.addView(webView); zoneViews[zone.id] = webView
+                if (multi) scheduleZoneAdvance(zone.id, durationMs, advance)
+            }
             // YouTube - render via an embed wrapper with a valid origin (Error 153 fix)
             mimeType == "video/youtube" && !remoteUrl.isNullOrEmpty() -> {
                 val webView = createWebView()

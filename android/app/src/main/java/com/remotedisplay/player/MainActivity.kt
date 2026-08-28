@@ -37,6 +37,7 @@ import com.remotedisplay.player.player.PipOverlay
 import com.remotedisplay.player.player.WallController
 import com.remotedisplay.player.player.GroupScheduleController
 import com.remotedisplay.player.player.ZoneManager
+import com.remotedisplay.player.player.ItemTiming
 import com.remotedisplay.player.remote.ScreenshotCapture
 import com.remotedisplay.player.remote.TouchInjector
 import com.remotedisplay.player.service.UpdateChecker
@@ -1094,6 +1095,19 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // HTML bundle - the server flattens the uploaded .wgt/.zip into one self-contained
+        // document and this mounts it exactly like a widget. `rev` is contentRev, so replacing the
+        // archive changes the URL; without it MediaPlayerManager.showWidget's same-URL reuse would
+        // keep the OLD bundle on screen after a replace, which is the same trap widget_rev exists
+        // for.
+        if (item.mimeType == ItemTiming.BUNDLE_MIME) {
+            val url = "${config.serverUrl}/api/content/${item.contentId}/bundle?rev=${item.contentRev}"
+            Log.i("MainActivity", "Playing HTML bundle: $url")
+            mediaPlayer.showWidget(url)
+            wsService?.sendPlaybackState(item.contentId, 0f)
+            return
+        }
+
         // YouTube content - play in WebView
         if (item.mimeType == "video/youtube" && !item.remoteUrl.isNullOrEmpty()) {
             Log.i("MainActivity", "Playing YouTube: ${item.remoteUrl}")
@@ -1136,6 +1150,20 @@ class MainActivity : AppCompatActivity() {
             mediaPlayer.playVideo(file, item.muted, item.transition)
         } else if (item.mimeType.startsWith("image/")) {
             mediaPlayer.showImage(file, item.transition)
+        } else {
+            /*
+             * ⚠️ AN UNRECOGNISED MIME MUST ADVANCE, NOT SIT THERE.
+             *
+             * This chain had no else, so an item of any other type mounted NOTHING — and
+             * ItemTiming.endsOnTimer returns false for it, so no advance was armed either. The
+             * playlist stopped on that item permanently, which is precisely the YouTube defect
+             * documented in PlaylistSelection.kt in a new place. It is reachable in one call:
+             * POST /api/content/remote stores mime_type verbatim from the request body with no
+             * validation, so a typo is enough.
+             */
+            Log.w("MainActivity", "Unrecognised item type ${item.mimeType} (${item.filename}) — skipping")
+            handler.post { playlistController.next() }
+            return
         }
 
         // Report playback state

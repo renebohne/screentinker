@@ -46,6 +46,10 @@ object PlayerCapabilities {
             caps += listOf(
                 "playback.video", "playback.image", "playback.widget", "playback.youtube",
                 "playback.zones", "playback.transitions", "playback.pip",
+                // Mounting a server-flattened HTML bundle is the widget WebView with a different
+                // URL, so this build can always do it. It says nothing about offline: nothing here
+                // unpacks an archive, so a bundle needs the server even on a panel that caches media.
+                "playback.bundle",
                 // Mute reaches the YouTube embed through the IFrame API bridge, not just <video>,
                 // so this is a real claim rather than the half-truth the browser players carried.
                 "audio.mute", "audio.volume",
