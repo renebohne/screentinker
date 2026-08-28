@@ -904,6 +904,19 @@ const migrations = [
   'ALTER TABLE content ADD COLUMN byte_digest TEXT',
   'CREATE INDEX IF NOT EXISTS idx_content_digest ON content(byte_digest)',
 
+  /* HTML bundles: which file inside the archive is the entry point.
+   *
+   * ⚠️ SERVER-DERIVED, NEVER CALLER-SUPPLIED. lib/html-bundle.js resolves it from the archive's own
+   * central directory (a .wgt's config.xml <content src>, else index.html) and refuses the upload
+   * when it cannot. A caller-settable entry point would be a path into an archive chosen by whoever
+   * uploaded it, which is the shape of every zip-slip.
+   *
+   * ⚠️ AND EVERY WRITER OWES IT A VALUE, or the row says a bundle has no entry point and players
+   * skip it: lib/content-ingest.js (upload), routes/content.js PUT /:id/replace (new bytes, must be
+   * re-derived), and the mesh committer. That is the same duty byte_digest above records, and the
+   * same one that was missed there. */
+  'ALTER TABLE content ADD COLUMN bundle_entry TEXT',
+
   /* Which local row a peer's content id means.
    *
    * ⚠️ KEYED ON (origin_node_id, origin_content_id) — the mesh_mirror_workspaces shape, for the

@@ -350,7 +350,7 @@ function refreshWidgetRevs(assignments) {
  * revision stable and truthful rather than collapsing every new upload onto the same "0".
  */
 const contentFactsOf = db.prepare(`
-  SELECT COALESCE(NULLIF(updated_at, 0), created_at) AS rev, filepath, mime_type, file_size
+  SELECT COALESCE(NULLIF(updated_at, 0), created_at) AS rev, filepath, mime_type, file_size, bundle_entry
     FROM content WHERE id = ?
 `);
 function refreshContentRevs(assignments) {
@@ -369,6 +369,11 @@ function refreshContentRevs(assignments) {
       if (row.filepath) a.filepath = row.filepath;
       if (row.mime_type) a.mime_type = row.mime_type;
       if (row.file_size != null) a.file_size = row.file_size;
+      /* An HTML bundle's entry point travels with the item for the same reason filepath does: a
+       * published snapshot is a snapshot of the ARRANGEMENT, and a replaced bundle can name a
+       * different start file. A player holding the old one would load a page that is no longer
+       * there. */
+      if (row.bundle_entry != null) a.bundle_entry = row.bundle_entry;
     } catch (_) { /* keep published */ }
   }
 }

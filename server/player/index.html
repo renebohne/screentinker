@@ -1006,6 +1006,13 @@
     // network hang must not leave a frozen/blank board). A solo/held widget re-fetches its
     // data every WIDGET_SOLO_REFRESH_MS — decoupled from duration_sec, because a static
     // board re-querying the DB + re-rendering every few seconds, fleet-wide, is pure waste.
+    /* How long a single-item playlist waits before retrying an item it cannot render. In a
+     * multi-item playlist an unknown type advances immediately; alone there is nothing to advance
+     * to, so it must not spin. */
+    const UNKNOWN_ITEM_HOLD_MS = 15000;
+    /* The mime lib/html-bundle.js stamps on an uploaded HTML bundle. Deliberately matches no
+     * image/ or video/ prefix, so nothing routes it as media by accident. */
+    const BUNDLE_MIME = 'application/vnd.screentinker.bundle+zip';
     const WIDGET_SWAP_TIMEOUT_MS = 8000;
     const WIDGET_SOLO_REFRESH_MS = 60000;
     let pendingWidgetSwap = null;   // { iframe, timer } while a new widget iframe loads
@@ -4586,6 +4593,46 @@
       pendingWidgetSwap = { iframe, timer: setTimeout(discardPendingSwap, WIDGET_SWAP_TIMEOUT_MS) };
     }
 
+    /*
+     * An HTML bundle, mounted the same way a widget is.
+     *
+     * ⚠️ IT GOES THROUGH THE SAME BUFFERED SWAP ON PURPOSE. The naive version — clear the stage,
+     * then append an iframe — shows black for as long as the document takes to parse, and a
+     * flattened bundle is a big document full of data: URIs, so that gap is far longer than a
+     * widget's. Building hidden on top and revealing on load is what the widget path already
+     * learned; a second, simpler copy here would re-introduce the flash it exists to prevent.
+     *
+     * ⚠️ AND THE SANDBOX IS THE WHOLE ISOLATION STORY. This is operator-uploaded HTML that runs its
+     * own scripts. widgetSandboxAttr gives `allow-scripts` with no `allow-same-origin`, so the frame
+     * is an opaque origin that cannot read this player's localStorage — which holds the device
+     * token. The org-level opt-out that relaxes this for widgets exists so a player can embed an
+     * origin-strict third-party SITE; a bundle is code the operator uploaded to us, so it must
+     * never take that path. It is passed an item with no widget_allow_same_origin for that reason.
+     */
+    function renderBundleBuffered(item) {
+      const container = document.getElementById('playerContainer');
+      container.style.display = 'block';
+      discardPendingSwap();
+
+      const iframe = document.createElement('iframe');
+      iframe.src = `${config.serverUrl}/api/content/${item.content_id}/bundle?rev=${item.content_rev || 0}`;
+      iframe.style.background = '#000';
+      iframe.style.visibility = 'hidden';
+      iframe.allow = 'autoplay; fullscreen';
+      iframe.setAttribute('sandbox', 'allow-scripts');
+
+      const reveal = () => {
+        if (!pendingWidgetSwap || pendingWidgetSwap.iframe !== iframe) return;
+        clearTimeout(pendingWidgetSwap.timer);
+        pendingWidgetSwap = null;
+        iframe.style.visibility = 'visible';
+        teardownCurrentMedia(iframe);
+      };
+      iframe.addEventListener('load', reveal);
+      container.appendChild(iframe);
+      pendingWidgetSwap = { iframe, timer: setTimeout(discardPendingSwap, WIDGET_SWAP_TIMEOUT_MS) };
+    }
+
     // A held widget/board is left mounted (it self-refreshes its own data in place — no iframe
     // reload, so its scroll is never reset). This just re-checks the schedule on the slow cadence:
     // if it's still the sole active item, leave the live iframe alone and re-arm; if its daypart
@@ -5024,12 +5071,38 @@
       // than fall through every branch and leave a blank container.
       const hasRenderableType = item && (
         item.widget_id ||
+        item.mime_type === BUNDLE_MIME ||
         item.mime_type === 'video/youtube' ||
         (typeof item.mime_type === 'string' && (item.mime_type.startsWith('video/') || item.mime_type.startsWith('image/')))
       );
       if (!hasRenderableType) {
+        /*
+         * ⚠️ THIS USED TO RETURN WITHOUT ARMING ANYTHING, AND THAT STOPPED THE PLAYLIST DEAD.
+         *
+         * There is no media element here, so no `error` event fires and mediaFailureSkip is
+         * unreachable; there is no advance timer, and neither watchdog in this file re-arms the
+         * rotation. So ONE item with a mime nobody recognises blanked the screen and froze the loop
+         * on "Waiting for content..." until a socket push or a restart — and it is reachable in a
+         * single call, because POST /api/content/remote stores mime_type verbatim from the request
+         * body with no validation. An unknown type must be a SKIPPED ITEM, never a stopped playlist.
+         *
+         * A single-item playlist still holds (there is nothing to advance to), so it retries slowly
+         * rather than spinning.
+         */
         showStatus('Waiting for content...');
         isPlaying = false;
+        const onlyItem = !playlist || playlist.length <= 1;
+        console.log('[player] skipping item with unrecognised type:', item && item.mime_type);
+        scheduleAdvance(nextItem, onlyItem ? UNKNOWN_ITEM_HOLD_MS : 0);
+        return;
+      }
+
+      // An HTML bundle: the server flattens the archive into one self-contained document and this
+      // mounts it exactly like a widget — same buffered swap, same sandbox, same rev-pinned
+      // immutable caching. `rev` is content_rev, so replacing the archive replaces what is framed.
+      if (item.mime_type === BUNDLE_MIME) {
+        renderBundleBuffered(item);
+        if (!groupSync) scheduleAdvance(nextItem, (item.duration_sec || 10) * 1000);
         return;
       }
 

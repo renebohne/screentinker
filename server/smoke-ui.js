@@ -224,6 +224,98 @@ const check = (name, ok, detail) => {
   check('the picker renders no untranslated keys', (picker.bareKeys || []).length === 0,
     (picker.bareKeys || []).join(', '));
 
+
+  // ---- an HTML bundle uploads, flattens, runs, and stays out of the player's origin -------------
+  //
+  // ⚠️ THE ISOLATION HALF OF THIS IS THE POINT. A bundle is operator-uploaded HTML that runs its own
+  // scripts, and the only thing between it and the player's localStorage — which holds the device
+  // token — is the frame's sandbox attribute. That is worth asserting in a real browser rather than
+  // trusting, and it has to be asserted with the RIGHT property: `location.origin` returns the
+  // origin of the URL, not of the document, so it reads as the real host even inside an opaque
+  // frame. `self.origin` and an actual localStorage access are what answer the question.
+  const bundleZip = (() => {
+    const files = {
+      'index.html': '<!doctype html><link rel="stylesheet" href="s.css"><h1 id="h">waiting</h1><script src="p.js"></script>',
+      's.css': 'body{background:rgb(1,2,3)}',
+      'p.js': "document.getElementById('h').textContent='ran';"
+        + "var r={st:'bundle-ran',selfOrigin:String(self.origin),bg:getComputedStyle(document.body).backgroundColor};"
+        + "try{localStorage.setItem('x','1');r.storage='READABLE'}catch(e){r.storage='blocked'}"
+        + "try{r.parentDom=String(parent.document.title)}catch(e){r.parentDom='blocked'}"
+        + "try{parent.postMessage(r,'*')}catch(e){}",
+    };
+    const zlib = require('node:zlib');
+    const locals = [], central = [];
+    let offset = 0;
+    for (const [name, data] of Object.entries(files)) {
+      const raw = Buffer.from(data), nb = Buffer.from(name);
+      const crc = zlib.crc32 ? zlib.crc32(raw) >>> 0 : 0;
+      const lh = Buffer.alloc(30);
+      lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x800, 6);
+      lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(raw.length, 18); lh.writeUInt32LE(raw.length, 22);
+      lh.writeUInt16LE(nb.length, 26);
+      locals.push(lh, nb, raw);
+      const ch = Buffer.alloc(46);
+      ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(0x031e, 4); ch.writeUInt16LE(20, 6);
+      ch.writeUInt16LE(0x800, 8); ch.writeUInt32LE(crc, 16);
+      ch.writeUInt32LE(raw.length, 20); ch.writeUInt32LE(raw.length, 24);
+      ch.writeUInt16LE(nb.length, 28); ch.writeUInt32LE((0o100644 << 16) >>> 0, 38);
+      ch.writeUInt32LE(offset, 42);
+      central.push(ch, nb);
+      offset += lh.length + nb.length + raw.length;
+    }
+    const cd = Buffer.concat(central);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(Object.keys(files).length, 8); eocd.writeUInt16LE(Object.keys(files).length, 10);
+    eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(offset, 16);
+    return Buffer.concat([...locals, cd, eocd]).toString('base64');
+  })();
+
+  await page.goto(BASE + '/app#/content', { waitUntil: 'networkidle2' });
+  const bundleResult = await page.evaluate(async (b64) => {
+    const auth = { Authorization: 'Bearer ' + localStorage.getItem('token') };
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const fd = new FormData();
+    fd.append('files', new File([bytes], 'smoke-bundle.zip', { type: 'application/zip' }));
+    const up = await fetch('/api/content', { method: 'POST', headers: auth, body: fd });
+    if (!up.ok) return { err: 'upload ' + up.status + ' ' + (await up.text()).slice(0, 120) };
+    const row = await up.json();
+
+    // The public render gate needs the content referenced by a playlist, exactly like /file.
+    const pl = await (await fetch('/api/playlists', {
+      method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'smoke bundle' }) })).json();
+    await fetch(`/api/playlists/${pl.id}/items`, {
+      method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content_id: row.id, duration_sec: 15 }) });
+
+    const got = new Promise((r) => {
+      window.addEventListener('message', (e) => { if (e.data && e.data.st === 'bundle-ran') r(e.data); });
+      setTimeout(() => r(null), 9000);
+    });
+    const f = document.createElement('iframe');
+    f.setAttribute('sandbox', 'allow-scripts');   // exactly what the player sets
+    f.style.cssText = 'position:fixed;left:-9999px;width:640px;height:360px';
+    f.src = `/api/content/${row.id}/bundle?rev=${row.updated_at || 0}`;
+    document.body.appendChild(f);
+    const msg = await got;
+    return { mime: row.mime_type, entry: row.bundle_entry, msg };
+  }, bundleZip);
+
+  check('an HTML bundle uploads and is typed as one', !bundleResult.err
+    && bundleResult.mime === 'application/vnd.screentinker.bundle+zip' && bundleResult.entry === 'index.html',
+    bundleResult.err || `mime=${bundleResult.mime} entry=${bundleResult.entry}`);
+  check('a flattened bundle RUNS its own scripts in the player\'s sandbox',
+    !!(bundleResult.msg && bundleResult.msg.bg === 'rgb(1, 2, 3)'),
+    bundleResult.msg ? `no stylesheet applied (bg=${bundleResult.msg.bg})` : 'the bundle never reported back — it did not run');
+  check('⚠️ and it CANNOT reach the player origin', !!(bundleResult.msg
+    && bundleResult.msg.selfOrigin === 'null'
+    && bundleResult.msg.storage === 'blocked'
+    && bundleResult.msg.parentDom === 'blocked'),
+    bundleResult.msg
+      ? `origin=${bundleResult.msg.selfOrigin} storage=${bundleResult.msg.storage} parent=${bundleResult.msg.parentDom}`
+      : 'no report');
+
   // ---- the calendar binds its pointer handlers ONCE -------------------------------------------
   await page.goto(BASE + '/app#/schedule', { waitUntil: 'networkidle2' });
   await page.reload({ waitUntil: 'networkidle2' });

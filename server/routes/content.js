@@ -14,6 +14,7 @@ const { PLATFORM_ROLES, ELEVATED_ROLES } = require('../middleware/auth');
 const { accessContext } = require('../lib/tenancy');
 // #73: the upload ingest (processing + insert) is now shared with the agency router.
 const { ingestUploadedFile, deriveMediaMetadata } = require('../lib/content-ingest');
+const htmlBundle = require('../lib/html-bundle');
 const { finalizeUpload, INLINE_SAFE_EXTS } = require('../lib/upload-sniff');
 const { digestFile } = require('../lib/content-digest');
 const { unlinkIfUnreferenced, releaseMeshProvenance } = require('../lib/content-files');
@@ -99,6 +100,9 @@ router.get('/', (req, res) => {
     case 'video':   sql += " AND mime_type LIKE 'video/%' AND mime_type != 'video/youtube'"; break;
     case 'youtube': sql += " AND mime_type = 'video/youtube'"; break;
     case 'web':     sql += " AND remote_url IS NOT NULL AND mime_type != 'video/youtube'"; break;
+    // HTML bundles are their own bucket: they are neither image nor video, and without a case here
+    // they appear only under "all" — present in the library and unfindable.
+    case 'bundle':  sql += " AND mime_type = '" + htmlBundle.BUNDLE_MIME + "'"; break;
     // default / 'all' / unknown: no type constraint
   }
   // #214: whitelisted sort (never interpolate user input into ORDER BY). Default keeps the
@@ -518,6 +522,41 @@ router.put('/:id/replace', upload.single('file'), async (req, res) => {
   try { ({ filepath, mime } = finalizeUpload(req.file)); }
   catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
 
+  /*
+   * ⚠️ A REPLACE MAY NOT CROSS THE BUNDLE BOUNDARY, IN EITHER DIRECTION.
+   *
+   * Replacing a video with an image is deliberately allowed — the item still plays, it just plays
+   * something else. A bundle is different in kind: mime_type is what every player switches on, and
+   * ws/deviceSocket.js re-stamps it into the live payload at send time, so swapping a JPEG for a
+   * bundle changes what every screen must DO with that item, with no republish, no operator
+   * confirmation and nothing in any log. A player that cannot render bundles would simply stop.
+   */
+  const wasBundle = content.mime_type === htmlBundle.BUNDLE_MIME;
+  const isBundle = mime === 'application/zip' || mime === htmlBundle.BUNDLE_MIME;
+  if (wasBundle !== isBundle) {
+    try { fs.unlinkSync(path.join(config.contentDir, filepath)); } catch (e) { /* best effort */ }
+    return res.status(400).json({
+      error: wasBundle
+        ? 'This item is an HTML bundle — replace it with another bundle, or delete it and add the new file.'
+        : 'An HTML bundle cannot replace a media file. Add it as new content instead.',
+    });
+  }
+
+  /* Re-derived from the NEW archive, for the same reason byte_digest is re-hashed below: the row
+   * keeps its id while its contents change, and an entry point carried over from the old bytes
+   * names a file the new archive may not contain. */
+  let bundleEntry = null;
+  if (isBundle) {
+    try {
+      const info = await htmlBundle.validateBundle(path.join(config.contentDir, filepath));
+      bundleEntry = info.entryPoint;
+      mime = htmlBundle.BUNDLE_MIME;
+    } catch (e) {
+      try { fs.unlinkSync(path.join(config.contentDir, filepath)); } catch (e2) { /* best effort */ }
+      return res.status(e.status || 400).json({ error: e.message });
+    }
+  }
+
   // Re-derive EVERYTHING the bytes decide, through the SAME function the upload path uses.
   // This route used to carry a shorter copy that handled images only, and got three things
   // wrong that an upload gets right:
@@ -554,10 +593,10 @@ router.put('/:id/replace', upload.single('file'), async (req, res) => {
 
   db.prepare(`UPDATE content
                  SET filepath = ?, mime_type = ?, file_size = ?, thumbnail_path = ?, width = ?, height = ?,
-                     duration_sec = ?, byte_digest = ?,
+                     duration_sec = ?, byte_digest = ?, bundle_entry = ?,
                      updated_at = MAX(CAST(strftime('%s','now') AS INTEGER), COALESCE(NULLIF(updated_at, 0), created_at) + 1)
                WHERE id = ?`)
-    .run(filepath, mime, req.file.size, thumbnailPath, width, height, durationSec, newDigest, req.params.id);
+    .run(filepath, mime, req.file.size, thumbnailPath, width, height, durationSec, newDigest, bundleEntry, req.params.id);
 
   // ...and tell the panels, which the old code did not. Without this the new bytes reached a screen
   // only when something else happened to trigger a playlist refresh — an operator replacing a video

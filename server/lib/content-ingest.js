@@ -14,6 +14,8 @@ const { sanitizeString } = require('../middleware/sanitize');
 const { videoDisplayDims, imageDisplayDims } = require('./media-orientation');
 const { digestFile } = require('./content-digest');
 const { finalizeUpload } = require('./upload-sniff');
+const htmlBundle = require('./html-bundle');
+const fs = require('fs');
 
 // Multer takes file.originalname from the multipart header, bypassing sanitizeBody, so
 // HTML-escape here (renders as text in every UI sink). .normalize('NFC') first: macOS
@@ -118,7 +120,27 @@ async function ingestUploadedFile({ file, userId, workspaceId, folderId = null }
   const id = uuidv4();
   // Content-derived extension + mime. Throws UnsupportedUploadError (and removes the temp
   // file) when the bytes are not a supported media type; the caller maps that to a 400.
-  const { filepath, mime } = finalizeUpload(file);
+  let { filepath, mime } = finalizeUpload(file);
+
+  /*
+   * A zip is only accepted when it is an HTML BUNDLE, and that is decided here rather than in the
+   * sniffer because the answer is not in the magic bytes — it is in the central directory. The
+   * validator reads that directory and never extracts anything, so nothing attacker-named is
+   * written to this disk; on refusal the stored file is removed and the caller gets the reason.
+   */
+  let bundleEntry = null;
+  if (mime === 'application/zip') {
+    const stored = path.join(config.contentDir, filepath);
+    try {
+      const info = await htmlBundle.validateBundle(stored);
+      bundleEntry = info.entryPoint;
+      mime = htmlBundle.BUNDLE_MIME;
+    } catch (err) {
+      try { fs.unlinkSync(stored); } catch (e) { /* best effort */ }
+      throw err;
+    }
+  }
+
   const { width, height, durationSec, thumbnailPath } = await deriveMediaMetadata(file.path, filepath, mime);
 
   /*
@@ -138,9 +160,9 @@ async function ingestUploadedFile({ file, userId, workspaceId, folderId = null }
   try { digest = await digestFile(path.join(config.contentDir, filepath)); } catch (e) { digest = null; }
 
   db.prepare(`
-    INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type, file_size, duration_sec, thumbnail_path, width, height, folder_id, byte_digest)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, userId, workspaceId, safeFilename(file.originalname), filepath, mime, file.size, durationSec, thumbnailPath, width, height, folderId || null, digest);
+    INSERT INTO content (id, user_id, workspace_id, filename, filepath, mime_type, file_size, duration_sec, thumbnail_path, width, height, folder_id, byte_digest, bundle_entry)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, userId, workspaceId, safeFilename(file.originalname), filepath, mime, file.size, durationSec, thumbnailPath, width, height, folderId || null, digest, bundleEntry);
 
   return db.prepare('SELECT * FROM content WHERE id = ?').get(id);
 }
