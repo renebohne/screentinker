@@ -2,6 +2,60 @@
 
 ## Unreleased
 
+### Added — you can create a second workspace
+
+Workspace scoping, invites, member roles, the switcher and the JWT context were all built and
+working. What did not exist was any way to make one: a `workspaces` row was written in exactly
+two places — at signup and by a platform admin — both hardcoded to the name "Default", and the
+tenant-facing router had GET, PATCH, members and invites but no POST.
+
+Production showed 313 organizations with exactly one workspace each. That read like nobody wanted
+a second one; it actually meant nobody could have one.
+
+* `POST /api/workspaces` creates one in an organization **you administer**. The org is resolved
+  from your own membership; an `organization_id` in the body is honoured only after confirming you
+  are org_owner or org_admin there — otherwise the endpoint would mint a workspace inside someone
+  else's tenant, which every workspace-scoped route downstream would then treat as legitimately
+  theirs.
+* ⚠️ **An org role is required, not `can_admin`.** A workspace_admin administers one workspace;
+  letting that mint siblings would let anyone handed a corner of a tenant grow it. The creator is
+  added as workspace_admin, or they would own a workspace they could not administer or invite into.
+* A per-org cap (`MAX_WORKSPACES_PER_ORG`, default 25) stops a scripted caller filling the switcher.
+* The switcher gains a "New workspace" control — always visible in the single-workspace view, since
+  hiding the only route to an invisible capability behind a hover is how this happened in the first
+  place — and a row at the foot of the dropdown.
+
+### Added — HTML bundles (`.wgt` / `.zip`) play as a playlist item
+
+Upload a W3C widget package or a plain zip of `index.html` plus assets, and put it in a playlist
+like any other content. Asked for by a BrightSign community contact; it plays on all four players
+and survives an outage on three of them.
+
+* A bundle is an **ordinary content row**. The archive is stored exactly as uploaded and is never
+  extracted on the server, so it inherits revision-keyed re-download, resumable delivery, the mesh,
+  storage quota, replace, folders and expiry — and zip-slip has no target on our disk.
+* Validation reads only the zip's central directory. Refuses traversal (after normalising
+  backslashes, or a Windows-built archive escapes), symlink entries, encryption, unsupported
+  compression, duplicate names, non-UTF8 names, declared bombs, and an archive with no entry point.
+  A `.wgt`'s `config.xml` `<content src>` wins over `index.html`.
+* The server flattens it into one self-contained document, which is what makes it playable
+  everywhere on day one — every player already mounts an iframe and none of them can unzip.
+* **Offline** on web, BrightSign and Vega (the render is fetched same-origin and mounted as
+  `srcdoc`, so it lands in the service worker's Cache API) and on Android (its own render store).
+  ⚠️ Tizen's offline path is implemented but has **never run on a panel**; its online path is
+  unchanged. See `docs/player-parity.md`.
+* **Limits, stated plainly:** a flattened bundle cannot `fetch()` its own files at runtime and
+  cannot stream embedded video. Both are traded away for playing on every platform.
+
+### Fixed — an unrecognised media type stopped the playlist dead
+
+On the web and Android players an item whose `mime_type` matched nothing mounted nothing **and
+armed no advance timer**: no media element, so no error event, and neither watchdog re-arms the
+rotation. One such item blanked the screen and froze the loop until a socket push or a restart.
+Reachable in a single call, because `POST /api/content/remote` stores `mime_type` verbatim from the
+request body with no validation. Tizen degraded better but still retried a broken item forever in a
+single-item playlist. All three now skip.
+
 ### Fixed — "Add Background Image" and "Choose Logo" did nothing on a directory board
 
 Reported as "someone couldn't upload a background picture", and that is exactly what it
