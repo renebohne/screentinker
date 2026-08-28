@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 2.0.0-beta1
+
+First beta of the 2.0 line. The alpha series proved the shape; this is the point at which the
+feature set stops moving and the remaining work is verification. Two things landed since alpha8
+that change what the product can do — HTML bundles as playable content, and a way to actually
+create a workspace — alongside a run of defects that only show up in front of a person.
+
+⚠️ **Two known gaps carried into beta deliberately**, both documented where they live rather than
+left to be discovered: a flattened HTML bundle cannot `fetch()` its own files at runtime or stream
+embedded video, and Tizen's offline bundle path has never run on a real panel
+(`docs/player-parity.md` says which platforms are measured).
+
 
 ### Added — you can create a second workspace
 
