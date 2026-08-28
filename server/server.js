@@ -152,6 +152,7 @@ app.use((req, res, next) => {
    * attribute (allow-scripts, no allow-same-origin), not this policy.
    */
   if (req.path.startsWith('/api/content/') && req.path.endsWith('/bundle')) return next();
+  if (/^\/api\/content\/[^/]+\/bundle-preview\//.test(req.path)) return next();
   return dashboardCsp(req, res, next);
 });
 // CORS policy.
@@ -910,6 +911,28 @@ app.get('/api/content/:id/file', (req, res) => {
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   hardenUploadResponse(res, content.filepath);
   res.sendFile(safePath);
+});
+
+/*
+ * Previewing a bundle from the dashboard, before it is assigned to anything.
+ *
+ * ⚠️ THIS EXISTS BECAUSE THE PUBLIC ROUTE CANNOT ANSWER IT. /bundle is gated on the content being
+ * referenced by a playlist or a widget, because a player's frame carries no credentials — so a
+ * freshly uploaded bundle, which is exactly the one an operator wants to look at, is a 403 there.
+ * Relaxing that gate to allow previewing would make every uploaded archive world-readable by uuid.
+ *
+ * Same shape as the widget preview session (routes/widgets.js): an authenticated POST mints an
+ * ephemeral id, and that id — not a token, not a session — is what the iframe loads. The mint lives
+ * in routes/content.js behind auth; only the read is here, with the other public content routes.
+ */
+app.get('/api/content/:id/bundle-preview/:token', (req, res) => {
+  const html = require('./lib/bundle-preview-store').get(req.params.token, req.params.id);
+  if (html == null) return res.status(410).send('Preview expired');
+  res.removeHeader('X-Frame-Options');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(html);
 });
 
 /*

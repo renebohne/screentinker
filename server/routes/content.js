@@ -119,6 +119,35 @@ router.get('/', (req, res) => {
   res.json(content);
 });
 
+/*
+ * Mint a short-lived preview of an HTML bundle for the dashboard.
+ *
+ * Authenticated, and checked against the caller's own workspace by checkContentWrite's read
+ * sibling — a preview must not become a way to read another tenant's archive by uuid. The flatten
+ * happens here so a broken bundle reports its reason to the operator who just uploaded it, rather
+ * than 500ing inside an iframe where nobody sees it.
+ */
+router.post('/:id/bundle-preview', async (req, res) => {
+  const content = db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id);
+  if (!content) return res.status(404).json({ error: 'Content not found' });
+  if (content.workspace_id && content.workspace_id !== req.workspaceId) {
+    return res.status(403).json({ error: 'Not your content' });
+  }
+  if (content.mime_type !== htmlBundle.BUNDLE_MIME || !content.filepath) {
+    return res.status(400).json({ error: 'Not an HTML bundle' });
+  }
+  const safePath = path.resolve(config.contentDir, path.basename(content.filepath));
+  if (!safePath.startsWith(path.resolve(config.contentDir))) return res.status(403).json({ error: 'Invalid path' });
+  try {
+    const { inlineBundle } = require('../lib/bundle-inline');
+    const out = await inlineBundle(safePath, content.bundle_entry || 'index.html');
+    const token = require('../lib/bundle-preview-store').put(content.id, out.html);
+    res.json({ url: `/api/content/${content.id}/bundle-preview/${token}`, skipped: out.skipped, inlined: out.inlined });
+  } catch (e) {
+    res.status(e && e.status === 413 ? 413 : 500).json({ error: (e && e.message) || 'Bundle could not be rendered' });
+  }
+});
+
 // Get folders list for the caller's current workspace.
 router.get('/folders', (req, res) => {
   if (!req.workspaceId) return res.json([]);

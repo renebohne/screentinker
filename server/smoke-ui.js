@@ -238,7 +238,7 @@ const check = (name, ok, detail) => {
       'index.html': '<!doctype html><link rel="stylesheet" href="s.css"><h1 id="h">waiting</h1><script src="p.js"></script>',
       's.css': 'body{background:rgb(1,2,3)}',
       'p.js': "document.getElementById('h').textContent='ran';"
-        + "var r={st:'bundle-ran',selfOrigin:String(self.origin),bg:getComputedStyle(document.body).backgroundColor};"
+        + "var r={st:'bundle-ran',viaPreview:location.hash==='#preview',selfOrigin:String(self.origin),bg:getComputedStyle(document.body).backgroundColor};"
         + "try{localStorage.setItem('x','1');r.storage='READABLE'}catch(e){r.storage='blocked'}"
         + "try{r.parentDom=String(parent.document.title)}catch(e){r.parentDom='blocked'}"
         + "try{parent.postMessage(r,'*')}catch(e){}",
@@ -299,7 +299,35 @@ const check = (name, ok, detail) => {
     f.src = `/api/content/${row.id}/bundle?rev=${row.updated_at || 0}`;
     document.body.appendChild(f);
     const msg = await got;
-    return { mime: row.mime_type, entry: row.bundle_entry, msg };
+
+    /*
+     * ⚠️ AND THE DASHBOARD'S OWN PREVIEW, WHICH TAKES A DIFFERENT ROUTE. The public /bundle URL is
+     * gated on the content being in a playlist; a just-uploaded bundle is not, which is exactly the
+     * "preview shows an empty box" trap the directory-board backgrounds had. The library mints an
+     * ephemeral session instead — and that path needed its own dashboard-CSP exemption, which is
+     * invisible until something actually mounts it.
+     */
+    const got2 = new Promise((r) => {
+      window.addEventListener('message', (e) => { if (e.data && e.data.st === 'bundle-ran' && e.data.viaPreview) r(e.data); });
+      setTimeout(() => r(null), 9000);
+    });
+    let previewErr = null, session = null;
+    try {
+      const pr = await fetch(`/api/content/${row.id}/bundle-preview`, { method: 'POST', headers: auth });
+      if (!pr.ok) previewErr = 'mint ' + pr.status;
+      else session = await pr.json();
+    } catch (e) { previewErr = String(e && e.message); }
+    if (session) {
+      const f2 = document.createElement('iframe');
+      f2.setAttribute('sandbox', 'allow-scripts');
+      f2.style.cssText = 'position:fixed;left:-9999px;width:640px;height:360px';
+      // Mark it so the two frames' messages cannot be confused for one another.
+      f2.src = session.url + '#preview';
+      document.body.appendChild(f2);
+    }
+    const previewMsg = await got2;
+
+    return { mime: row.mime_type, entry: row.bundle_entry, msg, previewErr, previewUrl: session && session.url, previewMsg };
   }, bundleZip);
 
   check('an HTML bundle uploads and is typed as one', !bundleResult.err
@@ -308,6 +336,11 @@ const check = (name, ok, detail) => {
   check('a flattened bundle RUNS its own scripts in the player\'s sandbox',
     !!(bundleResult.msg && bundleResult.msg.bg === 'rgb(1, 2, 3)'),
     bundleResult.msg ? `no stylesheet applied (bg=${bundleResult.msg.bg})` : 'the bundle never reported back — it did not run');
+  check('a bundle previews from the content library before it is assigned anywhere',
+    !bundleResult.previewErr && !!bundleResult.previewMsg && bundleResult.previewMsg.bg === 'rgb(1, 2, 3)',
+    bundleResult.previewErr || (bundleResult.previewUrl
+      ? 'the preview session minted but the frame never ran — check the dashboard CSP exemption'
+      : 'no preview session was minted'));
   check('⚠️ and it CANNOT reach the player origin', !!(bundleResult.msg
     && bundleResult.msg.selfOrigin === 'null'
     && bundleResult.msg.storage === 'blocked'

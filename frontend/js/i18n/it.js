@@ -188,6 +188,12 @@ export default {
   'content.type_youtube': 'YouTube',
   'content.type_remote': 'URL Remoto',
   'content.type_remote_short': 'Remoto',
+  'content.filter_type_bundle': 'Bundle HTML',
+  'content.type_bundle': 'Bundle HTML',
+  'content.type_bundle_short': 'Bundle',
+  'content.bundle_entry': 'Inizia da {entry}',
+  'content.bundle_skipped': '{n} file non incorporabili: video e audio devono essere collegati.',
+  'content.bundle_preview_failed': 'Impossibile visualizzare il bundle',
   'content.type_video': 'Video',
   'content.type_image': 'Immagine',
     // Item action buttons

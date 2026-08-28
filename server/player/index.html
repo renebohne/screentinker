@@ -3153,6 +3153,11 @@
         // Render paths that exist in this file unconditionally.
         'playback.video', 'playback.image', 'playback.widget', 'playback.youtube',
         'playback.zones', 'playback.pip',
+        /* Mounting a server-flattened bundle needs nothing this player does not already have — it
+         * is the widget iframe with a different URL. Claimed unconditionally for that reason, and
+         * deliberately NOT taken to mean the bundle is available offline: nothing here unpacks an
+         * archive yet, so offline.cache still answers only for media. */
+        'playback.bundle',
         // #129 per-item mute plus the operator volume added alongside it.
         'audio.mute', 'audio.volume',
         // CSS transform in a browser; the host rotates the output on BrightSign. Both real.

@@ -105,6 +105,20 @@ describe content rendering. They are informational, and shown to the operator in
 | `playback.zones` | ✅ `ZoneManager` | ✅ | ✅ | ✅ |
 | `playback.transitions` | ✅ `TransitionCompositor` | ⚠️ declared only when the bundle loads (`transitionRuntimeReady()`) — a failed load hard-cuts rather than breaking playback | ✅ `transitions.js` | ⚠️ composites DOM over video; with hwz it may be **invisible over video** and degrade to a hard cut |
 | `playback.pip` | ✅ `PipOverlay` | ✅ `#pipContainer` | ✅ `pip-overlay.js` | ⚠️ same hwz caveat as transitions |
+| `playback.bundle` | ❌ not yet — `playFile` has no branch | ✅ `renderBundleBuffered`, server-flattened document | ❌ not yet — `playCurrent` has no branch | ✅ inherits the web player |
+
+`playback.bundle` is an uploaded HTML bundle (`.wgt` / `.zip`) played as a playlist item. It means
+the player can **mount** one — today that is the server's flattened single-document render at
+`/api/content/:id/bundle`, which is the widget iframe with a different URL. It deliberately does
+**not** imply the player can unpack an archive locally, so a bundle is currently online-only on
+every platform and `offline.cache` still answers only for media. Android and Tizen are marked ❌
+because their dispatch chains have no branch for it yet, not because they could not do it — both
+would only need the same one-line mount the web player has.
+
+⚠️ Baselines: `playback.bundle` is in the **web** and **brightsign** baselines only. Those two are
+served from this server, so there is no such thing as a panel stuck on last release's player.
+Android and Tizen ship as installed artifacts and update when somebody updates them, so their
+baselines must not claim it until a release that has it is fielded.
 
 ## Audio
 
