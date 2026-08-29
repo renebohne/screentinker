@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.0.0-beta2
+
+A player release: two defects reported against 1.9.40 on Android TV, both fixed here. They came
+from one operator running five TVs, and both have the same underlying shape — the video path
+trusted a signal that a wedged or reconfiguring decoder never sends.
+
+### Fixed — a frozen playlist now recovers itself (#297)
+
+A video advanced the playlist in exactly two ways: ExoPlayer reported `STATE_ENDED`, or it reported
+a playback error. A decoder that simply **wedges** reports neither — it stays `READY`, the player
+still believes it is playing, and the position stops moving. Nothing in the app ever looked at the
+position, so the playlist stopped for good and only restarting the app recovered it.
+
+* A stall detector now watches playback position instead of waiting for an event, and routes a
+  wedge into the same self-heal an error already used.
+* ⚠️ **The dangerous half of a watchdog is the false positive**, not the miss: firing on a paused
+  wall follower, a group-sync member waiting for its slot, or a stream that is legitimately
+  buffering would skip content nobody asked it to skip. A stalled item is only reported while the
+  player claims to be playing, buffering gets a longer allowance than a stuck `READY` state, and
+  a report resets the detector so one wedge cannot advance twice. Most of the nine new tests are
+  about *not* firing.
+
+### Fixed — the green screen at the switch to the next video (#298)
+
+`setupExoPlayer()` disabled Media3's shutter, with the comment "hold the last frame instead of
+flashing black during a reset/prepare". It does not hold the last frame — it **uncovers the video
+surface**, and with `surface_type="texture_view"` the buffer behind that surface during a decoder
+reconfiguration is whatever the SoC left there. On several TV chipsets that is uninitialised YUV,
+which paints solid green.
+
+That accounts for every detail of the report: TVs only, at the switch to the next item, unaffected
+by re-encoding every clip to identical settings (the codec is torn down and re-created on each
+`prepare` regardless of resolution), and gone when the playlist loops a single item.
+
+* The freeze-frame the old comment promised is now painted explicitly, into the ImageView stacked
+  above the video surface, and cleared on `onRenderedFirstFrame` — the only trustworthy signal that
+  the decoder is putting real pixels on screen.
+* When there is no frame to hold, the shutter is re-armed, so a brief black hold remains the worst
+  case rather than green.
+* The cover reuses one half-size bitmap. Capturing at full resolution on every switch would
+  allocate ~33MB a time on a 4K panel — on exactly the memory-constrained devices already failing.
+
 ## 2.0.0-beta1
 
 First beta of the 2.0 line. The alpha series proved the shape; this is the point at which the
