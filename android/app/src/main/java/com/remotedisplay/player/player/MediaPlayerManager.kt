@@ -8,6 +8,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
@@ -91,14 +92,162 @@ class MediaPlayerManager(
                 Log.e("MediaPlayerManager", "Playback error (${error.errorCodeName}) — advancing: ${error.message}")
                 if (player === exoPlayer) onVideoComplete()
             }
+
+            /*
+             * #298: the ONLY trustworthy signal that the decoder is putting real pixels on the
+             * surface. Everything before this point can be an uninitialised buffer, so the still
+             * frame stays over the top until this fires.
+             */
+            override fun onRenderedFirstFrame() {
+                if (player === exoPlayer) clearSwitchCover()
+            }
         })
     }
 
     private fun setupExoPlayer() {
-        // Hold the last frame instead of flashing black during a reset/prepare — turns any residual
-        // switch gap into a brief freeze-frame rather than a black hold.
+        /*
+         * ⚠️ #298, THE GREEN SCREEN. This line used to be the whole story, with the comment "hold
+         * the last frame instead of flashing black during a reset/prepare". Turning the shutter off
+         * does stop the black flash — but it does NOT hold the last frame. It uncovers the video
+         * surface, and with surface_type=texture_view the buffer behind it during a decoder
+         * reconfiguration is whatever the SoC left there: on several TV chipsets that is
+         * uninitialised YUV, which paints SOLID GREEN. That is exactly the report — TVs only, at
+         * the switch to the next video, unaffected by re-encoding the file, gone on a loop restart
+         * (no reconfiguration). The freeze-frame is now painted explicitly by coverSwitchGap()
+         * into the ImageView above this surface, so the promise in the old comment is actually
+         * kept, and the shutter is re-armed for the case where no frame could be captured.
+         */
         try { playerView.setKeepContentOnPlayerReset(true) } catch (e: Throwable) {}
         exoPlayer = buildPlayer().also { playerView.player = it }
+    }
+
+    // ---------------------------------------------------------------- #298: cover the switch gap
+
+    /** Generation that owns the cover, so a mount of something else cannot have it pulled away. */
+    private var coverGeneration: Long = -1L
+
+    private val clearCoverTimeout = Runnable { clearSwitchCover() }
+
+    /**
+     * Paint the frame that is on screen NOW into the ImageView (which the layout stacks above the
+     * PlayerView) and leave it there until the decoder renders its first real frame.
+     *
+     * Must be called before currentType is changed, since captureCurrentFrame() reads it to decide
+     * where the pixels come from.
+     */
+    /*
+     * ⚠️ ONE REUSED, HALF-SIZE BITMAP. The obvious implementation calls captureCurrentFrame(), which
+     * allocates a fresh full-resolution bitmap — ~8MB on a 1080p panel and ~33MB on a 4K one, every
+     * single video switch. Transitions can afford that because they are opt-in and occasional; this
+     * runs on every mount, on the memory-constrained TV sticks that are already the ones failing.
+     * Half resolution is invisible behind a ~200ms gap, and reusing the buffer means the steady
+     * state allocates nothing at all.
+     */
+    private var coverBitmap: Bitmap? = null
+
+    private fun captureCoverFrame(): Bitmap? = try {
+        val tv = playerView.videoSurfaceView as? TextureView
+        if (tv == null || !tv.isAvailable || tv.width <= 0 || tv.height <= 0) null
+        else {
+            val w = (tv.width / 2).coerceAtLeast(1)
+            val h = (tv.height / 2).coerceAtLeast(1)
+            val reuse = coverBitmap
+            val target = if (reuse != null && !reuse.isRecycled && reuse.width == w && reuse.height == h) reuse
+                else Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { coverBitmap = it }
+            tv.getBitmap(target)
+        }
+    } catch (e: Throwable) { null }
+
+    private fun coverSwitchGap(generation: Long) {
+        /*
+         * Coming from an IMAGE there is nothing to capture: the ImageView is already showing the
+         * right pixels. Leaving it visible is both the correct still and free.
+         */
+        if (currentType == MediaType.IMAGE && imageView.drawable != null) {
+            coverGeneration = generation
+            mainHandler.removeCallbacks(clearCoverTimeout)
+            mainHandler.postDelayed(clearCoverTimeout, COVER_MAX_MS)
+            return
+        }
+        val frame = if (currentType == MediaType.VIDEO) captureCoverFrame() else null
+        if (frame == null) {
+            /*
+             * ⚠️ NOTHING TO HOLD, SO GO BACK TO BLACK. With no still to cover it, leaving the
+             * shutter off is what shows the green buffer. A brief black hold is the lesser fault,
+             * and it is what every build before the shutter was disabled did.
+             */
+            try { playerView.setKeepContentOnPlayerReset(false) } catch (e: Throwable) {}
+            return
+        }
+        coverGeneration = generation
+        imageView.setImageBitmap(frame)
+        imageView.visibility = android.view.View.VISIBLE
+        try { playerView.setKeepContentOnPlayerReset(true) } catch (e: Throwable) {}
+        /*
+         * A decoder that never renders would otherwise leave the still up forever, so the video
+         * plays inaudibly behind a photo. The stall watchdog below eventually advances, but the
+         * cover must not outlive a couple of seconds of gap regardless.
+         */
+        mainHandler.removeCallbacks(clearCoverTimeout)
+        mainHandler.postDelayed(clearCoverTimeout, COVER_MAX_MS)
+    }
+
+    private fun clearSwitchCover() {
+        if (coverGeneration != mountGeneration) return   // something else owns the ImageView now
+        coverGeneration = -1L
+        mainHandler.removeCallbacks(clearCoverTimeout)
+        if (currentType != MediaType.VIDEO) return       // an image mount already took it over
+        imageView.visibility = android.view.View.GONE
+        /*
+         * Deliberately NOT setImageBitmap(null): the drawable may be the reused cover buffer, and
+         * it may equally be the bitmap an image mount still owns. Hiding the view is enough, and
+         * dropping the reference is what would force the next capture to allocate again.
+         */
+    }
+
+    // -------------------------------------------------------------- #297: the wedged-decoder poll
+
+    /*
+     * ⚠️ THE FREEZE HAS NO EVENT. A video advances on STATE_ENDED or on a playback error; a decoder
+     * that wedges reports neither, so "playback freezes, only restarting the app helps". The same
+     * shape as the stranded-decode freeze documented at mountGeneration below — the difference is
+     * that one had a signal to guard and this one has to be observed.
+     */
+    private val stall = PlaybackStall()
+
+    private val stallTick = object : Runnable {
+        override fun run() {
+            val p = exoPlayer
+            if (p != null && currentType == MediaType.VIDEO) {
+                val wedged = try {
+                    stall.tick(SystemClock.elapsedRealtime(), p.playbackState, p.playWhenReady, p.currentPosition)
+                } catch (e: Throwable) { false }
+                if (wedged) {
+                    Log.w("MediaPlayerManager", "Playback stalled with no error or end — advancing")
+                    onVideoComplete()
+                }
+            } else {
+                stall.reset()
+            }
+            mainHandler.postDelayed(this, STALL_POLL_MS)
+        }
+    }
+
+    private companion object {
+        const val STALL_POLL_MS = 2_000L
+        const val COVER_MAX_MS = 2_500L
+    }
+
+    /*
+     * ⚠️ STARTED HERE, NOT FROM setupExoPlayer(). setupExoPlayer() runs from the init block at the
+     * top of the class, and Kotlin initialises properties in declaration order — stallTick is
+     * declared above but assigned after that init runs, so posting it from there hands the Handler
+     * a null Runnable and the player crashes on construction. That is the same shape as the boot
+     * TDZ that shipped in 1.9.32 and threw on every start, so it gets its own init block, below
+     * everything it touches.
+     */
+    init {
+        mainHandler.postDelayed(stallTick, STALL_POLL_MS)
     }
 
     // #129: remembered so the live device:mute-changed toggle knows YouTube's current
@@ -425,14 +574,18 @@ class MediaPlayerManager(
     }
 
     private fun mountVideo(file: File, muted: Boolean = false) {
-        mountGeneration++
+        val myGeneration = ++mountGeneration
+        // #298: grab the outgoing frame BEFORE currentType moves — captureCurrentFrame() reads it.
+        coverSwitchGap(myGeneration)
+        stall.reset()             // a new item starts its own stall clock
         stopYoutubeIfPlaying()
         currentType = MediaType.VIDEO
         currentWidgetUrl = null   // surface reused - a later widget show must reload
 
-        // Show player, hide image
+        // Show player. The ImageView stays up as the freeze-frame if coverSwitchGap took it, and is
+        // hidden again by onRenderedFirstFrame.
         playerView.visibility = android.view.View.VISIBLE
-        imageView.visibility = android.view.View.GONE
+        if (coverGeneration != myGeneration) imageView.visibility = android.view.View.GONE
         youtubeWebView?.visibility = android.view.View.GONE
 
         // Warm swap: if this exact file was preloaded, promote the parked player instead of a cold
@@ -479,6 +632,7 @@ class MediaPlayerManager(
     }
 
     fun stop() {
+        stall.reset()
         exoPlayer?.stop()
         imageView.setImageBitmap(null)
         youtubeWebView?.loadUrl("about:blank")
@@ -488,6 +642,9 @@ class MediaPlayerManager(
     }
 
     fun release() {
+        coverBitmap = null
+        mainHandler.removeCallbacks(stallTick)
+        mainHandler.removeCallbacks(clearCoverTimeout)
         exoPlayer?.release()
         exoPlayer = null
         preloadPlayer?.release()
