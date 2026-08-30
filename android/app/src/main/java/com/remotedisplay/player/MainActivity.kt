@@ -691,6 +691,21 @@ class MainActivity : AppCompatActivity() {
             try { triggerManager?.onPayload(data) } catch (e: Throwable) {
                 Log.w("MainActivity", "trigger adopt failed: ${e.message}")
             }
+            /*
+             * ⚠️ AND PIN WHAT THEY NEED — the comment above describes the WEB player's mechanism,
+             * not this one. There, device-triggers.js appends trigger media to the same
+             * st-cache-playlist message the service worker already handles. Android has no service
+             * worker: it downloads through DownloadCoordinator, driven by a loop over `assignments`
+             * ONLY. Trigger items live in a separate `triggers` array that never reached it, so
+             * assigning a trigger to a device whose base playlist was unchanged downloaded nothing,
+             * and the fire rendered its black box over the playlist with no media inside.
+             *
+             * Measured on hardware before this: fire accepted, TriggerController logged it, screen
+             * went black, and content_cache held only the four base clips.
+             */
+            try { pinTriggerMedia(data) } catch (e: Throwable) {
+                Log.w("MainActivity", "trigger media pin failed: ${e.message}")
+            }
             // Orientation is applied in the non-wall branch below; wall mode owns the
             // root-view transform itself and must not be rotated.
             // Check if device is suspended (trial expired / over limit)
@@ -1100,6 +1115,35 @@ class MainActivity : AppCompatActivity() {
     // is cleared on each (re)registration (see onRegistered) so a reconnect re-acks everything the
     // server may have missed while we were disconnected (SEED-B), but is quiet within a session.
     private val ackedContent = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /**
+     * Download the media every assigned trigger needs, so a fire has something to show.
+     *
+     * Idempotent and non-blocking: ensure() is single-flight per contentId and returns immediately
+     * for anything already cached, so running this on every payload costs nothing in the steady
+     * state. Items carry the same shape as an assignment because the server projects a trigger's
+     * target as the playlist's published snapshot.
+     */
+    private fun pinTriggerMedia(data: org.json.JSONObject) {
+        if (!::downloadCoordinator.isInitialized) return
+        val triggers = data.optJSONArray("triggers") ?: return
+        var pinned = 0
+        for (i in 0 until triggers.length()) {
+            val t = triggers.optJSONObject(i) ?: continue
+            val items = t.optJSONArray("items") ?: continue
+            for (j in 0 until items.length()) {
+                val item = items.optJSONObject(j) ?: continue
+                // isNull() first: org.json's optString hands back the STRING "null" for a JSON null.
+                val contentId = if (item.isNull("content_id")) "" else item.optString("content_id", "")
+                if (contentId.isEmpty()) continue          // widgets carry no content to fetch
+                val filename = item.optString("filename", "content")
+                val rev = item.optLong("content_rev", 0L)
+                downloadCoordinator.ensure(contentId, filename, rev)
+                pinned++
+            }
+        }
+        if (pinned > 0) Log.i("MainActivity", "[trigger] pinning $pinned trigger item(s)")
+    }
 
     private fun ackContentOnce(contentId: String, status: String) {
         if (ackedContent.add("$contentId:$status")) {

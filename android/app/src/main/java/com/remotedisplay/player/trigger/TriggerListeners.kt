@@ -87,7 +87,9 @@ class TriggerListeners(
 
     fun start(acceptHttp: Boolean, acceptUdp: Boolean, httpPort: Int?, udpPort: Int?, group: String?) {
         if (!running.compareAndSet(false, true)) return   // idempotent, like the web player's guard
-        if (acceptUdp) startUdp(udpPort ?: DEFAULT_UDP_PORT, group ?: DEFAULT_GROUP)
+        // An absent group is honoured as absent: unicast + broadcast only. Substituting a default
+        // multicast address here would silently opt every device into multicast it never asked for.
+        if (acceptUdp) startUdp(udpPort ?: DEFAULT_UDP_PORT, group ?: "")
         if (acceptHttp) startHttp(httpPort ?: DEFAULT_HTTP_PORT)
     }
 
@@ -141,9 +143,28 @@ class TriggerListeners(
                 udp = sock
                 stats.udpPort = port
                 stats.group = group
-                joinGroup(sock, group, "bind")
-                startRejoinLoop(sock, group)
-                selfTest(sock, group, port)
+                /*
+                 * ⚠️ THE GROUP IS OPTIONAL AND A BAD ONE MUST NOT COST THE LISTENER. Per the note
+                 * above, this socket already receives unicast AND subnet broadcast just by being
+                 * bound; joinGroup only adds multicast. But getByName() sits outside joinGroup's
+                 * try, so an unresolvable group threw all the way out here and killed the whole
+                 * thread — every UDP trigger silently inert, including the unicast and broadcast
+                 * fires that never needed a group at all. That is exactly what a device with no
+                 * multicast group configured hit, which is the default.
+                 */
+                if (group.isNotEmpty()) {
+                    try {
+                        joinGroup(sock, group, "bind")
+                        startRejoinLoop(sock, group)
+                        selfTest(sock, group, port)
+                    } catch (e: Throwable) {
+                        stats.lastJoinError = e.message
+                        Log.w(TAG, "[trigger] multicast unavailable ($group): ${e.message} — "
+                            + "unicast and broadcast still listening on :$port")
+                    }
+                } else {
+                    Log.i(TAG, "[trigger] no multicast group configured — unicast + broadcast on :$port")
+                }
                 onState(stats)
 
                 val buf = ByteArray(2048)
