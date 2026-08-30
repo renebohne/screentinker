@@ -1083,7 +1083,15 @@ async function aiGenerateBackground(container) {
      */
     if (!(target.template.background_dim > 0)) target.template.background_dim = 0.35;
     touch(container);
-    render(container);
+    /*
+     * ⚠️ paintAll, NOT render(). render() is this MODULE'S VIEW ENTRY POINT — it replaces
+     * container.innerHTML with the deck LIST. Calling it here set the background on the model,
+     * marked the deck dirty, then destroyed the editor and threw the unsaved change away: the
+     * operator saw "it generated something but nothing happened to my slide", and the Generate
+     * button they clicked next belonged to a view that no longer existed. One wrong function name,
+     * two symptoms, and the half-committed state made it look like two separate bugs.
+     */
+    paintAll(container);
     say('Background applied.');
   } catch (e) {
     say(String((e && e.message) || e).slice(0, 200), true);
