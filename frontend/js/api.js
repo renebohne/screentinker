@@ -577,6 +577,10 @@ export const api = {
   /* A whole SLIDE from a sentence: {template, fields}, ready to drop onto the editor's canvas.
    * Shaped differently from generate-design because a slide keeps layout and words apart. */
   aiGenerateSlide: (prompt) => request('/ai/generate-slide', { method: 'POST', body: JSON.stringify({ prompt }) }),
+  // Generates a picture AND ingests it into the content library, returning a real content_id — a
+  // slide references its background by id because the file has to reach a screen and be playable
+  // with the WAN down, which an inline data: URL never could.
+  aiGenerateBackground: (prompt) => request('/ai/generate-background', { method: 'POST', body: JSON.stringify({ prompt }) }),
   aiListModels: (base_url, api_key) => request('/ai/models', { method: 'POST', body: JSON.stringify({ base_url, api_key }) }),
 
   // Instance-level default branding (#15, platform admin).

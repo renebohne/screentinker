@@ -11,6 +11,10 @@ const { db } = require('../db/database');
 const config = require('../config');
 const { encrypt, decrypt } = require('../lib/secretbox');
 const { generateImage } = require('../lib/image-gen');
+const fs = require('fs');
+const path = require('path');
+const { v4: uuidv4 } = require('uuid');
+const { ingestUploadedFile } = require('../lib/content-ingest');
 const { logActivity, getClientIp } = require('../services/activity');
 
 const isWorkspaceAdmin = (req) => req.isPlatformAdmin || req.actingAs || req.workspaceRole === 'workspace_admin';
@@ -474,6 +478,94 @@ router.post('/generate-slide', async (req, res) => {
 });
 
 // POST /api/ai/generate-design — editor+; proxies the workspace's endpoint
+/*
+ * A generated image, turned into REAL LIBRARY CONTENT and handed back as a content_id.
+ *
+ * ⚠️ WHY THIS EXISTS SEPARATELY FROM /generate-slide. That route returns a LAYOUT — text, boxes,
+ * colours — and deliberately refuses image elements, because a slide references pictures by
+ * content_id and a model has no way to know a real one. An invented id renders as nothing at all,
+ * which is worse than refusing.
+ *
+ * ⚠️ AND SEPARATELY FROM /generate-design, which hands its images back as an inline data: URL for
+ * the Designer's own canvas. A slide cannot use that: it ships to a screen that must hold the file
+ * on disk and play it with the WAN down, so the picture has to be a library item like any other.
+ * That is the whole difference between a design tool and signage.
+ *
+ * So this bridges the two — generate, ingest through the SAME path an operator's upload takes
+ * (sniffed, thumbnailed, digested, workspace-scoped), and return the id the slide document already
+ * knows how to store in background_content_id.
+ */
+router.post('/generate-background', async (req, res) => {
+  const prompt = String(req.body && req.body.prompt || '').trim().slice(0, 500);
+  if (!prompt) return res.status(400).json({ error: 'Prompt required' });
+
+  const row = db.prepare('SELECT image_base_url, image_model, image_provider, image_api_key_enc FROM ai_settings WHERE workspace_id = ?').get(req.workspaceId);
+  const imgBase = row && row.image_base_url ? row.image_base_url.replace(/\/+$/, '') : '';
+  if (!imgBase || !row.image_provider) {
+    return res.status(400).json({ error: 'No image endpoint configured for this workspace.' });
+  }
+  if (!endpointAllowed(imgBase)) return res.status(400).json({ error: 'Image endpoint URL not allowed.' });
+
+  let dataUrl;
+  try {
+    dataUrl = await generateImage({
+      provider: row.image_provider,
+      baseUrl: imgBase,
+      apiKey: row.image_api_key_enc ? decrypt(row.image_api_key_enc) : '',
+      model: row.image_model,
+      prompt,
+      /*
+       * 16:9 to match the slide stage. A square background gets letterboxed or cropped, and the
+       * operator only finds out after it is on a screen.
+       */
+      width: 1792,
+      height: 1024,
+      timeoutMs: 180000,
+    });
+  } catch (e) {
+    return res.status(502).json({ error: 'Image generation failed: ' + String(e && e.message || e).slice(0, 200) });
+  }
+  if (!dataUrl || dataUrl.indexOf('base64,') < 0) {
+    return res.status(502).json({ error: 'The image endpoint returned no image.' });
+  }
+
+  /*
+   * ⚠️ WRITTEN AS `<uuid>.part`, because that is what finalizeUpload expects and what makes this go
+   * through the real ingest: the bytes are SNIFFED for their true type rather than trusted. A
+   * generation endpoint that returned HTML, or a PNG that is really something else, must be refused
+   * here exactly as an operator's upload would be — not written into the library because we asked
+   * for an image and assumed we got one.
+   */
+  const tmpName = `${uuidv4()}.part`;
+  const tmpPath = path.join(config.contentDir, tmpName);
+  const bytes = Buffer.from(dataUrl.slice(dataUrl.indexOf('base64,') + 7), 'base64');
+  try {
+    fs.mkdirSync(config.contentDir, { recursive: true });
+    fs.writeFileSync(tmpPath, bytes);
+  } catch (e) {
+    return res.status(500).json({ error: 'Could not store the generated image.' });
+  }
+
+  let content;
+  try {
+    content = await ingestUploadedFile({
+      file: {
+        path: tmpPath,
+        originalname: `ai-background-${prompt.slice(0, 40).replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'slide'}.png`,
+        size: bytes.length,
+      },
+      userId: req.user.id,
+      workspaceId: req.workspaceId,
+    });
+  } catch (e) {
+    try { fs.unlinkSync(tmpPath); } catch (e2) { /* finalizeUpload may already have removed it */ }
+    return res.status(400).json({ error: String(e && e.message || e).slice(0, 200) });
+  }
+
+  logActivity(req.user.id, 'ai_background_generated', prompt.slice(0, 120), null, getClientIp(req), req.workspaceId);
+  res.json({ content_id: content.id, filename: content.filename, width: content.width, height: content.height });
+});
+
 router.post('/generate-design', async (req, res) => {
   if (!canEdit(req)) return res.status(403).json({ error: 'Editor access required' });
   const prompt = String(req.body && req.body.prompt || '').trim().slice(0, 500);

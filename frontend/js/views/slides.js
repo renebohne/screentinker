@@ -259,6 +259,7 @@ function renderEditor(container) {
         <input id="aiPrompt" class="input" style="flex:1;min-width:220px;margin:0"
                placeholder="${esc(t('slides.ai.placeholder'))}" maxlength="500">
         <button class="btn btn-secondary btn-sm" id="aiGenBtn">${esc(t('slides.ai.generate'))}</button>
+        <button class="btn btn-secondary btn-sm" id="aiBgBtn" title="Generate a background image from the same prompt">Generate background</button>
         <button class="btn-icon" id="aiCfgBtn" title="${esc(t('slides.ai.settings'))}" aria-label="${esc(t('slides.ai.settings'))}" style="padding:4px 8px">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"/>
@@ -299,6 +300,7 @@ function renderEditor(container) {
   container.querySelector('#pubBtn').addEventListener('click', () => publish(container));
   container.querySelector('#playBtn').addEventListener('click', play);
   container.querySelector('#aiGenBtn').addEventListener('click', () => aiGenerate(container));
+  container.querySelector('#aiBgBtn').addEventListener('click', () => aiGenerateBackground(container));
   container.querySelector('#aiPrompt').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); aiGenerate(container); }
   });
@@ -1031,6 +1033,66 @@ async function publish(container) {
  * the model's output authoritative before anyone had looked at it.
  */
 let aiBusy = false;
+let aiBgBusy = false;   // an image generation costs money per click; never let two run
+
+/*
+ * Generate a background PICTURE for the slide you are on.
+ *
+ * ⚠️ SEPARATE FROM aiGenerate ON PURPOSE. That one replaces the whole slide — layout, words,
+ * colours — and is destructive enough to confirm first. This only sets a background behind whatever
+ * is already there, so it needs no confirmation and must never touch the elements: the common case
+ * is "I like this slide, give it a photo".
+ */
+async function aiGenerateBackground(container) {
+  const promptEl = container.querySelector('#aiPrompt');
+  const statusEl = container.querySelector('#aiStatus');
+  const btn = container.querySelector('#aiBgBtn');
+  const prompt = (promptEl.value || '').trim();
+  const say = (msg, bad) => {
+    statusEl.textContent = msg;
+    statusEl.style.color = bad ? 'var(--danger, #e05252)' : 'var(--text-muted)';
+  };
+  if (!prompt) { say('Describe the background first.', true); promptEl.focus(); return; }
+  if (aiBgBusy) return;                    // single-flight: an image costs money per call
+  if (!state.deck.doc.slides.length) { say('Add a slide first.', true); return; }
+
+  /*
+   * ⚠️ REMEMBER WHICH SLIDE THIS WAS FOR. Generation takes tens of seconds and the operator can
+   * click another slide meanwhile; applying to state.si on return would drop the picture onto
+   * whatever they happen to be looking at. Resolved by identity afterwards, the same way
+   * aiGenerate relocates its target.
+   */
+  const target = state.deck.doc.slides[state.si];
+
+  aiBgBusy = true;
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Generating…';
+  say('Generating a background — this can take a minute.');
+  try {
+    const out = await api.aiGenerateBackground(prompt);
+    if (!out || !out.content_id) throw new Error('no image came back');
+    const idx = state.deck.doc.slides.indexOf(target);
+    if (idx < 0) { say('That slide is gone — nothing changed.', true); return; }
+    target.template = target.template || {};
+    target.template.background_content_id = out.content_id;
+    /*
+     * A readable default scrim. Text sits over this, and a photo at full brightness behind pale
+     * type is the single most common way a generated background makes a slide unreadable — the
+     * operator can take it back to 0 in the Slide tab if they want the picture untouched.
+     */
+    if (!(target.template.background_dim > 0)) target.template.background_dim = 0.35;
+    touch(container);
+    render(container);
+    say('Background applied.');
+  } catch (e) {
+    say(String((e && e.message) || e).slice(0, 200), true);
+  } finally {
+    aiBgBusy = false;
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
 
 async function aiGenerate(container) {
   /*
