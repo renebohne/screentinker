@@ -2008,6 +2008,27 @@
         console.log('[play] backfill ack:', JSON.stringify(d));
       });
 
+      /*
+       * #trigger-ingress: a fire the SERVER accepted on our behalf.
+       *
+       * ⚠️ FOR PLAYERS THAT CANNOT OPEN THEIR OWN DOOR. BrightSign's server-on-a-player widget has
+       * no Node, so `require('dgram')` and `require('http')` both throw here and the listeners
+       * never bind — enabling triggers on such a device did nothing at all. The server on that same
+       * board holds the door and hands the wire text over this socket instead.
+       *
+       * ⚠️ IT IS RE-EVALUATED HERE, NOT TRUSTED. The server resolved only WHICH device the payload
+       * was addressed to; whether it may fire is decided by the same resolver a datagram would have
+       * gone through, with this device's own secret. One decision, now three doors.
+       */
+      socket.on('device:trigger-wire', (d) => {
+        try {
+          if (!d || typeof d.text !== 'string') return;
+          handleTrigger({ text: wireClean(d.text), source: d.source || 'server', sourceIp: d.sourceIp || 'server' });
+        } catch (e) {
+          triggerLog('warn', 'server-delivered trigger failed: ' + ((e && e.message) || e));
+        }
+      });
+
       socket.on('device:registered', (data) => {
         config.deviceId = data.device_id;
         if (data.device_token) config.deviceToken = data.device_token;
