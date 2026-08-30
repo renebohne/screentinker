@@ -1191,6 +1191,31 @@
           else { activeYtPlayer.unMute(); activeYtPlayer.setVolume(mediaVolume != null ? Math.round(mediaVolume * 100) : 100); }
         } catch (e) { /* player not ready yet; onReady applies it again */ }
       }
+
+      /*
+       * ⚠️ BRIGHTSIGN: THE DOM ABOVE DOES NOT REACH THE AUDIO PLANE. Measured on a live XT245 —
+       * every output read `mute:false, volumeLinear:1` while this function was setting el.muted on
+       * every element. So on that hardware mute has never muted, a video wall has played N
+       * overlapping soundtracks, and nothing here made a sound stop. The bridge drives
+       * @brightsign/audiooutput, which does.
+       *
+       * ⚠️ AND THE PLATFORM MUTE IS GLOBAL, NOT PER-ELEMENT — which is why this is NOT
+       * `want || baseAudioSuppressed`. Suppression means an ALARM OVERLAY is playing and must be
+       * the thing you hear; muting the whole output then would silence the alarm, turning a
+       * base-audio bug into an emergency-message bug. So the platform is silenced only when the
+       * base wants silence AND nothing is asserting audio over it.
+       *
+       * Selective suppression — overlay audible while the base underneath is silent — is still
+       * unsolved on this platform, because per-element control is exactly what it does not have.
+       * That is the pre-existing behaviour, not a regression introduced here.
+       */
+      try {
+        var bs = window.ScreenTinkerBS;
+        if (bs && typeof bs.setAudioMuted === 'function' && bs.isBrightSign && bs.isBrightSign()) {
+          bs.setAudioMuted(want && !baseAudioSuppressed);
+        }
+      } catch (e) { /* the DOM writes above still stand on every other platform */ }
+
       return want;
     }
 
