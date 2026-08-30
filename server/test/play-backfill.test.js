@@ -21,6 +21,7 @@ const Database = require('better-sqlite3');
 const {
   normalizeBackfillPlay,
   boundBatch,
+  closeStrandedPlays,
   MAX_BACKFILL_BATCH,
   BACKFILL_MAX_AGE_SEC,
   BACKFILL_FUTURE_SKEW_SEC,
@@ -186,4 +187,116 @@ test('a whole outage backlog stores in one pass, with its shape intact', () => {
   assert.equal(written, MAX_BACKFILL_BATCH, 'one flush should write exactly a bounded batch');
   const spread = db.prepare('SELECT MAX(started_at) - MIN(started_at) AS s FROM play_logs').get().s;
   assert.ok(spread > 3000, `plays must keep their real spread over time, got ${spread}s`);
+});
+
+/* ===================================================== closing what an outage stranded */
+
+/*
+ * ⚠️ THE ROW THE BACKFILL CANNOT REACH. The play in flight when the link drops had its play_start
+ * recorded LIVE and its play_end lost, so it sits open forever with no duration — one per outage,
+ * plus every reboot mid-item. The queue cannot backfill it without duplicating the row that already
+ * exists.
+ *
+ * But the evidence is already in the table: the device advancing to another item proves the
+ * previous one ran until that moment. The successor's started_at IS the predecessor's end. Nothing
+ * is invented here — it is read off data we already have.
+ */
+
+const addRow = (db, o) => db.prepare(`
+  INSERT INTO play_logs (device_id, content_id, zone_id, content_name, started_at, ended_at, duration_sec)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+`).run(o.device_id || 'dev1', o.content_id || 'c1', o.zone_id ?? null, o.content_name || 'clip',
+       o.started_at, o.ended_at ?? null, o.duration_sec ?? null);
+
+test('⚠️ an open row is closed by the start of the play that followed it', () => {
+  const db = freshDb();
+  addRow(db, { started_at: NOW - 100 });                       // stranded by the outage
+  addRow(db, { started_at: NOW - 80, ended_at: NOW - 60 });    // the play after it
+  assert.equal(closeStrandedPlays(db, 'dev1'), 1);
+  const row = db.prepare('SELECT * FROM play_logs ORDER BY started_at').get();
+  assert.equal(row.ended_at, NOW - 80, 'it ended when the next item began');
+  assert.equal(row.duration_sec, 20);
+});
+
+test('⚠️ THE ITEM PLAYING RIGHT NOW IS LEFT OPEN', () => {
+  // It has no successor because it has not ended. Closing it would invent an end for something
+  // still on screen.
+  const db = freshDb();
+  addRow(db, { started_at: NOW - 100, ended_at: NOW - 80, duration_sec: 20 });
+  addRow(db, { started_at: NOW - 80 });                        // currently playing
+  assert.equal(closeStrandedPlays(db, 'dev1'), 0);
+  const open = db.prepare('SELECT COUNT(*) c FROM play_logs WHERE ended_at IS NULL').get().c;
+  assert.equal(open, 1);
+});
+
+test('⚠️ a week-long gap does NOT become a week-long play', () => {
+  /*
+   * A panel that played one item, went dark for a week and came back has a "next" play a week
+   * later. Attributing that to the item would be a far bigger lie than leaving the row open.
+   */
+  const db = freshDb();
+  addRow(db, { started_at: NOW - 8 * 24 * 3600 });
+  addRow(db, { started_at: NOW - 60, ended_at: NOW - 40 });
+  assert.equal(closeStrandedPlays(db, 'dev1'), 0, 'an implausible span must stay open');
+  assert.equal(db.prepare('SELECT ended_at FROM play_logs ORDER BY started_at').get().ended_at, null);
+});
+
+test('⚠️ a multi-zone device closes against ITS OWN zone, not a neighbour', () => {
+  /*
+   * Zones play at the same time. Taking "the next row for this device" would let zone B's start cut
+   * zone A's play short — under-reporting exactly the screens that show the most.
+   */
+  const db = freshDb();
+  addRow(db, { zone_id: 'zoneA', started_at: NOW - 100 });                     // open, zone A
+  addRow(db, { zone_id: 'zoneB', started_at: NOW - 90, ended_at: NOW - 70 });  // a DIFFERENT zone
+  assert.equal(closeStrandedPlays(db, 'dev1'), 0, "another zone's play must not close this one");
+  addRow(db, { zone_id: 'zoneA', started_at: NOW - 40, ended_at: NOW - 20 });  // zone A's real successor
+  assert.equal(closeStrandedPlays(db, 'dev1'), 1);
+  const a = db.prepare("SELECT * FROM play_logs WHERE zone_id='zoneA' ORDER BY started_at").get();
+  assert.equal(a.ended_at, NOW - 40);
+  assert.equal(a.duration_sec, 60);
+});
+
+test('it closes against the NEXT play, not the newest one', () => {
+  const db = freshDb();
+  addRow(db, { started_at: NOW - 100 });                        // stranded
+  addRow(db, { started_at: NOW - 80, ended_at: NOW - 60 });
+  addRow(db, { started_at: NOW - 60, ended_at: NOW - 40 });
+  closeStrandedPlays(db, 'dev1');
+  const row = db.prepare('SELECT * FROM play_logs ORDER BY started_at').get();
+  assert.equal(row.ended_at, NOW - 80, 'the immediate successor ends it, not the latest play');
+  assert.equal(row.duration_sec, 20);
+});
+
+test('another device is never touched', () => {
+  const db = freshDb();
+  addRow(db, { device_id: 'other', started_at: NOW - 100 });
+  addRow(db, { device_id: 'other', started_at: NOW - 80, ended_at: NOW - 60 });
+  assert.equal(closeStrandedPlays(db, 'dev1'), 0);
+  assert.equal(db.prepare("SELECT ended_at FROM play_logs WHERE device_id='other' ORDER BY started_at").get().ended_at, null);
+});
+
+test('already-closed rows are not rewritten', () => {
+  const db = freshDb();
+  addRow(db, { started_at: NOW - 100, ended_at: NOW - 95, duration_sec: 5 });
+  addRow(db, { started_at: NOW - 80, ended_at: NOW - 60, duration_sec: 20 });
+  assert.equal(closeStrandedPlays(db, 'dev1'), 0);
+  assert.equal(db.prepare('SELECT duration_sec FROM play_logs ORDER BY started_at').get().duration_sec, 5,
+    'a real recorded duration must never be overwritten by an inferred one');
+});
+
+test('completed is deliberately left alone', () => {
+  // We have evidence it PLAYED that long, not that it ran to its end — an error-advance looks
+  // identical from here. Claiming completion would assert more than the data supports.
+  const db = freshDb();
+  addRow(db, { started_at: NOW - 100 });
+  addRow(db, { started_at: NOW - 80, ended_at: NOW - 60 });
+  closeStrandedPlays(db, 'dev1');
+  assert.equal(db.prepare('SELECT completed FROM play_logs ORDER BY started_at').get().completed, 0);
+});
+
+test('an empty table is a no-op, not an error', () => {
+  const db = freshDb();
+  assert.doesNotThrow(() => closeStrandedPlays(db, 'dev1'));
+  assert.equal(closeStrandedPlays(db, 'dev1'), 0);
 });

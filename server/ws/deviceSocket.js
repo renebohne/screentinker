@@ -58,7 +58,7 @@ const PLAY_LOG_MIN_GAP_MS = 2000;
  * socket; the batch cap is what replaces the throttle above for replayed plays, since a flush
  * must not be decimated by a limiter meant to bound a runaway LIVE player.
  */
-const { normalizeBackfillPlay, boundBatch } = require('../lib/play-backfill');
+const { normalizeBackfillPlay, boundBatch, closeStrandedPlays } = require('../lib/play-backfill');
 // Existence probes for the proof-of-play insert (see the play_start handler): the id a
 // player reports comes from its CACHED playlist and can outlive the row it names.
 const contentExists = db.prepare('SELECT 1 FROM content WHERE id = ?').pluck();
@@ -1568,6 +1568,14 @@ module.exports = function setupDeviceSocket(io) {
               content_name || 'Unknown'
             );
           }
+          /*
+           * #299: a new play beginning is the evidence that closes whatever the last outage or
+           * reboot left open — the row before this one, in this zone, ran until now. Normally
+           * play_end has already closed it and this is a no-op; it only bites when that end was
+           * lost, which is exactly the case nothing repaired before.
+           */
+          try { closeStrandedPlays(db, device_id); } catch (e) { /* never block a live play */ }
+
           // Forward to dashboard so it can render a per-device progress bar.
           // Server-side timestamp avoids clock-skew between player and dashboard.
           emitToDeviceWorkspace(dashboardNs, device_id, 'dashboard:playback-progress', {
@@ -1630,13 +1638,22 @@ module.exports = function setupDeviceSocket(io) {
             written += info.changes;
           }
           /*
+           * ⚠️ NOW CLOSE WHAT THE OUTAGE STRANDED. The play that was in flight when the link
+           * dropped had its play_start recorded live and its play_end lost, so it sat open with no
+           * duration — one per outage, and the backfill alone does not touch it. The plays just
+           * inserted are the evidence that closes it: the device advancing proves the previous item
+           * ran until the next one started.
+           */
+          const closed = closeStrandedPlays(db, device_id);
+
+          /*
            * Acked so the player can drop exactly what landed. It keeps its queue until this
            * arrives — a flush that vanished into a dead socket would otherwise be the same data
            * loss by a different route.
            */
           socket.emit('device:play-offline-ack', { received: plays.length, written, rejected });
           if (plays.length) {
-            console.log(`[play] backfill from ${device_id}: ${plays.length} received, ${written} written, ${rejected} rejected`);
+            console.log(`[play] backfill from ${device_id}: ${plays.length} received, ${written} written, ${rejected} rejected, ${closed} stranded closed`);
           }
         } else if (event === 'play_end') {
           // A widget play is closed by its widget id. Binding content_id to BOTH columns meant a
