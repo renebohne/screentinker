@@ -589,6 +589,112 @@ app.get('/player/trigger-resolve.js', (req, res) => {
   res.sendFile(path.join(__dirname, 'lib', 'trigger-resolve.js'));
 });
 
+/*
+ * #trigger-ingress: the SERVER-side LAN trigger door.
+ *
+ * ⚠️ THIS EXISTS BECAUSE SOME PLAYERS CANNOT OPEN ONE. BrightSign's server-on-a-player build creates
+ * its widget without nodejs_enabled (deliberately — see brightsign/server/autorun.brs), so the
+ * player has no `require`, `dgram` and raw `http` both throw, and the trigger listeners never bind.
+ * Measured on an XT245: every trigger port closed, so enabling triggers did precisely nothing. The
+ * server on that same board is real Node and can hold the door instead.
+ *
+ * ⚠️ THE PLAYER STILL DECIDES. This resolves only WHICH device the payload is addressed to (by its
+ * secret) and forwards the wire text verbatim, so accept/reject stays in the single shared resolver
+ * rather than being reimplemented here and drifting.
+ *
+ * Unauthenticated by design, exactly like the player's own door: the wire carries no URL, no
+ * duration and no position, so the worst an attacker with a guessed token can do is show content an
+ * operator already configured for that screen. It is off unless TRIGGER_INGRESS is set.
+ */
+if (config.triggerIngress) {
+  const triggerIngress = require('./lib/trigger-ingress');
+  const TRcore = require('./lib/trigger-resolve');
+  // ⚠️ Required here, not assumed. server.js has no module-level `db`; every other consumer pulls
+  // it in locally, and referencing a bare `db` threw a ReferenceError inside the UDP message
+  // handler — where an uncaught throw takes the process with it.
+  const { db: triggerDb } = require('./db/database');
+  // Same shape as the player's: per source IP, so one noisy controller cannot drown the others.
+  const ingressLimiter = TRcore.createRateLimiter ? TRcore.createRateLimiter() : null;
+
+  const handleIngress = (req, res, source) => {
+    const ip = req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
+    if (ingressLimiter && !ingressLimiter.allow(ip, Date.now())) {
+      // Newline-terminated: Extron reads until a known suffix and otherwise blocks until timeout.
+      return res.status(429).type('text/plain').send('rate_limited\n');
+    }
+    const text = triggerIngress.extractWire(req);
+    const devices = triggerDb.prepare(
+      'SELECT id, trigger_secret, triggers_accept_http, triggers_accept_udp FROM devices WHERE trigger_secret IS NOT NULL'
+    ).all();
+    const target = triggerIngress.resolveTarget(text, devices, source);
+    if (!target.ok) {
+      return res.status(403).type('text/plain').send(target.reason + '\n');
+    }
+    const deviceNs = app.get('io') && app.get('io').of('/device');
+    const room = deviceNs && deviceNs.adapter.rooms.get(target.deviceId);
+    if (!room || room.size === 0) {
+      return res.status(503).type('text/plain').send('device_offline\n');
+    }
+    deviceNs.to(target.deviceId).emit('device:trigger-wire', { text, source, sourceIp: ip });
+    return res.type('text/plain').send('ok\n');
+  };
+
+  // The same four shapes the player's door accepts (docs/triggers-design.md §11) — a control system
+  // should not have to know which kind of box is behind the address.
+  app.post('/api/trigger', express.text({ type: '*/*', limit: '2kb' }), (req, res) => handleIngress(req, res, 'http'));
+  app.get('/api/trigger', (req, res) => handleIngress(req, res, 'http'));
+
+  /*
+   * The UDP half. A datagram is what most AV control systems actually emit — Extron's ControlScript
+   * truncates at 1024 bytes and delivers at most that per receive event, which is where the cap
+   * below comes from (it is their limit, not ours).
+   *
+   * ⚠️ A FAILURE TO BIND MUST NOT TAKE THE SERVER DOWN. This runs at boot on a signage box whose
+   * only job is showing content; a port already in use is a reason for triggers not to work, never
+   * a reason for the screens to go dark.
+   */
+  try {
+    const dgram = require('dgram');
+    const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+    sock.on('error', (err) => {
+      console.warn('[trigger-ingress] UDP listener error:', err.message);
+      try { sock.close(); } catch (e) { /* already gone */ }
+    });
+    sock.on('message', (buf, rinfo) => {
+     /*
+      * ⚠️ WRAPPED. This is a socket callback: an uncaught throw here is an uncaughtException that
+      * takes the whole server down, and a signage server dying means every screen it feeds stops.
+      * A malformed datagram from the LAN must never be able to do that.
+      */
+     try {
+      const ip = (rinfo && rinfo.address) || 'unknown';
+      if (ingressLimiter && !ingressLimiter.allow(ip, Date.now())) return;
+      const text = buf.toString('utf8', 0, Math.min(buf.length, 1024));
+      const devices = triggerDb.prepare(
+        'SELECT id, trigger_secret, triggers_accept_http, triggers_accept_udp FROM devices WHERE trigger_secret IS NOT NULL'
+      ).all();
+      const target = triggerIngress.resolveTarget(text, devices, 'udp');
+      // ⚠️ Silent on rejection. A datagram door on a LAN sees every stray broadcast; answering
+      // would both amplify traffic and tell a prober which guesses were closer.
+      if (!target.ok) return;
+      const deviceNs = app.get('io') && app.get('io').of('/device');
+      const room = deviceNs && deviceNs.adapter.rooms.get(target.deviceId);
+      if (!room || room.size === 0) return;
+      deviceNs.to(target.deviceId).emit('device:trigger-wire', { text, source: 'udp', sourceIp: ip });
+      console.log('[trigger-ingress] udp fire -> ' + target.deviceId + ' from ' + ip);
+     } catch (e) {
+      console.warn('[trigger-ingress] udp handler:', e.message);
+     }
+    });
+    sock.bind(config.triggerIngressUdpPort, () => {
+      console.log('[trigger-ingress] UDP door on :' + config.triggerIngressUdpPort);
+      try { sock.unref(); } catch (e) { /* keep going */ }
+    });
+  } catch (e) {
+    console.warn('[trigger-ingress] UDP unavailable:', e.message);
+  }
+}
+
 app.get('/player/media-mute.js', (req, res) => {
   res.type('application/javascript').setHeader('Cache-Control', 'no-cache');
   res.sendFile(path.join(__dirname, 'lib', 'media-mute.js'));

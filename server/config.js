@@ -23,6 +23,17 @@ function parseBillingRateTable(raw) {
 const { parseSize } = require('./lib/parse-size');
 
 module.exports = {
+  /*
+   * #trigger-ingress: let the SERVER hold the LAN trigger door open and forward what arrives to the
+   * addressed device. Off by default — opening an unauthenticated LAN port on the server is a
+   * different security posture from opening one on a panel, and must be a deliberate choice.
+   * Needed wherever a player cannot bind a socket itself (BrightSign's server-on-a-player widget
+   * has no Node), and useful where a control system can reach the server but not each screen.
+   */
+  triggerIngress: process.env.TRIGGER_INGRESS === '1' || process.env.TRIGGER_INGRESS === 'true',
+  /** UDP port for the server-side door. Only bound when triggerIngress is on. */
+  triggerIngressUdpPort: Number(process.env.TRIGGER_INGRESS_UDP_PORT || 7847),
+
   port: process.env.PORT || 3001,
   httpsPort: process.env.HTTPS_PORT || 3443,
   dataDir: DATA_DIR,
