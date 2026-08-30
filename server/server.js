@@ -396,6 +396,13 @@ app.get('/player/schedule-eval.js', (req, res) => {
   res.sendFile(path.join(__dirname, 'lib', 'schedule-eval.js'));
 });
 
+// #299: the offline proof-of-play queue, served to the web player from the same single source the
+// Tizen .wgt copies and the Node tests require — so the wire shape cannot drift between them.
+app.get('/player/offline-play-queue.js', (req, res) => {
+  res.type('application/javascript').setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(__dirname, 'lib', 'offline-play-queue.js'));
+});
+
 // Offline content-cache policy, imported by the service worker via importScripts and by the Node
 // tests via require — one source, so the range arithmetic the player depends on cannot drift from
 // the arithmetic that is actually tested. A service worker cannot require(), which is why this is

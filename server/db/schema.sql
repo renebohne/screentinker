@@ -354,12 +354,21 @@ CREATE TABLE IF NOT EXISTS play_logs (
     duration_sec    INTEGER,
     completed       INTEGER NOT NULL DEFAULT 0,
     trigger_type    TEXT DEFAULT 'playlist',
-    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    -- #299: id minted by the PLAYER for a play it recorded while offline. It exists so a
+    -- replayed backlog is idempotent: a player that flushes, crashes before it sees the ack,
+    -- and flushes again must not double-count the same play. NULL for live plays, which are
+    -- reported once and need no key.
+    client_event_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_play_logs_device ON play_logs(device_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_play_logs_content ON play_logs(content_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_play_logs_time ON play_logs(started_at, ended_at);
+-- ⚠️ idx_play_logs_client_event is created by the MIGRATIONS, not here. This file is exec'd
+-- wholesale before the migrations run, so on a database that predates client_event_id the index
+-- would reference a column the ALTER TABLE has not added yet — which throws during the schema
+-- exec and takes the whole server down at import, not just the index.
 
 -- ===================== DEVICE GROUPS =====================
 

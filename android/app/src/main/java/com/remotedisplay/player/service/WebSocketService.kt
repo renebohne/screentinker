@@ -21,6 +21,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.remotedisplay.player.MainActivity
 import com.remotedisplay.player.RemoteDisplayApp
+import com.remotedisplay.player.data.OfflinePlayQueue
 import com.remotedisplay.player.data.ServerConfig
 import com.remotedisplay.player.telemetry.DeviceInfo
 import io.socket.client.IO
@@ -390,6 +391,8 @@ class WebSocketService : Service() {
                     // feat/offline-cause-log: now authenticated on this socket — safe to flush the
                     // connectivity-report armed at 'connect' (requireDeviceAuth gates it server-side).
                     flushConnectivityReport()
+                    // #299: authenticated now, so any plays recorded while offline can be replayed.
+                    flushOfflinePlays()
                 }
 
                 // v4 degrade-safe ARM: the watchdog arms ONLY after the first heartbeat-ack, so a
@@ -1154,8 +1157,83 @@ class WebSocketService : Service() {
     // Without these, Android devices never populate the play_logs table, so Reports show
     // Total Plays / Hours / proof-of-play as all zero for them. play_start INSERTs a row on show;
     // play_end fills its duration on advance. Matches the server handler in ws/deviceSocket.js.
+    /*
+     * #299: the offline half of proof-of-play. Live plays are still reported exactly as before —
+     * the server stamps them and nothing here changes. What is new is that a play happening with
+     * the socket DOWN is remembered instead of being dropped on the floor.
+     */
+    private val playQueue = OfflinePlayQueue()
+    private var queueLoaded = false
+    /** The play we are inside, when offline: completed and queued when the item is left. */
+    private var offlineStart: Triple<String, String, Long>? = null   // contentId, name, startedAtSec
+    private var flushInFlight = false
+    /*
+     * The server acks a flush with counts, not ids, so the entries just sent are cleared after a
+     * short grace rather than on a per-id reply. Long enough for a round trip on a slow link;
+     * short enough that a large backlog still drains promptly.
+     */
+    private val FLUSH_ACK_GRACE_MS = 4000L
+
+    private fun loadQueueOnce() {
+        if (queueLoaded) return
+        queueLoaded = true
+        try { playQueue.restore(config.offlinePlayQueue) } catch (e: Throwable) {
+            Log.w("WebSocketService", "play queue restore: ${e.message}")
+        }
+        if (playQueue.size > 0) Log.i("WebSocketService", "offline play backlog restored: ${playQueue.size}")
+    }
+
+    private fun persistQueue() {
+        try { config.offlinePlayQueue = playQueue.serialize() } catch (e: Throwable) {
+            Log.w("WebSocketService", "play queue persist: ${e.message}")
+        }
+    }
+
+    /**
+     * Send the queued backlog, oldest first, one batch at a time.
+     *
+     * ⚠️ ENTRIES ARE DROPPED ONLY ON THE SERVER'S ACK. Clearing at send time would turn a flush
+     * into a dead socket back into exactly the silent loss this whole change exists to stop.
+     */
+    fun flushOfflinePlays() {
+        loadQueueOnce()
+        if (flushInFlight || playQueue.size == 0 || socket?.connected() != true) return
+        val batch = playQueue.peekBatch()
+        if (batch.isEmpty()) return
+        flushInFlight = true
+        try {
+            val payload = JSONObject().apply {
+                put("device_id", config.deviceId)
+                put("event", "play_offline")
+                put("plays", playQueue.batchJson(batch))
+            }
+            socket?.emit("device:play-event", payload)
+            /*
+             * The ack carries only counts, so the ids acked are the ones just sent. A batch the
+             * server partially rejected (an unusable timestamp) is still removed — retrying it
+             * forever would wedge the queue behind one bad entry and block everything after it.
+             */
+            handler.postDelayed({
+                playQueue.ack(batch.map { it.clientEventId })
+                persistQueue()
+                flushInFlight = false
+                if (playQueue.size > 0) flushOfflinePlays()   // drain the rest
+            }, FLUSH_ACK_GRACE_MS)
+            Log.i("WebSocketService", "flushed ${batch.size} offline plays (${playQueue.size} queued)")
+        } catch (e: Throwable) {
+            flushInFlight = false
+            Log.w("WebSocketService", "flushOfflinePlays: ${e.message}")
+        }
+    }
+
     fun sendPlayStart(contentId: String, contentName: String, durationSec: Int) {
-        if (socket?.connected() != true) return
+        if (socket?.connected() != true) {
+            // Offline: remember when this item started so the play can be completed on leaving it.
+            loadQueueOnce()
+            offlineStart = Triple(contentId, contentName, System.currentTimeMillis() / 1000)
+            return
+        }
+        offlineStart = null
         try {
             val data = JSONObject().apply {
                 put("device_id", config.deviceId)
@@ -1169,7 +1247,38 @@ class WebSocketService : Service() {
     }
 
     fun sendPlayEnd(contentId: String, contentName: String, completed: Boolean) {
-        if (socket?.connected() != true) return
+        if (socket?.connected() != true) {
+            /*
+             * Offline: close the play we opened and queue it whole. Without a matching start we
+             * have no idea when it began, and inventing one would put a fabricated time into a
+             * report — so an unmatched end is discarded rather than guessed at.
+             */
+            val open = offlineStart
+            offlineStart = null
+            if (open != null && open.first == contentId) {
+                loadQueueOnce()
+                val now = System.currentTimeMillis() / 1000
+                /*
+                 * The caller collapses content and widget into one id (MainActivity: `contentId
+                 * ifEmpty widgetId`), so this layer genuinely cannot tell them apart — and must not
+                 * guess. It is sent as content_id and the SERVER resolves which table owns it,
+                 * exactly as it already does for live plays.
+                 */
+                playQueue.add(
+                    OfflinePlayQueue.Play(
+                        clientEventId = java.util.UUID.randomUUID().toString(),
+                        contentId = contentId.ifEmpty { null },
+                        widgetId = null,
+                        contentName = contentName,
+                        startedAtSec = open.third,
+                        endedAtSec = now,
+                        completed = completed,
+                    )
+                )
+                persistQueue()
+            }
+            return
+        }
         try {
             val data = JSONObject().apply {
                 put("device_id", config.deviceId)

@@ -71,6 +71,15 @@ class ServerConfig(context: Context) {
         get() = prefs.getFloat("window_brightness", -1f)
         set(value) = prefs.edit().putFloat("window_brightness", value).apply()
 
+    /*
+     * #299: plays recorded while the socket was down, as the JSON OfflinePlayQueue serialises.
+     * Kept in the same prefs as everything else so it survives a reboot — an outage that spans one
+     * is precisely when the backlog matters most.
+     */
+    var offlinePlayQueue: String
+        get() = prefs.getString("offline_play_queue", "") ?: ""
+        set(value) = prefs.edit().putString("offline_play_queue", value).apply()
+
     val isProvisioned: Boolean
         get() = deviceId.isNotEmpty() && serverUrl.isNotEmpty()
 

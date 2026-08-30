@@ -18,6 +18,10 @@ rm -f "$OUT"
 # .wgt always ships the canonical (byte-identical) copy, never a stale duplicate.
 cp ../server/lib/schedule-eval.js js/schedule-eval.js
 
+# #299: same single-source discipline for the offline proof-of-play queue — the .wgt must never
+# carry a copy that has drifted from what the server and the web player agree on.
+cp ../server/lib/offline-play-queue.js js/offline-play-queue.js
+
 # transition-engine: rebuild the WebGL transition runtime (params + renderer + shaders) from
 # shared/Transitions into the .wgt, same single-source discipline. No npm deps needed.
 node -e "require('fs').writeFileSync('js/transitions.js', require('../server/lib/transition-bundle').bundle())" \
