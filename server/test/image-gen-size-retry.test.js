@@ -56,6 +56,13 @@ test('THE BUG: an endpoint that refuses `size` still produces an image', async (
     assert.equal(s.calls.length, 2, 'exactly one retry');
     assert.ok('size' in s.calls[0].body, 'the first attempt carries size');
     assert.ok(!('size' in s.calls[1].body), 'the retry drops it');
+    /*
+     * ⚠️ AND STATES THE SHAPE IN THE OTHER DIALECT. Dropping `size` alone got a picture but
+     * surrendered its shape: a 16:9 request came back 832x1248 PORTRAIT from the real API, which
+     * on a 16:9 slide crops to a middle band. xAI's equivalent is aspect_ratio + resolution.
+     */
+    assert.equal(s.calls[1].body.aspect_ratio, '16:9', 'the retry must ask for the shape it wanted');
+    assert.equal(s.calls[1].body.resolution, '2k');
     assert.equal(s.calls[1].body.model, 'grok-imagine-image-2.0', 'the model must survive the retry');
     assert.equal(s.calls[1].body.prompt, 'autumn leaves');
   } finally { s.restore(); }
@@ -118,4 +125,41 @@ test('an empty response is an error, not an empty image', async () => {
   try {
     await assert.rejects(() => generateImage({ provider: 'openai', baseUrl: 'https://x/v1', apiKey: 'k', model: 'm', prompt: 'p' }), /no image/i);
   } finally { s.restore(); }
+});
+
+/* ============ picking the nearest supported ratio ============ */
+
+const { nearestAspect } = require('../lib/image-gen');
+
+test('a slide stage maps to 16:9', () => {
+  assert.equal(nearestAspect(1792, 1024), '16:9');
+  assert.equal(nearestAspect(1920, 1080), '16:9');
+});
+
+test('portrait and square map to their own ratios, not a landscape one', () => {
+  assert.equal(nearestAspect(1024, 1024), '1:1');
+  assert.equal(nearestAspect(1080, 1920), '9:16');
+  assert.equal(nearestAspect(768, 1024), '3:4');
+});
+
+test('⚠️ distance is measured in LOG space, so mirrored ratios are equally far', () => {
+  /*
+   * With linear distance, 2:1 (=2.0) and 1:2 (=0.5) sit at wildly different distances from 1:1,
+   * so a tall request would drift toward square while a wide one would not. The asymmetry is
+   * invisible until somebody's portrait poster comes back nearly square.
+   */
+  assert.equal(nearestAspect(2000, 1000), '2:1');
+  assert.equal(nearestAspect(1000, 2000), '1:2');
+});
+
+test('an unusual ratio picks the closest supported one rather than failing', () => {
+  assert.equal(nearestAspect(2100, 900), '21:9');
+  assert.ok(nearestAspect(1234, 567));
+});
+
+test('junk dimensions still yield a valid ratio', () => {
+  for (const [w, h] of [[0, 0], [undefined, undefined], [null, 100], [NaN, NaN]]) {
+    const a = nearestAspect(w, h);
+    assert.ok(typeof a === 'string' && a.includes(':'), `got ${a} for ${w}x${h}`);
+  }
 });

@@ -75,11 +75,50 @@ function sizeFor(provider, width, height) {
  * Bounded deliberately: ONE retry, only for a 400 that names the argument. A general
  * "retry without whatever it complained about" loop would paper over real prompt errors.
  */
-async function openaiCompatGenerate(baseUrl, key, prompt, model, size, signal) {
+/*
+ * xAI's supported aspect ratios (docs.x.ai, /v1/images/generations). It has no `size` at all — it
+ * takes `aspect_ratio` plus `resolution`, which is why simply dropping `size` produced a correct
+ * image in the WRONG SHAPE: a 16:9 request came back 832x1248 portrait, and on a 16:9 slide that
+ * crops to a middle band.
+ */
+const XAI_ASPECTS = [
+  ['21:9', 21 / 9], ['2:1', 2], ['20:9', 20 / 9], ['19.5:9', 19.5 / 9], ['16:9', 16 / 9],
+  ['5:2', 2.5], ['3:2', 1.5], ['4:3', 4 / 3], ['1:1', 1], ['3:4', 0.75], ['2:3', 2 / 3],
+  ['9:16', 9 / 16], ['9:19.5', 9 / 19.5], ['9:20', 9 / 20], ['1:2', 0.5],
+];
+
+/** Nearest supported ratio to what the caller asked for, by log distance so 2:1 and 1:2 are equally far. */
+function nearestAspect(width, height) {
+  const want = (width || 1) / (height || 1);
+  let best = '1:1';
+  let bestErr = Infinity;
+  for (const [name, value] of XAI_ASPECTS) {
+    const err = Math.abs(Math.log(value) - Math.log(want));
+    if (err < bestErr) { bestErr = err; best = name; }
+  }
+  return best;
+}
+
+async function openaiCompatGenerate(baseUrl, key, prompt, model, size, signal, dims) {
   const attempt = async (withSize) => {
+    /*
+     * ⚠️ THE RETRY IS NOT "SEND LESS", IT IS "SPEAK THE OTHER DIALECT". Dropping `size` alone got a
+     * picture but surrendered all control of its shape, which for a slide background is most of
+     * the point. xAI's equivalent is aspect_ratio + resolution, so the retry states the shape in
+     * the vocabulary that endpoint actually has.
+     *
+     * resolution '2k' because this fills a screen — on a 1080p panel the 1k variant is visibly
+     * soft, and the difference is about two cents an image.
+     */
     const body = withSize
       ? { prompt, n: 1, size, response_format: 'b64_json' }
-      : { prompt, n: 1, response_format: 'b64_json' };
+      : {
+        prompt,
+        n: 1,
+        response_format: 'b64_json',
+        aspect_ratio: nearestAspect(dims && dims.width, dims && dims.height),
+        resolution: '2k',
+      };
     if (model) body.model = model;   // omit for sd.cpp (uses its loaded checkpoint)
     const res = await fetch(baseUrl + '/images/generations', {
       method: 'POST',
@@ -122,7 +161,7 @@ async function generateImage(opts) {
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs || 180000);
   try {
     if (provider === 'openai' || provider === 'sdcpp') {
-      return await openaiCompatGenerate(baseUrl, apiKey || 'none', prompt, model, sizeFor(provider, width, height), controller.signal);
+      return await openaiCompatGenerate(baseUrl, apiKey || 'none', prompt, model, sizeFor(provider, width, height), controller.signal, { width, height });
     }
     return await comfyGenerate(baseUrl, prompt, model, width, height, controller.signal);
   } catch (e) {
@@ -133,4 +172,4 @@ async function generateImage(opts) {
   }
 }
 
-module.exports = { generateImage };
+module.exports = { generateImage, nearestAspect };
