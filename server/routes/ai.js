@@ -17,6 +17,19 @@ const { v4: uuidv4 } = require('uuid');
 const { ingestUploadedFile } = require('../lib/content-ingest');
 const { logActivity, getClientIp } = require('../services/activity');
 
+/*
+ * ⚠️ NOT 502, THOUGH THAT IS WHAT THESE FAILURES ARE. Cloudflare REPLACES a 502 body with its own
+ * error page, so every upstream AI failure reached the operator as a bare "Request failed" — the
+ * server was answering with `Model not found: Grok-4`, and all that survived the proxy was nothing.
+ * A capitalised model name cost a support round trip that the endpoint's own words would have
+ * closed in seconds.
+ *
+ * These are reported as 400 instead: not strictly accurate for a timeout, but almost every one of
+ * them IS a configuration fault the operator can fix (wrong model, wrong key, wrong URL), and a
+ * slightly-wrong status that shows the reason beats a correct one that hides it.
+ */
+const UPSTREAM_STATUS = 400;
+
 const isWorkspaceAdmin = (req) => req.isPlatformAdmin || req.actingAs || req.workspaceRole === 'workspace_admin';
 const canEdit = (req) => req.isPlatformAdmin || req.actingAs || ['workspace_admin', 'workspace_editor'].includes(req.workspaceRole);
 
@@ -221,11 +234,11 @@ router.post('/models', async (req, res) => {
     r = await fetch(base_url + '/models', { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal });
   } catch (e) {
     clearTimeout(timer);
-    return res.status(502).json({ error: 'Could not reach the endpoint: ' + (e.name === 'AbortError' ? 'timed out' : e.message) });
+    return res.status(UPSTREAM_STATUS).json({ error: 'Could not reach the endpoint: ' + (e.name === 'AbortError' ? 'timed out' : e.message) });
   }
   clearTimeout(timer);
-  if (!r.ok) { const t = await r.text().catch(() => ''); return res.status(502).json({ error: `Endpoint error ${r.status}: ${t.slice(0, 120)}` }); }
-  let j; try { j = await r.json(); } catch { return res.status(502).json({ error: 'Endpoint returned non-JSON.' }); }
+  if (!r.ok) { const t = await r.text().catch(() => ''); return res.status(UPSTREAM_STATUS).json({ error: `Endpoint error ${r.status}: ${t.slice(0, 120)}` }); }
+  let j; try { j = await r.json(); } catch { return res.status(UPSTREAM_STATUS).json({ error: 'Endpoint returned non-JSON.' }); }
   const models = Array.isArray(j && j.data) ? j.data.map(m => m && m.id).filter(Boolean) : [];
   res.json({ models: models.slice(0, 300) });
 });
@@ -432,7 +445,7 @@ router.post('/generate-slide', async (req, res) => {
    */
   const withWords = Object.values(spec.fields).filter((v) => String(v || '').trim()).length;
   if (!spec.template.elements.length || !withWords) {
-    return res.status(502).json({ error: 'AI returned an empty slide. Try a more specific prompt.' });
+    return res.status(UPSTREAM_STATUS).json({ error: 'AI returned an empty slide. Try a more specific prompt.' });
   }
 
   /*
@@ -605,23 +618,23 @@ router.post('/generate-design', async (req, res) => {
     });
   } catch (e) {
     clearTimeout(timer);
-    return res.status(502).json({ error: 'Could not reach the AI endpoint: ' + (e.name === 'AbortError' ? 'timed out' : e.message) });
+    return res.status(UPSTREAM_STATUS).json({ error: 'Could not reach the AI endpoint: ' + (e.name === 'AbortError' ? 'timed out' : e.message) });
   }
   clearTimeout(timer);
   if (!aiRes.ok) {
     const t = await aiRes.text().catch(() => '');
-    return res.status(502).json({ error: `AI endpoint error ${aiRes.status}: ${t.slice(0, 150)}` });
+    return res.status(UPSTREAM_STATUS).json({ error: `AI endpoint error ${aiRes.status}: ${t.slice(0, 150)}` });
   }
   let json;
-  try { json = await aiRes.json(); } catch { return res.status(502).json({ error: 'AI returned non-JSON.' }); }
+  try { json = await aiRes.json(); } catch { return res.status(UPSTREAM_STATUS).json({ error: 'AI returned non-JSON.' }); }
   const content = (json && json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content) || '';
   let parsed;
   try {
     const m = content.match(/\{[\s\S]*\}/);
     parsed = JSON.parse(m ? m[0] : content);
-  } catch { return res.status(502).json({ error: 'AI did not return a usable design. Try rephrasing.' }); }
+  } catch { return res.status(UPSTREAM_STATUS).json({ error: 'AI did not return a usable design. Try rephrasing.' }); }
   const design = normalizeDesign(parsed);
-  if (!design.elements.length && !design.background_prompt) return res.status(502).json({ error: 'AI returned an empty design. Try a more specific prompt.' });
+  if (!design.elements.length && !design.background_prompt) return res.status(UPSTREAM_STATUS).json({ error: 'AI returned an empty design. Try a more specific prompt.' });
 
   // Phase 2: generate the AI background + foreground images (best-effort: a failed
   // image never fails the whole design — the text/shapes still come back).
