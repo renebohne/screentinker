@@ -1077,6 +1077,15 @@ async function aiGenerateBackground(container) {
     target.template = target.template || {};
     target.template.background_content_id = out.content_id;
     /*
+     * ⚠️ REFRESH THE CONTENT INDEX, or the picture is invisible. contentUrl() resolves an id
+     * against state.contentIndex — a list cached when the editor opened — so a file created a
+     * moment ago is not in it and the lookup returns null. The slide would carry a correct
+     * background_content_id, save it, publish it, and show a blank stage the whole time: right
+     * data, and an editor that cannot see it. The dropdowns in the Slide tab read the same list,
+     * so they would not offer it either.
+     */
+    await loadContent();
+    /*
      * A readable default scrim. Text sits over this, and a photo at full brightness behind pale
      * type is the single most common way a generated background makes a slide unreadable — the
      * operator can take it back to 0 in the Slide tab if they want the picture untouched.
