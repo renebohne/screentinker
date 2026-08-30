@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.0.0-beta6
+
+Two things that had never worked on a BrightSign now do, both proven on a live XT245 rather than
+argued from the code.
+
+### Added — the server can hold the LAN trigger door for players that cannot
+
+Triggers are player-side by design so an alarm survives the WAN going down — but that needs the
+player to bind a socket, which needs a Node context. BrightSign's server-on-a-player build creates
+its widget **without** `nodejs_enabled` (deliberately: a Node-enabled widget "is NOT Node", and
+hosting the server there cost four boot failures), so the player has no `require`, `dgram` and raw
+`http` both throw, and no listener ever binds. Measured on hardware: trigger ports 7847, 8079 and
+8099 all closed. **Enabling triggers on such a device did nothing whatsoever.** Tizen is in the same
+position and says so honestly in `capabilities.js`.
+
+The server on that board is real Node, so it can hold the door and hand what arrives to the player
+over the socket they already share. On a server-on-a-player the offline guarantee is untouched —
+server and player are the same hardware.
+
+* ⚠️ **The player still decides.** The server resolves only *which device* a payload is addressed to,
+  by its secret, and forwards the wire text verbatim; accept/reject stays in the one resolver both
+  sides already share.
+* ⚠️ The secret sweep **does not break early** (reply time would otherwise leak a device's position
+  in the list), and "no such device" and "wrong transport" answer identically, so an unauthenticated
+  LAN port cannot be used to enumerate secrets or configuration.
+* **Off unless `TRIGGER_INGRESS=1`**, and still gated per device by the same `accept_http` /
+  `accept_udp` flags an operator already sets. Set `TRIGGER_INGRESS_UDP_PORT` to move the port.
+
+Verified on an XT245: a real UDP datagram across the LAN put the alarm on screen; the clear token
+restored the playlist; `GET /api/trigger?secret=…&token=…` did the same.
+
+### Fixed — screenshots on a BrightSign server-on-a-player
+
+⚠️ **The BrightSign screenshot branch had never run on real hardware.** It was gated on
+`device.platform === 'brightsign'`, and a BrightSign reports **`Chrome 148`** — its player is the
+web player inside a Chromium widget. So the special-case, *including the pre-existing snapshot
+queue*, never executed: a capture request was accepted, did nothing, and left the previous frame in
+place. On our test unit that frame was ten days old.
+
+The gate is now what the server can actually do (`@brightsign/screenshot` loads in this process)
+plus a loopback check on the device, since we capture our own framebuffer and must never send it
+labelled as another screen.
+
+⚠️ **If you self-host and rely on BrightSign screenshots, they have not been working.** There is no
+data to repair — no capture was ever taken — but the dashboard's "last screenshot" for those devices
+is as old as whenever it last worked by another route.
+
+Also new: `/api/status` reports **`screen_capture`**, because the absence of a capture is otherwise
+invisible — the request succeeds and nothing happens.
+
 ## 2.0.0-beta5
 
 LAN triggers now work on Android. Until this release they had **never once worked on an Android
