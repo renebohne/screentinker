@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.0.0-beta4
+
+A one-fix release, and the fix is to beta3's own inference. Worth reading if you run beta3.
+
+### Fixed — a stranded play could be credited with hours it did not play
+
+beta3 added a repair that closes a play left open by an outage, using the start of the play that
+followed it. Sound reasoning — but the guard against an implausible span was a blanket 24 hours,
+and that is not tight enough. Deployed to our alpha instance, it closed a **20-second clip with a
+duration of 31,368 seconds** (8h43m): the device had been offline overnight with no backfill
+available, so the "next play" was the following morning and the entire gap was credited to the item.
+
+⚠️ **If you deployed beta3, check for this.** Any row whose `duration_sec` far exceeds the real
+length of its content was inferred wrongly and should be reverted to open:
+
+```sql
+SELECT p.id, p.duration_sec, c.duration_sec AS real_length
+  FROM play_logs p JOIN content c ON c.id = p.content_id
+ WHERE p.ended_at IS NOT NULL AND c.duration_sec > 0
+   AND p.duration_sec > c.duration_sec + 60;
+```
+
+The ceiling now comes from the item's **own length** where we know it — a 20-second clip cannot have
+played for eight hours whatever the gap says — with a short grace for rounding and stalls, and a
+modest absolute cap where the length is unknown (widgets, images with an operator-set dwell). Beyond
+either, the row stays open, which is honest about what we do not know. A genuinely long item still
+closes correctly: a 40-minute video is allowed its 40 minutes, which a small fixed cap would have
+wrongly refused.
+
+The lesson is the one the rest of that module already followed and this guard did not: a missing
+duration reads as missing, but an invented one reads as fact — and would be billed as fact.
+
 ## 2.0.0-beta3
 
 Proof-of-play survives an outage now. Found by accident: a host-maintenance window took our alpha
