@@ -274,7 +274,6 @@ function renderEditor(container) {
       <div class="settings-section" style="padding:12px">
         <!-- aspect-ratio here is only the pre-load default: it is re-set from the deck on every
              paint, because this markup is built before the deck has arrived -->
-        <div id="stage" style="position:relative;aspect-ratio:16/9;border-radius:4px;overflow:hidden;container-type:size"></div>
         <div style="display:flex;gap:9px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
           <button class="btn btn-secondary btn-sm" id="playBtn">▶ Play entrance</button>
           <!--
@@ -290,6 +289,7 @@ function renderEditor(container) {
           </label>
           <span style="margin-left:auto;font-size:12px;color:var(--text-muted)" id="settleLabel"></span>
         </div>
+        <div id="stage" style="position:relative;aspect-ratio:16/9;border-radius:4px;overflow:hidden;container-type:size"></div>
 
       </div>
       <div class="settings-section" style="padding:0">
