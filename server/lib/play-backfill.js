@@ -26,6 +26,13 @@ const BACKFILL_MAX_AGE_SEC = 30 * 24 * 60 * 60;
 const BACKFILL_FUTURE_SKEW_SEC = 5 * 60;
 /** A single item playing for longer than a day is nonsense, however sincerely reported. */
 const BACKFILL_MAX_DURATION_SEC = 24 * 60 * 60;
+/*
+ * Inference caps (see closeStrandedPlays). Deliberately far tighter than the backfill cap above:
+ * a backfilled play states its own end, while an inferred one is derived from a gap that may
+ * contain hours of downtime the item was not playing through.
+ */
+const INFER_GRACE_SEC = 60;            // slack over a known length: rounding, a stalled decoder
+const INFER_UNKNOWN_MAX_SEC = 60 * 60; // widgets/images with no stored length
 
 /**
  * Validate and normalise one offline play.
@@ -85,9 +92,16 @@ function boundBatch(plays) {
  * ⚠️ ONLY WHERE A SUCCESSOR EXISTS. The item genuinely playing right now is the newest row and has
  * none, so it is left open — which is correct, it has not ended.
  *
- * ⚠️ AND ONLY WITHIN A SANE SPAN. If a panel played one item, went dark for a week, and came back,
- * the "next" play is a week later; attributing a week of runtime to that item would be a far bigger
- * lie than leaving it open. Beyond the cap it stays open and honest.
+ * ⚠️ AND ONLY FOR AS LONG AS THE ITEM COULD PLAUSIBLY HAVE PLAYED. This is the guard that matters
+ * most, and a blanket 24h cap was NOT enough: on alpha it closed a 20-second clip with 31,368
+ * seconds — 8.7 hours of "runtime" for one clip — because the device had been offline in between
+ * with no backfill available, so the next play was the following morning. That is precisely the
+ * fabricated-data failure this module refuses elsewhere.
+ *
+ * So the cap is taken from the CONTENT'S OWN LENGTH where we know it: a 20-second clip cannot have
+ * played for eight hours, whatever the gap says. Where the length is unknown (widgets, images with
+ * an operator-set dwell) a modest absolute cap applies instead. Beyond it the row stays open, which
+ * is honest — a missing duration reads as missing; an invented one reads as fact.
  *
  * `completed` is deliberately NOT set. We have evidence it played for that long, not evidence it
  * ran to its end — an error-advance looks identical from here. Duration is the number reports are
@@ -95,27 +109,42 @@ function boundBatch(plays) {
  *
  * @returns {number} rows closed
  */
-function closeStrandedPlays(db, deviceId, maxInferredSec = BACKFILL_MAX_DURATION_SEC) {
+function closeStrandedPlays(db, deviceId, unknownMaxSec = INFER_UNKNOWN_MAX_SEC) {
+  /*
+   * The per-row ceiling is computed INSIDE the subquery. SQLite's UPDATE ... FROM cannot see the
+   * target table from a join in the FROM list, so joining `content` against play_logs.content_id
+   * out there fails with "no such column: play_logs.content_id".
+   */
   const info = db.prepare(`
     UPDATE play_logs
        SET ended_at = nxt.next_start,
            duration_sec = nxt.next_start - play_logs.started_at
-      FROM (SELECT p.id AS id, MIN(n.started_at) AS next_start
+      FROM (SELECT p.id           AS id,
+                   p.started_at   AS p_started,
+                   MIN(n.started_at) AS next_start,
+                   CASE WHEN c.duration_sec IS NOT NULL AND c.duration_sec > 0
+                        THEN c.duration_sec + ?
+                        ELSE ?
+                   END AS allowed
               FROM play_logs p
+              LEFT JOIN content c ON c.id = p.content_id
               JOIN play_logs n
                 ON n.device_id = p.device_id
                AND n.started_at > p.started_at
-               -- ⚠️ SAME ZONE ONLY. A multi-zone device plays several items AT ONCE, so the next
-               -- row for the device can belong to a different zone that started while this one was
+               -- SAME ZONE ONLY. A multi-zone device plays several items AT ONCE, so the next row
+               -- for the device can belong to a different zone that started while this one was
                -- still on screen. Closing against it would cut the play short and under-report it.
                -- IS rather than = so the fullscreen case (zone_id NULL) matches itself.
-               -- (No backticks in here: this is inside a JS template literal and they would end it.)
+               -- (No backticks in here: this is a JS template literal and they would end it.)
                AND n.zone_id IS p.zone_id
              WHERE p.device_id = ? AND p.ended_at IS NULL
              GROUP BY p.id) AS nxt
      WHERE play_logs.id = nxt.id
-       AND nxt.next_start - play_logs.started_at <= ?
-  `).run(deviceId, maxInferredSec);
+       -- The item's OWN length is the ceiling where we know it; a 20s clip cannot have played for
+       -- hours however long the gap says. Anything beyond stays open rather than being credited
+       -- with downtime it slept through.
+       AND nxt.next_start - nxt.p_started <= nxt.allowed
+  `).run(INFER_GRACE_SEC, unknownMaxSec, deviceId);
   return info.changes;
 }
 
@@ -127,4 +156,6 @@ module.exports = {
   BACKFILL_MAX_AGE_SEC,
   BACKFILL_FUTURE_SKEW_SEC,
   BACKFILL_MAX_DURATION_SEC,
+  INFER_GRACE_SEC,
+  INFER_UNKNOWN_MAX_SEC,
 };

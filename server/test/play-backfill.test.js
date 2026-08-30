@@ -22,6 +22,7 @@ const {
   normalizeBackfillPlay,
   boundBatch,
   closeStrandedPlays,
+  INFER_UNKNOWN_MAX_SEC,
   MAX_BACKFILL_BATCH,
   BACKFILL_MAX_AGE_SEC,
   BACKFILL_FUTURE_SKEW_SEC,
@@ -117,6 +118,7 @@ function freshDb() {
     );
     CREATE UNIQUE INDEX idx_play_logs_client_event
       ON play_logs(client_event_id) WHERE client_event_id IS NOT NULL;
+    CREATE TABLE content (id TEXT PRIMARY KEY, duration_sec INTEGER);
   `);
   return db;
 }
@@ -299,4 +301,76 @@ test('an empty table is a no-op, not an error', () => {
   const db = freshDb();
   assert.doesNotThrow(() => closeStrandedPlays(db, 'dev1'));
   assert.equal(closeStrandedPlays(db, 'dev1'), 0);
+});
+
+/* ============ the cap, tightened after it wrote 8.7 hours of runtime for a 20-second clip ============ */
+
+/*
+ * ⚠️ THIS IS THE BUG THE FIRST VERSION SHIPPED WITH, caught on alpha within minutes of deploying.
+ * The cap was a blanket 24 hours, so when a device had been offline overnight with no backfill
+ * available, the "next play" was the following morning — and a 20-second clip was closed with
+ * dur=31368 (8h43m). A fabricated duration in a billing report is exactly what the rest of this
+ * module refuses to produce, and the cap was the only thing standing between an inference and that.
+ *
+ * The item's own length is the ceiling now: a 20s clip cannot have played for hours, whatever the
+ * gap says.
+ */
+
+const withContent = (db, id, len) => db.prepare('INSERT INTO content (id, duration_sec) VALUES (?, ?)').run(id, len);
+
+test('⚠️ A 20-SECOND CLIP IS NEVER CREDITED WITH HOURS', () => {
+  const db = freshDb();
+  withContent(db, 'c1', 20);
+  addRow(db, { content_id: 'c1', started_at: NOW - 31368 });          // stranded overnight
+  addRow(db, { content_id: 'c1', started_at: NOW, ended_at: NOW + 20 });
+  assert.equal(closeStrandedPlays(db, 'dev1'), 0, 'a 20s clip must not absorb an 8h gap');
+  assert.equal(db.prepare('SELECT ended_at FROM play_logs ORDER BY started_at').get().ended_at, null,
+    'it must stay OPEN — a missing duration reads as missing, an invented one reads as fact');
+});
+
+test('a normal gap still closes, using the item length as the ceiling', () => {
+  const db = freshDb();
+  withContent(db, 'c1', 20);
+  addRow(db, { content_id: 'c1', started_at: NOW - 20 });
+  addRow(db, { content_id: 'c1', started_at: NOW, ended_at: NOW + 20 });
+  assert.equal(closeStrandedPlays(db, 'dev1'), 1);
+  assert.equal(db.prepare('SELECT duration_sec FROM play_logs ORDER BY started_at').get().duration_sec, 20);
+});
+
+test('a little slack over the known length is allowed, a lot is not', () => {
+  // Rounding and a stalled decoder can push a play slightly past its nominal length.
+  const db = freshDb();
+  withContent(db, 'c1', 20);
+  addRow(db, { content_id: 'c1', started_at: NOW - 50 });             // 30s over nominal
+  addRow(db, { content_id: 'c1', started_at: NOW, ended_at: NOW + 10 });
+  assert.equal(closeStrandedPlays(db, 'dev1'), 1, 'modest overrun should still close');
+
+  const db2 = freshDb();
+  withContent(db2, 'c1', 20);
+  addRow(db2, { content_id: 'c1', started_at: NOW - 600 });           // 10 minutes for a 20s clip
+  addRow(db2, { content_id: 'c1', started_at: NOW, ended_at: NOW + 10 });
+  assert.equal(closeStrandedPlays(db2, 'dev1'), 0, 'a wild overrun must not close');
+});
+
+test('a LONG item is allowed its real length', () => {
+  // The cap is the content's own duration, so a 40-minute video closes at 40 minutes — a fixed
+  // small cap would have wrongly refused this.
+  const db = freshDb();
+  withContent(db, 'film', 2400);
+  addRow(db, { content_id: 'film', started_at: NOW - 2400 });
+  addRow(db, { content_id: 'film', started_at: NOW, ended_at: NOW + 10 });
+  assert.equal(closeStrandedPlays(db, 'dev1'), 1);
+  assert.equal(db.prepare('SELECT duration_sec FROM play_logs ORDER BY started_at').get().duration_sec, 2400);
+});
+
+test('unknown length (a widget) falls back to a modest absolute cap', () => {
+  const db = freshDb();
+  addRow(db, { content_id: null, started_at: NOW - 300 });            // no content row to join
+  addRow(db, { content_id: null, started_at: NOW, ended_at: NOW + 10 });
+  assert.equal(closeStrandedPlays(db, 'dev1'), 1, 'a 5-minute widget dwell is plausible');
+
+  const db2 = freshDb();
+  addRow(db2, { content_id: null, started_at: NOW - (INFER_UNKNOWN_MAX_SEC + 600) });
+  addRow(db2, { content_id: null, started_at: NOW, ended_at: NOW + 10 });
+  assert.equal(closeStrandedPlays(db2, 'dev1'), 0, 'beyond the fallback cap it stays open');
 });
