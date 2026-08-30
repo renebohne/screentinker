@@ -528,11 +528,12 @@ router.post('/generate-background', async (req, res) => {
       model: row.image_model,
       prompt,
       /*
-       * 16:9 to match the slide stage. A square background gets letterboxed or cropped, and the
-       * operator only finds out after it is on a screen.
+       * The DECK'S shape, not a fixed 16:9 — a portrait deck given a landscape background crops to
+       * a centre band. Clamped, because these numbers pick an aspect ratio at the provider and a
+       * hostile pair should not turn into an absurd request.
        */
-      width: 1792,
-      height: 1024,
+      width: clampN(req.body && req.body.width, 256, 4096, 1792),
+      height: clampN(req.body && req.body.height, 256, 4096, 1024),
       timeoutMs: 180000,
     });
   } catch (e) {

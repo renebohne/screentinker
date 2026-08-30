@@ -147,3 +147,37 @@ test('normalizeDeck is still total — junk in never throws', () => {
     assert.doesNotThrow(() => deckWith(t, null), `threw on ${JSON.stringify(t)}`);
   }
 });
+
+/* ============ the deck's authoring shape ============ */
+
+/*
+ * ⚠️ normalizeDeck RETURNS A NEW OBJECT, so anything not named in it is dropped on every save.
+ * That is exactly how background_content_id was once lost, and a deck quietly reverting to
+ * landscape on each save would be the same bug wearing a different hat.
+ */
+
+test('⚠️ a portrait deck stays portrait across a save', () => {
+  const out = normalizeDeck({ aspect: '9:16', slides: [{ name: 'S', template: {}, fields: {} }] });
+  assert.equal(out.aspect, '9:16');
+});
+
+test('a deck with no shape defaults to landscape', () => {
+  assert.equal(normalizeDeck({ slides: [] }).aspect, '16:9');
+  assert.equal(normalizeDeck({}).aspect, '16:9');
+});
+
+test('⚠️ an arbitrary shape is refused', () => {
+  /*
+   * This value goes straight into a CSS aspect-ratio in the editor, so a free-form string is both a
+   * rendering accident and an injection point.
+   */
+  for (const bad of ['9/16; background:url(x)', '"><script>', 'auto', '', null, 42, {}]) {
+    assert.equal(normalizeDeck({ aspect: bad, slides: [] }).aspect, '16:9', `accepted ${JSON.stringify(bad)}`);
+  }
+});
+
+test('every offered shape survives', () => {
+  for (const a of ['16:9', '9:16', '4:3', '3:4', '1:1', '21:9']) {
+    assert.equal(normalizeDeck({ aspect: a, slides: [] }).aspect, a);
+  }
+});

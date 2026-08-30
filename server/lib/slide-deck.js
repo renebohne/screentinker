@@ -38,6 +38,14 @@ const nowSec = () => Math.floor(Date.now() / 1000);
  * unopenable because one field went strange. Anything unrecognised is dropped, anything out of
  * range is clamped, and what comes back is always publishable.
  */
+/**
+ * Shapes a deck may be authored in. The RENDERER needs none of this — it is width:100%/height:100%
+ * with every size in cqw, so a slide already fills whatever container a screen gives it. This
+ * exists so the EDITOR can show the operator the canvas they are actually designing for: a portrait
+ * screen laid out on a 16:9 stage looks right in the editor and wrong on the wall.
+ */
+const ASPECTS = ['16:9', '9:16', '4:3', '3:4', '1:1', '21:9'];
+
 function normalizeDeck(raw) {
   const doc = (raw && typeof raw === 'object') ? raw : {};
   const slidesIn = Array.isArray(doc.slides) ? doc.slides.slice(0, MAX_SLIDES) : [];
@@ -64,7 +72,19 @@ function normalizeDeck(raw) {
     };
   });
 
-  return { slides };
+  /*
+   * ⚠️ ASPECT IS RETURNED EXPLICITLY, because this function returns a NEW object rather than
+   * editing the one it was given — anything not named here is dropped on every save. That is the
+   * same mechanism that once lost background_content_id, documented at length below, and a deck
+   * silently reverting to landscape every time it was saved would be the identical bug wearing a
+   * different hat.
+   *
+   * Whitelisted rather than free-form: it goes straight into a CSS aspect-ratio in the editor, and
+   * an arbitrary string there is both a rendering accident and an injection point.
+   */
+  const aspect = ASPECTS.includes(doc.aspect) ? doc.aspect : '16:9';
+
+  return { slides, aspect };
 }
 
 /*
@@ -284,4 +304,5 @@ function publishDeck(db, { deck, doc, userId, playlistId, publishedWidgetIds }) 
 module.exports = {
   MAX_SLIDES, MIN_DWELL, MAX_DWELL,
   normalizeDeck, deckWarnings, publishDeck,
+  ASPECTS,
 };

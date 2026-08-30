@@ -580,7 +580,7 @@ export const api = {
   // Generates a picture AND ingests it into the content library, returning a real content_id — a
   // slide references its background by id because the file has to reach a screen and be playable
   // with the WAN down, which an inline data: URL never could.
-  aiGenerateBackground: (prompt) => request('/ai/generate-background', { method: 'POST', body: JSON.stringify({ prompt }) }),
+  aiGenerateBackground: (prompt, dims) => request('/ai/generate-background', { method: 'POST', body: JSON.stringify({ prompt, ...(dims || {}) }) }),
   aiListModels: (base_url, api_key) => request('/ai/models', { method: 'POST', body: JSON.stringify({ base_url, api_key }) }),
 
   // Instance-level default branding (#15, platform admin).

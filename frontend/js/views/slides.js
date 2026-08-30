@@ -272,9 +272,22 @@ function renderEditor(container) {
     <div style="display:grid;grid-template-columns:42px minmax(0,1fr) 290px;gap:12px;align-items:start">
       <div class="settings-section" id="tools" style="padding:7px;display:flex;flex-direction:column;gap:5px"></div>
       <div class="settings-section" style="padding:12px">
+        <!-- aspect-ratio here is only the pre-load default: it is re-set from the deck on every
+             paint, because this markup is built before the deck has arrived -->
         <div id="stage" style="position:relative;aspect-ratio:16/9;border-radius:4px;overflow:hidden;container-type:size"></div>
-        <div style="display:flex;gap:9px;align-items:center;margin-top:10px;flex-wrap:wrap">
+        <div style="display:flex;gap:9px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
           <button class="btn btn-secondary btn-sm" id="playBtn">▶ Play entrance</button>
+          <!--
+            The canvas shape. Editor-only: the renderer fills whatever container a screen gives it,
+            so this changes what you DESIGN against, not what ships. A portrait screen laid out on a
+            16:9 stage looks right here and wrong on the wall, which is the whole reason it exists.
+          -->
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted)">
+            Shape
+            <select id="aspectSel" class="input" style="margin:0;padding:3px 6px;font-size:12px">
+              ${ASPECT_CHOICES.map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join('')}
+            </select>
+          </label>
           <span style="margin-left:auto;font-size:12px;color:var(--text-muted)" id="settleLabel"></span>
         </div>
 
@@ -299,6 +312,11 @@ function renderEditor(container) {
   container.querySelector('#saveBtn').addEventListener('click', () => save(container));
   container.querySelector('#pubBtn').addEventListener('click', () => publish(container));
   container.querySelector('#playBtn').addEventListener('click', play);
+  container.querySelector('#aspectSel').addEventListener('change', (e) => {
+    state.deck.doc.aspect = e.target.value;
+    touch(container);
+    paintAll(container);
+  });
   container.querySelector('#aiGenBtn').addEventListener('click', () => aiGenerate(container));
   container.querySelector('#aiBgBtn').addEventListener('click', () => aiGenerateBackground(container));
   container.querySelector('#aiPrompt').addEventListener('keydown', (e) => {
@@ -399,6 +417,9 @@ function styleFor(e) {
 function renderStage(container) {
   const s = slide(); const stage = container.querySelector('#stage');
   if (!s) { stage.innerHTML = ''; return; }
+  stage.style.aspectRatio = aspectCss();      // the shape this deck is authored for
+  const sel = container.querySelector('#aspectSel');
+  if (sel && sel.value !== deckAspect()) sel.value = deckAspect();
   stage.style.background = s.template.background || '#000';
   stage.innerHTML = '';
   /*
@@ -525,7 +546,7 @@ function renderStrip(container) {
   container.querySelector('#strip').innerHTML = d.doc.slides.map((s, i) => `
     <button data-slide="${i}" style="flex:0 0 auto;width:124px;padding:0;cursor:pointer;text-align:left;
       border:1px solid ${i === state.si ? 'var(--primary)' : 'var(--border)'};border-radius:4px;overflow:hidden;background:var(--surface)">
-      <div style="position:relative;aspect-ratio:16/9;container-type:size;background:${esc(s.template.background || '#000')}">
+      <div style="position:relative;aspect-ratio:${esc(aspectCss())};container-type:size;background:${esc(s.template.background || '#000')}">
         ${contentUrl(s.template.background_content_id) ? `<div style="position:absolute;inset:0;background-size:cover;background-position:center;background-image:url(${esc(contentUrl(s.template.background_content_id))})"></div>` : ''}
         ${(s.template.background_dim || 0) > 0 && contentUrl(s.template.background_content_id) ? `<div style="position:absolute;inset:0;background:rgba(0,0,0,${s.template.background_dim})"></div>` : ''}
         ${elementsOf(s).map((e) => `<div style="position:absolute;overflow:hidden;${esc(styleFor(e))}">${
@@ -1070,7 +1091,12 @@ async function aiGenerateBackground(container) {
   btn.textContent = 'Generating…';
   say('Generating a background — this can take a minute.');
   try {
-    const out = await api.aiGenerateBackground(prompt);
+    /*
+     * ⚠️ ASK FOR THE DECK'S SHAPE, not a fixed 16:9. A portrait deck given a landscape background
+     * crops to a centre band, which is exactly the complaint that made xAI's aspect_ratio matter
+     * in the first place — repeating it locally would be worse, because here we know the answer.
+     */
+    const out = await api.aiGenerateBackground(prompt, aspectPixels());
     if (!out || !out.content_id) throw new Error('no image came back');
     const idx = state.deck.doc.slides.indexOf(target);
     if (idx < 0) { say('That slide is gone — nothing changed.', true); return; }
@@ -1215,6 +1241,36 @@ async function aiGenerate(container) {
 }
 
 /* ============================================================ content */
+
+/*
+ * The deck's authoring shape as a CSS aspect-ratio.
+ *
+ * ⚠️ EDITOR-ONLY. The renderer is already shape-agnostic — width:100%/height:100% with every size
+ * in cqw — so a slide fills whatever container a screen gives it. This exists so the operator
+ * designs on the canvas they will actually get: laying a portrait screen out on a 16:9 stage looks
+ * right here and wrong on the wall.
+ */
+const ASPECT_CHOICES = [
+  ['16:9', 'Landscape 16:9'], ['9:16', 'Portrait 9:16'],
+  ['4:3', 'Landscape 4:3'], ['3:4', 'Portrait 3:4'],
+  ['1:1', 'Square'], ['21:9', 'Ultrawide 21:9'],
+];
+
+function deckAspect() {
+  const a = state.deck && state.deck.doc && state.deck.doc.aspect;
+  return ASPECT_CHOICES.some(([v]) => v === a) ? a : '16:9';
+}
+
+/** CSS wants `16/9`, the stored value is `16:9`. */
+function aspectCss() { return deckAspect().replace(':', '/'); }
+
+/** Pixel dimensions to ask an image generator for, in the deck's shape. */
+function aspectPixels() {
+  const [w, h] = deckAspect().split(':').map(Number);
+  const long = 1792;
+  return w >= h ? { width: long, height: Math.round(long * h / w) }
+    : { height: long, width: Math.round(long * w / h) };
+}
 
 function contentUrl(id) {
   if (!id) return null;
