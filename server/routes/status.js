@@ -39,6 +39,17 @@ router.get('/', (req, res) => {
     // (from the heartbeat connection map), NOT devices.status='online' (which lags by
     // the offline-timeout). The single most-glanced operational number; never gated.
     devices_connected: heartbeat.getConnectedCount(),
+    /*
+     * Can THIS process capture the screen? True only on a BrightSign whose Node context can load
+     * @brightsign/screenshot — i.e. a server-on-a-player, where the player's own widget has no
+     * `require` and therefore cannot capture itself.
+     *
+     * ⚠️ Reported because its ABSENCE is invisible otherwise. A capture request is accepted, does
+     * nothing, and leaves the previous screenshot in place: on a live XT245 that meant a ten-day-old
+     * frame while every request returned success. One boolean on the health endpoint is the
+     * difference between "screenshots are broken here" and an afternoon of guessing.
+     */
+    screen_capture: require('../lib/brightsign-capture').available(),
   };
 
   // #146: the debug block is admin-toggleable (app_settings.status_debug_enabled),

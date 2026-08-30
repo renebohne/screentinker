@@ -29,15 +29,45 @@
  */
 
 /** Volumes to write the capture into, RAM first. */
+/** How long to wait for the capture file to appear, and how often to look. */
+const CAPTURE_TIMEOUT_MS = 8000;
+const CAPTURE_POLL_MS = 120;
+
 const CANDIDATE_DIRS = ['/storage/tmp', '/tmp', '/storage/ssd', '/storage/usb1', '/storage/sd', '/storage/flash'];
 
 function tryRequire(name) {
   try { return require(name); } catch (e) { return null; }
 }
 
-/** Is this process running on a BrightSign with the capture API available? */
+/*
+ * ⚠️ SAYS SO ONCE, OUT LOUD. The first version logged nothing when the module was absent, so a
+ * capture that never happened was indistinguishable from one that failed — and working out which
+ * cost a patch-and-reboot cycle on real hardware. One line at first use is the whole difference.
+ */
+let announced = false;
+
+/** Is this process running somewhere the capture API actually exists? */
 function available() {
-  return !!(tryRequire('@brightsign/screenshot') && tryRequire('fs'));
+  const ok = !!(tryRequire('@brightsign/screenshot') && tryRequire('fs'));
+  if (!announced) {
+    announced = true;
+    console.log('[bs-capture] @brightsign/screenshot ' + (ok ? 'available in this process' : 'NOT available in this process'));
+  }
+  return ok;
+}
+
+/**
+ * Is this address the same machine?
+ *
+ * ⚠️ THE ONLY HONEST TEST FOR "this device is on this board". We capture OUR framebuffer, so
+ * sending it for a device elsewhere would be a picture of the wrong screen, convincingly labelled.
+ * The device's self-reported platform cannot decide this — a BrightSign reports "Chrome 148",
+ * because the player is a Chromium widget — and that mistake is exactly why the pre-existing
+ * BrightSign screenshot branch never once ran on real hardware.
+ */
+function isLoopback(ip) {
+  const v = String(ip || '').trim().toLowerCase();
+  return v === '127.0.0.1' || v === '::1' || v === '::ffff:127.0.0.1' || v === 'localhost';
 }
 
 /**
@@ -85,6 +115,8 @@ function capture(opts) {
     if (!dir) return resolve(null);
 
     const file = `${dir}/${captureName(Date.now())}`;
+    let shot0;
+    try { shot0 = new ScreenshotClass(); } catch (e) { return resolve(null); }
     const params = {
       destinationFileName: file,
       fileName: file,                 // deprecated alias, still honoured on older firmware
@@ -105,22 +137,101 @@ function capture(opts) {
       resolve(value);
     };
 
+    /*
+     * ⚠️ THE METHOD IS syncCapture / asyncCapture — THERE IS NO `capture`.
+     *
+     * Enumerated on a live XT245 (OS 10.0.16): the instance offers callback, syncCapture,
+     * asyncCapture, addEventListener, removeEventListener and toJSON, while its prototype carries
+     * only `constructor`. The first version of this file called `shot.capture(params)` and failed
+     * on hardware with "shot.capture is not a function" — st-bridge.js had it right all along, and
+     * this is simply the same resolution as its page-side path.
+     *
+     * asyncCapture first: it does not block the event loop of a server that is also feeding screens.
+     * syncCapture next (it interrupts on-screen operations, which is why it is not the default),
+     * and `capture` last in case a future firmware adds that name.
+     */
+    const method = typeof shot0.asyncCapture === 'function' ? 'asyncCapture'
+      : typeof shot0.syncCapture === 'function' ? 'syncCapture'
+      : typeof shot0.capture === 'function' ? 'capture'
+      : null;
+    if (!method) return done(null);
+
+    /*
+     * ⚠️ POLL FOR THE FILE; DO NOT TRUST THE RETURN VALUE. sync and async differ in what they hand
+     * back, and the documented contract is "a file appears", not "a promise settles" — st-bridge.js
+     * reached the same conclusion on the page side. Awaiting the return happened to work in a probe
+     * here, which is exactly the kind of accident that turns into an intermittent empty screenshot
+     * on somebody else's firmware.
+     */
     try {
-      const shot = new ScreenshotClass();
-      Promise.resolve(shot.capture(params))
-        .then(() => {
-          try {
-            if (!fs.existsSync(file)) return done(null);
-            const buf = fs.readFileSync(file);
-            if (!buf || buf.length < 100) return done(null);
-            done(buf.toString('base64'));
-          } catch (e) { done(null); }
-        })
-        .catch(() => done(null));
+      shot0[method](params);
     } catch (e) {
-      done(null);
+      return done(null);
     }
+
+    const deadline = Date.now() + CAPTURE_TIMEOUT_MS;
+    const tick = () => {
+      let st = null;
+      try { st = fs.statSync(file); } catch (e) { st = null; }
+      if (st && st.size > 512) {
+        try {
+          const buf = fs.readFileSync(file);
+          return done(buf && buf.length >= 100 ? buf.toString('base64') : null);
+        } catch (e) { return done(null); }
+      }
+      if (Date.now() > deadline) return done(null);
+      setTimeout(tick, CAPTURE_POLL_MS);
+    };
+    setTimeout(tick, CAPTURE_POLL_MS);
   });
 }
 
-module.exports = { available, capture, pickDir, captureName, CANDIDATE_DIRS };
+/**
+ * Diagnose the capture path stage by stage.
+ *
+ * ⚠️ WRITTEN BECAUSE A SILENT NULL COST TWO REBOOT CYCLES. capture() answers null for six different
+ * reasons — no module, no fs, no writable volume, the API threw, no file appeared, the file was
+ * empty — and on hardware they are indistinguishable from each other and from "the gate never let
+ * it run". This reports which, and nothing here returns image bytes, so it is safe to read from a
+ * diagnostic endpoint.
+ */
+async function probe(opts) {
+  const out = { module: false, fs: false, dir: null, called: false, wrote: false, bytes: 0, error: null, api: null };
+  const ScreenshotClass = tryRequire('@brightsign/screenshot');
+  const fs = tryRequire('fs');
+  out.module = !!ScreenshotClass;
+  out.fs = !!fs;
+  if (!ScreenshotClass || !fs) return out;
+  try {
+    // What shape is it? A class, a factory, or an object with a method — the docs 404 and the
+    // page-side caller has never been proven to run, so the shape is genuinely unknown here.
+    out.api = { type: typeof ScreenshotClass, keys: Object.keys(ScreenshotClass || {}).slice(0, 8),
+                proto: Object.getOwnPropertyNames((ScreenshotClass && ScreenshotClass.prototype) || {}).slice(0, 12) };
+  } catch (e) { /* introspection is best-effort */ }
+  const dir = pickDir(fs);
+  out.dir = dir;
+  if (!dir) return out;
+  const file = `${dir}/${captureName(Date.now())}`;
+  try {
+    const shot = new ScreenshotClass();
+    out.method = typeof shot.asyncCapture === 'function' ? 'asyncCapture'
+      : typeof shot.syncCapture === 'function' ? 'syncCapture'
+      : typeof shot.capture === 'function' ? 'capture' : null;
+    out.called = true;
+    if (!out.method) return out;
+    await Promise.resolve(shot[out.method]({
+      destinationFileName: file, fileName: file, fileType: 'JPEG',
+      width: (opts && opts.width) || 960, height: (opts && opts.height) || 540,
+      quality: 70, rotation: 0,
+    }));
+    out.wrote = fs.existsSync(file);
+    if (out.wrote) out.bytes = fs.statSync(file).size;
+  } catch (e) {
+    out.error = String((e && e.message) || e);
+  } finally {
+    try { fs.unlinkSync(file); } catch (e) { /* nothing to clean */ }
+  }
+  return out;
+}
+
+module.exports = { available, capture, probe, pickDir, captureName, isLoopback, CANDIDATE_DIRS };

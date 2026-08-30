@@ -90,3 +90,36 @@ test('pickDir takes the FIRST existing candidate', () => {
   const fs = { existsSync: (p) => p === '/tmp' || p === '/storage/flash' };
   assert.equal(cap.pickDir(fs), '/tmp', 'RAM must win over flash when both exist');
 });
+
+/* ============ which device is "this board" ============ */
+
+/*
+ * ⚠️ THE BUG THAT MADE ALL OF THE ABOVE MOOT. The pre-existing BrightSign screenshot branch was
+ * gated on `device.platform === 'brightsign'` — and a BrightSign reports **"Chrome 148"**, because
+ * its player is the web player inside a Chromium widget. Verified on a live XT245. So that branch
+ * never ran once on real hardware, and the device's stored capture sat ten days stale while every
+ * request was accepted and silently did nothing.
+ *
+ * Capability plus loopback replaces it: can THIS process capture, and is that device on THIS board.
+ * Neither is self-reported by the thing being asked about.
+ */
+
+test('⚠️ loopback in every form the stack produces', () => {
+  for (const ip of ['127.0.0.1', '::1', '::ffff:127.0.0.1', 'localhost', ' 127.0.0.1 ', 'LOCALHOST']) {
+    assert.equal(cap.isLoopback(ip), true, `${JSON.stringify(ip)} should count as local`);
+  }
+});
+
+test('⚠️ a device somewhere else is NOT local', () => {
+  // We capture OUR framebuffer. Sending it for a panel across the room would be a picture of the
+  // wrong screen, labelled convincingly — worse than no screenshot at all.
+  for (const ip of ['192.168.1.46', '10.0.0.5', '::ffff:192.168.1.46', '', null, undefined, '127.0.0.2']) {
+    assert.equal(cap.isLoopback(ip), false, `${JSON.stringify(ip)} must not count as local`);
+  }
+});
+
+test('a self-reported platform string is not consulted at all', () => {
+  // The whole point: "Chrome 148" is what a BrightSign says, so the decision cannot rest on it.
+  const src = require('fs').readFileSync(require.resolve('../lib/brightsign-capture.js'), 'utf8');
+  assert.ok(!/platform/i.test(src.replace(/\/\*[\s\S]*?\*\//g, '')), 'capture must not branch on a platform string');
+});

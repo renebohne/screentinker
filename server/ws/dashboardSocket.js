@@ -113,29 +113,42 @@ module.exports = function setupDashboardSocket(io) {
       // after load on that platform. So the host polls for this over HTTP, the one direction that
       // works. See lib/brightsign-snapshot-queue.js.
       try {
-        const row = db.prepare('SELECT platform FROM devices WHERE id = ?').get(device_id);
+        const row = db.prepare('SELECT platform, ip_address FROM devices WHERE id = ?').get(device_id);
+
+        /*
+         * ⚠️ THIS GATE HAS NEVER MATCHED A REAL BRIGHTSIGN, and that is worth knowing before
+         * trusting it. A BrightSign runs the web player inside a Chromium widget, so it reports
+         * `platform = "Chrome 148"` — not "brightsign". Verified on an XT245. So the queue below
+         * has never been populated for any BrightSign, on either build shape. It is left as-is
+         * rather than widened because nothing collects that queue either (neither autorun polls
+         * the two endpoints built for it), so changing it would swap one inert path for another.
+         * Fix the collector and this gate together, or delete both.
+         */
         if (row && String(row.platform || '').toLowerCase() === 'brightsign') {
           bsSnapshotQueue.request(device_id, { width: 960, height: 540 });
+        }
 
-          /*
-           * ⚠️ AND ON A SERVER-ON-A-PLAYER, CAPTURE IT OURSELVES — neither path above reaches that
-           * shape. Its widget is created WITHOUT nodejs_enabled, so the page has no `require` and
-           * cannot use @brightsign/screenshot; and brightsign/server/autorun.brs contains no
-           * snapshot code at all, so nothing ever collects the queued request. Screenshots simply
-           * did not work there, by either route.
-           *
-           * This server runs under roNodeJs, which IS real Node, so the same module the widget
-           * would have used is an ordinary import here. Result goes through ingestScreenshot, the
-           * identical path every other player's capture takes, so the dashboard sees no difference.
-           *
-           * Best-effort and last: if the page or the host does answer, theirs arrives too and the
-           * newest frame wins. This only fills a silence.
-           */
-          if (bsCapture.available()) {
-            bsCapture.capture({ width: 960, height: 540 })
-              .then((b64) => { if (b64) bsDeviceSocketRef.ingestScreenshot(device_id, b64); })
-              .catch(() => { /* a capture that fails is a missing picture, never an error path */ });
-          }
+        /*
+         * ⚠️ CAPTURE FROM THIS PROCESS, GATED ON WHAT WE CAN ACTUALLY DO — not on what the device
+         * calls itself. `bsCapture.available()` is true only when THIS server can load
+         * @brightsign/screenshot, which is exactly the condition under which capturing here is
+         * possible; a self-reported browser string is neither necessary nor sufficient, as the
+         * "Chrome 148" above proves.
+         *
+         * ⚠️ AND ONLY FOR A DEVICE ON THIS BOARD. We capture OUR framebuffer, so sending it for a
+         * device somewhere else would be a picture of the wrong screen, labelled convincingly. On a
+         * server-on-a-player the local player connects over loopback, which is the one property
+         * that actually distinguishes it from a mesh child or a panel across the room.
+         *
+         * Why this is needed at all: that build creates its widget WITHOUT nodejs_enabled, so the
+         * page has no `require` and cannot capture; and brightsign/server/autorun.brs has no
+         * snapshot code, so the host cannot either. Best-effort and additive — if another path does
+         * answer, the newest frame simply wins.
+         */
+        if (bsCapture.isLoopback(row && row.ip_address) && bsCapture.available()) {
+          bsCapture.capture({ width: 960, height: 540 })
+            .then((b64) => { if (b64) bsDeviceSocketRef.ingestScreenshot(device_id, b64); })
+            .catch(() => { /* a capture that fails is a missing picture, never an error path */ });
         }
       } catch (e) { /* the socket path already fired; queueing is the bonus, never the blocker */ }
       if (typeof ack === 'function') ack({ delivered: !!conn, reason: conn ? undefined : 'offline' });
