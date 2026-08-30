@@ -7,6 +7,9 @@ const { protectSocket } = require('../lib/safe-socket');
 const playerCapabilities = require('../lib/player-capabilities');
 const { deliverCommand } = require('../lib/device-command');
 const bsSnapshotQueue = require('../lib/brightsign-snapshot-queue');
+// Server-side framebuffer capture, for a BrightSign whose player cannot capture itself.
+const bsCapture = require('../lib/brightsign-capture');
+const bsDeviceSocketRef = require('./deviceSocket');
 
 // Phase 2.3: workspace-scoped socket rooms + per-command permission gates.
 // Replaces the previous flat dashboardNs.emit broadcast (which leaked every
@@ -113,6 +116,26 @@ module.exports = function setupDashboardSocket(io) {
         const row = db.prepare('SELECT platform FROM devices WHERE id = ?').get(device_id);
         if (row && String(row.platform || '').toLowerCase() === 'brightsign') {
           bsSnapshotQueue.request(device_id, { width: 960, height: 540 });
+
+          /*
+           * ⚠️ AND ON A SERVER-ON-A-PLAYER, CAPTURE IT OURSELVES — neither path above reaches that
+           * shape. Its widget is created WITHOUT nodejs_enabled, so the page has no `require` and
+           * cannot use @brightsign/screenshot; and brightsign/server/autorun.brs contains no
+           * snapshot code at all, so nothing ever collects the queued request. Screenshots simply
+           * did not work there, by either route.
+           *
+           * This server runs under roNodeJs, which IS real Node, so the same module the widget
+           * would have used is an ordinary import here. Result goes through ingestScreenshot, the
+           * identical path every other player's capture takes, so the dashboard sees no difference.
+           *
+           * Best-effort and last: if the page or the host does answer, theirs arrives too and the
+           * newest frame wins. This only fills a silence.
+           */
+          if (bsCapture.available()) {
+            bsCapture.capture({ width: 960, height: 540 })
+              .then((b64) => { if (b64) bsDeviceSocketRef.ingestScreenshot(device_id, b64); })
+              .catch(() => { /* a capture that fails is a missing picture, never an error path */ });
+          }
         }
       } catch (e) { /* the socket path already fired; queueing is the bonus, never the blocker */ }
       if (typeof ack === 'function') ack({ delivered: !!conn, reason: conn ? undefined : 'offline' });
