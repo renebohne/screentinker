@@ -1,5 +1,61 @@
 # Changelog
 
+## 2.0.0-beta5
+
+LAN triggers now work on Android. Until this release they had **never once worked on an Android
+panel** — three separate defects, each invisible to the test suite, all found by firing a real
+trigger at a real device for the first time.
+
+### Fixed — the overlay was built on a network thread, so it was never visible
+
+`TriggerListeners` reads its datagram (or HTTP request) on its own thread and called straight
+through to `TriggerOverlay.show()`, which constructs Views and attaches them. The failure mode was
+the worst kind: no crash, no log. `dumpsys` showed the box really was a child of the layer — and
+measuring **0×0**, because it never got a layout pass.
+
+So the trigger "fired", the controller logged it, the lease ran, the state machine believed a screen
+was covered, and the panel carried on playing its playlist. That is the reported "triggers are
+inert", exactly. Every view touch now goes through the main-thread handler the class already had.
+
+### Fixed — UDP was dead whenever no multicast group was configured (the default)
+
+⚠️ **`org.json`'s `optString` returns the STRING `"null"` for a JSON null on Android.** The server
+sends `multicast_group: null` when unset, and that string reached `InetAddress.getByName()` from
+*outside* `joinGroup`'s try — so it threw all the way out and killed the whole listener thread,
+including the unicast and broadcast paths that never needed a group at all.
+
+⚠️ **The same trap hits two neighbours, and one is security-relevant.** `secret: null` became the
+string `"null"`, and a fire is refused only when the device secret `isNullOrEmpty()` — which
+`"null"` is not. **A device with trigger listeners enabled and no secret set accepted
+`ST1 null <token>` instead of refusing everything.** `clear_all_token: null` likewise made the
+literal token `"null"` clear every active trigger.
+
+**If you have trigger listeners enabled, set a secret** (`POST /api/devices/:id/trigger-secret`).
+Devices on this release refuse every fire until one is set, which is what should always have
+happened.
+
+⚠️ A JVM test cannot reproduce any of this: the reference `org.json` returns the *fallback* for a
+JSON null, and only Android's returns `"null"`. That is why the suite was green. The same trap
+already cost this project once, in the `remote_url` download path.
+
+### Fixed — trigger media was never downloaded on Android
+
+The adopt site's comment says the media "is pinned by the same message that pins the base playlist".
+True for the **web** player, whose service worker gets trigger URLs appended by
+`lib/device-triggers.js`. Android has no service worker — it downloads through `DownloadCoordinator`,
+driven by a loop over `assignments` **only**, and trigger items live in a separate array that never
+reached it.
+
+So assigning a trigger to a device whose base playlist was unchanged downloaded nothing, and the
+fire rendered its black box with no media inside: the "black screen" half of the report.
+
+### Verified on hardware
+
+HTTP POST raw `ST1` line → overlay on screen with its video playing; clear token → base playlist
+restored; `GET /trigger?secret=…&token=…` → overlay again. The built-in UDP self-test reports
+"this player receives its own group", proving the receive path. An external UDP fire could not be
+staged through an emulator's NAT, so that specific path remains unproven end to end.
+
 ## 2.0.0-beta4
 
 A one-fix release, and the fix is to beta3's own inference. Worth reading if you run beta3.
