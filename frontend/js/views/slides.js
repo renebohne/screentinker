@@ -1179,7 +1179,24 @@ async function aiGenerate(container) {
      * the generated content, and replacing them would renumber the strip and reset a dwell the
      * operator had already tuned for this slot.
      */
+    /*
+     * ⚠️ KEEP A BACKGROUND PICTURE THE OPERATOR ALREADY HAS. The model returns a whole template, so
+     * assigning it wholesale silently discarded background_content_id — generate a background, then
+     * regenerate the words, and the photo vanished with no mention of it. The two buttons have to
+     * be symmetrical: "Generate background" never touches the elements, so "Generate" must not
+     * throw away the background.
+     *
+     * The generated background COLOUR is still taken: it sits behind the photo and shows through
+     * wherever the image does not cover, so honouring it costs nothing and keeps the palette the
+     * model chose. Only the picture and its scrim are carried across.
+     */
+    const keptBg = s2.template && s2.template.background_content_id;
+    const keptDim = s2.template && s2.template.background_dim;
     s2.template = out.template;
+    if (keptBg) {
+      s2.template.background_content_id = keptBg;
+      if (keptDim != null) s2.template.background_dim = keptDim;
+    }
     s2.fields = out.fields || {};
     state.ei = 0;
     state.dirty = true;
