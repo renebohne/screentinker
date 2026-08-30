@@ -523,10 +523,20 @@ router.post('/generate-background', async (req, res) => {
       timeoutMs: 180000,
     });
   } catch (e) {
-    return res.status(502).json({ error: 'Image generation failed: ' + String(e && e.message || e).slice(0, 200) });
+    /*
+     * ⚠️ 502 IS NOT USABLE HERE — CLOUDFLARE REPLACES THE BODY. A 502 from the origin is rendered
+     * as Cloudflare's own error page, so the operator sees "request failed" while the server is
+     * answering in 0.1s with the exact reason (measured: xAI's "Argument not supported: size"
+     * reached the origin and never reached the browser). The upstream failed, but 502 is the one
+     * status that guarantees nobody finds out why, so this reports 400 with the reason intact.
+     */
+    const why = String(e && e.message || e).slice(0, 200);
+    console.warn('[ai] background generation failed:', why);
+    return res.status(400).json({ error: 'Image generation failed: ' + why });
   }
   if (!dataUrl || dataUrl.indexOf('base64,') < 0) {
-    return res.status(502).json({ error: 'The image endpoint returned no image.' });
+    console.warn('[ai] background generation: endpoint returned no image');
+    return res.status(400).json({ error: 'The image endpoint returned no image.' });
   }
 
   /*
