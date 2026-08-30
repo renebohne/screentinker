@@ -243,6 +243,31 @@ function renderEditor(container) {
     <div class="settings-section" style="padding:10px 12px;margin-bottom:12px">
       <div id="strip" style="display:flex;gap:8px;overflow-x:auto"></div>
     </div>
+    <!--
+      ⚠️ FULL WIDTH, BETWEEN THE STRIP AND THE EDITOR — and still nowhere near the inspector.
+      It used to sit under the stage, inside the middle column, where nobody found it: the eye goes
+      strip -> canvas, and a control tucked beneath the canvas is below the fold on a laptop the
+      moment the stage is 16:9. A feature people cannot see is a feature that does not exist.
+      The original placement rule still holds and is the reason it is NOT in the panel on the right:
+      the inspector edits the SELECTED ELEMENT, while this replaces the WHOLE slide, and putting a
+      whole-slide action among per-element controls is how somebody loses a layout while thinking
+      they were restyling one heading. Above the editor it reads as what it is — an action on the
+      slide you are about to work on.
+    -->
+    <div class="settings-section" style="padding:10px 12px;margin-bottom:12px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input id="aiPrompt" class="input" style="flex:1;min-width:220px;margin:0"
+               placeholder="${esc(t('slides.ai.placeholder'))}" maxlength="500">
+        <button class="btn btn-secondary btn-sm" id="aiGenBtn">${esc(t('slides.ai.generate'))}</button>
+        <button class="btn-icon" id="aiCfgBtn" title="${esc(t('slides.ai.settings'))}" aria-label="${esc(t('slides.ai.settings'))}" style="padding:4px 8px">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+        <span id="aiStatus" style="font-size:12px;color:var(--text-muted);margin-left:4px"></span>
+      </div>
+    </div>
     <div style="display:grid;grid-template-columns:42px minmax(0,1fr) 290px;gap:12px;align-items:start">
       <div class="settings-section" id="tools" style="padding:7px;display:flex;flex-direction:column;gap:5px"></div>
       <div class="settings-section" style="padding:12px">
@@ -251,23 +276,7 @@ function renderEditor(container) {
           <button class="btn btn-secondary btn-sm" id="playBtn">▶ Play entrance</button>
           <span style="margin-left:auto;font-size:12px;color:var(--text-muted)" id="settleLabel"></span>
         </div>
-        <!--
-          ⚠️ UNDER THE STAGE, NOT IN THE INSPECTOR. The inspector edits the SELECTED ELEMENT; this
-          replaces the whole slide, and putting a whole-slide action among per-element controls is
-          how somebody loses a layout while thinking they were restyling one heading.
-        -->
-        <div style="display:flex;gap:8px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);flex-wrap:wrap">
-          <input id="aiPrompt" class="input" style="flex:1;min-width:180px;margin:0"
-                 placeholder="${esc(t('slides.ai.placeholder'))}" maxlength="500">
-          <button class="btn btn-secondary btn-sm" id="aiGenBtn">${esc(t('slides.ai.generate'))}</button>
-          <button class="btn-icon" id="aiCfgBtn" title="${esc(t('slides.ai.settings'))}" aria-label="${esc(t('slides.ai.settings'))}" style="padding:4px 8px">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-          </button>
-        </div>
-        <div id="aiStatus" style="font-size:12px;color:var(--text-muted);margin-top:6px;min-height:16px"></div>
+
       </div>
       <div class="settings-section" style="padding:0">
         <div style="display:flex;border-bottom:1px solid var(--border)" id="tabs">
