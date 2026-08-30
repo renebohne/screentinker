@@ -24,6 +24,34 @@ class TriggerManager(
     var triggers: List<TriggerResolve.Trigger> = emptyList()
         private set
     private var secret: String = ""
+
+    /*
+     * ⚠️ org.json's optString RETURNS THE STRING "null" FOR A JSON null ON ANDROID. The server sends
+     * `secret: null`, `multicast_group: null` and `clear_all_token: null` whenever they are unset,
+     * so the plain `optString(...).takeIf { it.isNotEmpty() }` this replaced produced the four-letter
+     * string "null" and treated it as a configured value. Three live consequences, one of them
+     * security-relevant:
+     *
+     *   1. multicast_group "null" -> InetAddress.getByName("null") threw and took the WHOLE UDP
+     *      listener down, so UDP triggers were inert on every device without a multicast group —
+     *      which is the default. Observed on hardware: 'UDP listener failed: Unable to resolve
+     *      host "null"'.
+     *   2. secret "null" -> TriggerResolve refuses a fire only when the device secret
+     *      isNullOrEmpty(), and "null" is neither. A device with listeners enabled and NO secret
+     *      set therefore ACCEPTED `ST1 null <token>` instead of refusing everything.
+     *   3. clear_all_token "null" -> the literal token "null" would clear every active trigger.
+     *
+     * ⚠️ AND A JVM TEST CANNOT SEE THIS. The reference org.json returns the FALLBACK for a JSON
+     * null; only Android's implementation returns "null". That is why the suite was green. This
+     * helper is what the tests can prove instead: given the string, it must yield absence.
+     *
+     * The same trap already cost this project once, in the remote_url download path.
+     */
+    private fun optText(o: org.json.JSONObject?, key: String): String? {
+        if (o == null || o.isNull(key)) return null
+        val v = o.optString(key, "")
+        return if (v.isEmpty() || v == "null") null else v
+    }
     private var clearAllToken: String? = null
     private val limiter = TriggerResolve.RateLimiter()
     private var listeners: TriggerListeners? = null
@@ -46,15 +74,15 @@ class TriggerManager(
      */
     fun onPayload(payload: JSONObject) {
         val cfg = payload.optJSONObject("trigger_config")
-        val newSecret = cfg?.optString("secret") ?: ""
+        val newSecret = optText(cfg, "secret") ?: ""
         val acceptHttp = cfg?.optBoolean("accept_http") ?: false
         val acceptUdp = cfg?.optBoolean("accept_udp") ?: false
         val httpPort = cfg?.optInt("http_port")?.takeIf { it > 0 }
         val udpPort = cfg?.optInt("udp_port")?.takeIf { it > 0 }
-        val group = cfg?.optString("multicast_group")?.takeIf { it.isNotEmpty() }
+        val group = optText(cfg, "multicast_group")
 
         secret = newSecret
-        clearAllToken = cfg?.optString("clear_all_token")?.takeIf { it.isNotEmpty() }
+        clearAllToken = optText(cfg, "clear_all_token")
         triggers = parseTriggers(payload.optJSONArray("triggers"))
 
         val want = "$acceptHttp/$acceptUdp/$httpPort/$udpPort/$group"
