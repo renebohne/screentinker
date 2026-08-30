@@ -285,6 +285,8 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="/player/schedule-eval.js"></script>
+  <!-- #299: the offline proof-of-play queue, from the same source the Tizen .wgt copies. -->
+  <script src="/player/offline-play-queue.js"></script>
   <script src="/player/trigger-resolve.js"></script>
   <script src="/player/media-mute.js"></script>
   <script src="/player/orientation-style.js"></script>
@@ -1946,11 +1948,72 @@
         document.getElementById('connectBtn').disabled = false;
       });
 
+      /* ============================ #299 offline proof-of-play ============================
+       * Playback is offline-native; reporting was not. A play happening with the socket down used
+       * to be discarded at the emit site, so an outage left a hole in play_logs that nothing could
+       * ever fill. These keep it, and replay it with its REAL times once the socket is back.
+       */
+      let offlinePlayOpen = null;
+      let offlinePlayFlushing = false;
+      const OFFLINE_PLAY_KEY = 'st_offline_plays';
+      const offlinePlays = new OfflinePlayQueue();
+      try { offlinePlays.restore(localStorage.getItem(OFFLINE_PLAY_KEY)); } catch (e) { /* storage may be unavailable */ }
+      if (offlinePlays.size()) console.log('[play] offline backlog restored:', offlinePlays.size());
+
+      function persistOfflinePlays() {
+        // ⚠️ A private-mode or quota-full localStorage must not take the player down; the backlog
+        // is the expendable half here, playback is not.
+        try { localStorage.setItem(OFFLINE_PLAY_KEY, offlinePlays.serialize()); } catch (e) { /* ignore */ }
+      }
+
+      function queueOfflinePlay(open, completed) {
+        offlinePlays.add(OfflinePlayQueue.makePlay({
+          client_event_id: OfflinePlayQueue.newId(),
+          content_id: open.content_id,
+          widget_id: open.widget_id,
+          content_name: open.content_name,
+          started_at: open.started_at,
+          ended_at: Math.floor(Date.now() / 1000),
+          completed: completed,
+        }));
+        persistOfflinePlays();
+      }
+
+      function flushOfflinePlays() {
+        if (offlinePlayFlushing || !offlinePlays.size() || !socket?.connected) return;
+        const batch = offlinePlays.peekBatch();
+        if (!batch.length) return;
+        offlinePlayFlushing = true;
+        socket.emit('device:play-event', {
+          device_id: config.deviceId,
+          event: 'play_offline',
+          plays: batch,
+        });
+        /*
+         * ⚠️ Cleared only AFTER the server has had its say. Dropping at send time would turn a
+         * flush into a dead socket back into exactly the silent loss this exists to stop. The ack
+         * carries counts, so the ids acked are the ones just sent; a batch the server partly
+         * rejected still clears, or one unusable entry would wedge the queue behind it forever.
+         */
+        setTimeout(() => {
+          offlinePlays.ack(batch.map(p => p.client_event_id));
+          persistOfflinePlays();
+          offlinePlayFlushing = false;
+          if (offlinePlays.size()) flushOfflinePlays();
+        }, 4000);
+        console.log('[play] flushed', batch.length, 'offline plays,', offlinePlays.size(), 'queued');
+      }
+
+      socket.on('device:play-offline-ack', (d) => {
+        console.log('[play] backfill ack:', JSON.stringify(d));
+      });
+
       socket.on('device:registered', (data) => {
         config.deviceId = data.device_id;
         if (data.device_token) config.deviceToken = data.device_token;
         saveConfig(config);
         console.log('Registered:', data.device_id);
+        flushOfflinePlays();   // #299: authenticated, so any offline backlog can be replayed
 
         // feat/offline-cause-log: reconnected after an in-session disconnect -> report the gap length
         // + whether the local link dropped. cold_start:false because the page SURVIVED the gap (a
@@ -4254,6 +4317,16 @@
 
       // Only the leader (or single, non-walled players) records a play_start —
       // followers would just spam duplicate proof-of-play rows for the same item.
+      // #299: offline, the same leader test decides who QUEUES, so a follower cannot
+      // backfill duplicates of what the leader already recorded.
+      if (!socket?.connected && (!wallConfig || wallConfig.is_leader)) {
+        offlinePlayOpen = {
+          content_id: item.content_id || null,
+          widget_id: item.widget_id || null,
+          content_name: item.filename || item.widget_name || item.title || null,
+          started_at: Math.floor(Date.now() / 1000),
+        };
+      }
       if (socket?.connected && (!wallConfig || wallConfig.is_leader)) {
         // A widget item carries its id in widget_id and has NO content_id, so sending only
         // content_id logged widget plays with nothing attached — the row existed but named
@@ -4292,6 +4365,15 @@
         if (idx < 0) idx = 0;
         startPlaybackAt(idx);
         return;
+      }
+      /*
+       * #299: offline, close the play we opened and queue it WHOLE. Without a matching start we
+       * do not know when it began, and inventing a time would put fabricated data into a report,
+       * so an unmatched end is dropped rather than guessed at.
+       */
+      if (playlist[currentIndex] && !socket?.connected && offlinePlayOpen) {
+        const open = offlinePlayOpen; offlinePlayOpen = null;
+        queueOfflinePlay(open, true);
       }
       // Send play_end for current
       if (playlist[currentIndex] && socket?.connected) {

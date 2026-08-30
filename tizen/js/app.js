@@ -315,6 +315,7 @@
       set(LS.id, deviceId); set(LS.token, deviceToken);
       authenticated = true; // #118: this socket may now send post-register events
       clearToast();         // #118: drop any stale "Not authenticated…" banner
+      flushOfflinePlays();  // #299: authenticated, so any offline backlog can be replayed
       // feat/offline-cause-log: reconnected after an in-session disconnect -> report the gap length +
       // whether the local link dropped. cold_start:false because the app SURVIVED the gap (a reboot
       // would have lost this in-process state). Browser has no SSID/RSSI to add.
@@ -755,9 +756,77 @@
 
   // ---- playback ----
   var player = new PlaylistPlayer(elStage, function () { return serverUrl.replace(/\/+$/, ''); }, function () { return deviceId || ''; });
+  /* ===================== #299 offline proof-of-play =====================
+   * Playback here is offline-native; reporting was not. A play that happened while the socket was
+   * down was dropped at this hook and could never be recovered, so an outage left a permanent hole
+   * in play_logs. Now it is kept and replayed with its REAL times once the socket returns.
+   */
+  var OFFLINE_PLAY_KEY = 'st_offline_plays';
+  var offlinePlays = new OfflinePlayQueue();
+  var offlinePlayOpen = null;
+  var offlinePlayFlushing = false;
+  try { offlinePlays.restore(get(OFFLINE_PLAY_KEY)); } catch (e) {}
+  if (offlinePlays.size()) console.log('[play] offline backlog restored: ' + offlinePlays.size());
+
+  function persistOfflinePlays() {
+    // Storage failure must cost the backlog, never playback.
+    try { set(OFFLINE_PLAY_KEY, offlinePlays.serialize()); } catch (e) {}
+  }
+
+  function flushOfflinePlays() {
+    if (offlinePlayFlushing || !offlinePlays.size()) return;
+    if (!socket || !socket.connected || !deviceId) return;
+    var batch = offlinePlays.peekBatch();
+    if (!batch.length) return;
+    offlinePlayFlushing = true;
+    try {
+      socket.emit('device:play-event', { device_id: deviceId, event: 'play_offline', plays: batch });
+    } catch (e) { offlinePlayFlushing = false; return; }
+    /*
+     * Cleared only after the server has had its say — dropping at send time would turn a flush
+     * into a dead socket back into the same silent loss. A partly-rejected batch still clears, or
+     * one unusable entry would wedge everything behind it.
+     */
+    setTimeout(function () {
+      offlinePlays.ack(batch.map(function (p) { return p.client_event_id; }));
+      persistOfflinePlays();
+      offlinePlayFlushing = false;
+      if (offlinePlays.size()) flushOfflinePlays();
+    }, 4000);
+    console.log('[play] flushed ' + batch.length + ' offline plays, ' + offlinePlays.size() + ' queued');
+  }
+
   // Proof-of-play: forward the player's device:play-event to the server (populates play_logs / Reports).
   player.onPlayEvent = function (payload) {
-    try { if (socket && socket.connected && deviceId) socket.emit('device:play-event', payload); } catch (e) {}
+    try {
+      if (socket && socket.connected && deviceId) { socket.emit('device:play-event', payload); return; }
+      /*
+       * Offline. Remember the start; complete and queue it when the item is left. An end with no
+       * matching start is discarded rather than given an invented start time — a fabricated
+       * timestamp in a report is worse than a missing row.
+       */
+      if (!payload) return;
+      if (payload.event === 'play_start') {
+        offlinePlayOpen = {
+          content_id: payload.content_id || null,
+          widget_id: payload.widget_id || null,
+          content_name: payload.content_name || null,
+          started_at: Math.floor(Date.now() / 1000)
+        };
+      } else if (payload.event === 'play_end' && offlinePlayOpen) {
+        var open = offlinePlayOpen; offlinePlayOpen = null;
+        offlinePlays.add(OfflinePlayQueue.makePlay({
+          client_event_id: OfflinePlayQueue.newId(),
+          content_id: open.content_id,
+          widget_id: open.widget_id,
+          content_name: open.content_name,
+          started_at: open.started_at,
+          ended_at: Math.floor(Date.now() / 1000),
+          completed: !!payload.completed
+        }));
+        persistOfflinePlays();
+      }
+    } catch (e) {}
   };
   // Multi-zone layout renderer (matches the Android player). app.js picks the renderer
   // per playlist-update from payload.layout; the two never run at once.

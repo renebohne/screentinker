@@ -53,6 +53,12 @@ const evictedSockets = new Set();
 // event is still forwarded every time, so the UI is unaffected. In-memory only.
 const lastPlayLogAt = new Map();
 const PLAY_LOG_MIN_GAP_MS = 2000;
+/*
+ * #299 offline backfill. The rules live in lib/play-backfill so they can be tested without a
+ * socket; the batch cap is what replaces the throttle above for replayed plays, since a flush
+ * must not be decimated by a limiter meant to bound a runaway LIVE player.
+ */
+const { normalizeBackfillPlay, boundBatch } = require('../lib/play-backfill');
 // Existence probes for the proof-of-play insert (see the play_start handler): the id a
 // player reports comes from its CACHED playlist and can outlive the row it names.
 const contentExists = db.prepare('SELECT 1 FROM content WHERE id = ?').pluck();
@@ -1571,6 +1577,67 @@ module.exports = function setupDeviceSocket(io) {
             duration_sec: typeof duration_sec === 'number' && duration_sec > 0 ? duration_sec : null,
             started_at: Date.now(),
           });
+        } else if (event === 'play_offline') {
+          /*
+           * #299 BACKFILL. A player that kept playing while the socket was down replays what it
+           * recorded, as COMPLETE rows carrying their real times.
+           *
+           * ⚠️ COMPLETE ROWS, NOT REPLAYED start/end PAIRS. play_end closes "the most recent open
+           * row for this device+content", so a backlog replayed alongside live playback could
+           * close the wrong one — the live row that happens to be open right now. Inserting a
+           * closed row in one shot removes that race instead of trying to sequence around it.
+           *
+           * ⚠️ AND IT DELIBERATELY BYPASSES lastPlayLogAt. That throttle bounds a runaway LIVE
+           * player (one row per device per 2s); applied here it would silently decimate a flush
+           * to roughly one surviving row per 2s of real flush time — the very loss the backfill
+           * exists to prevent. boundBatch caps the payload instead.
+           */
+          const nowSec = Math.floor(Date.now() / 1000);
+          const plays = boundBatch(data.plays);
+          let written = 0;
+          let rejected = 0;
+          for (const raw of plays) {
+            const p = normalizeBackfillPlay(raw, nowSec);
+            if (!p) { rejected++; continue; }
+
+            const wid = p.widget_id && widgetExists.get(p.widget_id) ? p.widget_id : null;
+            const isContent = (!wid && p.content_id) ? !!contentExists.get(p.content_id) : false;
+            const isWidget = (!wid && !isContent && p.content_id) ? !!widgetExists.get(p.content_id) : false;
+
+            /*
+             * INSERT OR IGNORE against the unique client_event_id: a player that flushes, dies
+             * before it sees the ack, and flushes again on its next boot must not double-count.
+             * An event with no id still stores (the column is nullable, the index partial) — an
+             * older player replaying is better than no row at all.
+             */
+            const info = db.prepare(`
+              INSERT OR IGNORE INTO play_logs
+                (device_id, content_id, widget_id, zone_id, content_name, started_at, ended_at,
+                 duration_sec, completed, trigger_type, client_event_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'playlist', ?)
+            `).run(
+              device_id,
+              isContent ? p.content_id : null,
+              wid || (isWidget ? p.content_id : null),
+              p.zone_id,
+              p.content_name,
+              p.started_at,
+              p.ended_at,
+              p.duration_sec,
+              p.completed,
+              p.client_event_id
+            );
+            written += info.changes;
+          }
+          /*
+           * Acked so the player can drop exactly what landed. It keeps its queue until this
+           * arrives — a flush that vanished into a dead socket would otherwise be the same data
+           * loss by a different route.
+           */
+          socket.emit('device:play-offline-ack', { received: plays.length, written, rejected });
+          if (plays.length) {
+            console.log(`[play] backfill from ${device_id}: ${plays.length} received, ${written} written, ${rejected} rejected`);
+          }
         } else if (event === 'play_end') {
           // A widget play is closed by its widget id. Binding content_id to BOTH columns meant a
           // widget row could never match itself, so it was never closed and never gained a

@@ -1513,6 +1513,10 @@ const migrations = [
      created_at    INTEGER NOT NULL
    )`,
   'CREATE INDEX IF NOT EXISTS idx_custom_fonts_ws ON custom_fonts(workspace_id)',
+  // #299 offline proof-of-play: a player-minted id for plays replayed after an outage, so a
+  // re-flush cannot double-count. Partial index — live plays leave it NULL and must not collide.
+  'ALTER TABLE play_logs ADD COLUMN client_event_id TEXT',
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_play_logs_client_event ON play_logs(client_event_id) WHERE client_event_id IS NOT NULL',
 ];
 // Apply each ALTER idempotently. A "duplicate column name" / "already exists"
 // error means the column is already present (expected on a migrated DB) - benign.
