@@ -1,5 +1,65 @@
 # Changelog
 
+## 2.0.0-beta3
+
+Proof-of-play survives an outage now. Found by accident: a host-maintenance window took our alpha
+instance down for 5h49m while an Android TV player was mid-soak against it. The screen played
+faultlessly the whole time — and the server recorded none of it.
+
+### Fixed — plays during an outage are no longer thrown away (#299)
+
+Playback is offline-native; reporting was online-only. Every player guarded its proof-of-play emit
+on a live socket and returned, so a play happening with the link down was discarded where it
+occurred — not queued, not retried. `play_logs` had a 20,963-second hole where ~1,040 plays should
+be, and nothing anywhere reported the loss. For a product where proof-of-play is frequently the
+billable artifact, an outage silently erased the evidence that content ran.
+
+Players now keep finished plays in a bounded, persisted queue and replay them on reconnect with
+their **real** timestamps. Three things this had to get right:
+
+* ⚠️ **Complete plays, not replayed start/end pairs.** The server closes a play by finding "the most
+  recent open row for this device+content", so a backlog replayed alongside live playback could
+  close the row the player has open *right now*. A finished play carrying both timestamps inserts
+  in one shot and cannot race anything.
+* ⚠️ **The server had to learn to accept a time.** It stamps rows `strftime('%s','now')` — correct
+  for live plays, useless for old ones. Replaying through it would have recorded a thousand plays
+  as all happening in the seconds after reconnect, which is *worse* than the gap because it reads
+  as real data. And because a panel's clock cannot be trusted (a dead RTC reports 1970), times
+  outside a sane window are **dropped rather than clamped** into looking plausible.
+* ⚠️ **Backfill bypasses the insert throttle.** `PLAY_LOG_MIN_GAP_MS` caps proof-of-play at one row
+  per device per 2s to bound a runaway live player. Applied to a flush it would have decimated the
+  backlog to roughly one surviving row per 2s of flush time — silently reintroducing the same loss.
+  The batch is bounded instead.
+
+Replay is idempotent via a player-minted id with a partial unique index, so a flush that dies
+before its ack cannot double-count: trading an under-report for an over-report is not a fix.
+Entries clear only on the server's ack, and the queue is bounded so a panel offline for weeks
+cannot fill its storage — evictions are counted rather than silent, which is how the original bug
+hid.
+
+Covers every player: one shared queue serves the web player (and therefore BrightSign and Fire
+TV/Vega) and is copied byte-identically into the Tizen `.wgt`; Android has its own Kotlin port with
+the wire shape pinned by tests on both sides.
+
+### Fixed — the play an outage stranded is closed from the play that followed it
+
+One row per outage was beyond the backfill's reach: the item in flight when the link dropped had
+its start recorded live and its end lost, so it sat open forever with no duration. The queue cannot
+replay it without duplicating the row that already exists.
+
+But the evidence was already in the table — a device advancing to another item proves the previous
+one ran until that moment, so the successor's `started_at` is the predecessor's end. This also
+repairs rows stranded by **past** outages and reboots, on the first play after upgrading.
+
+* ⚠️ **Same zone only.** A multi-zone device plays several items at once, so the next row for the
+  device may belong to a different zone that started while this one was still on screen. Closing
+  against it would cut the play short.
+* ⚠️ **Never the item playing now** (it has no successor because it has not ended), and **never
+  across an implausible span** — a panel that played one item, went dark for a week and returned
+  must not have a week of runtime attributed to it. Past the cap the row stays open and honest.
+* `completed` is deliberately left alone: advancing is evidence it *played* that long, not that it
+  ran to its end — an error-advance looks identical from here.
+
 ## 2.0.0-beta2
 
 A player release: two defects reported against 1.9.40 on Android TV, both fixed here. They came
