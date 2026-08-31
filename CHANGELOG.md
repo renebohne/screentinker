@@ -1,5 +1,71 @@
 # Changelog
 
+## 2.0.0-beta8
+
+A production bug from a 70-screen deployment, the trigger form finally looking
+like the rest of the product, and a receipt when somebody pays you.
+
+### Fixed — the event loop was really blocked, and the band was lying about it (#307)
+
+Three defects, found by measuring a production server rather than reading the code.
+
+**The band was decided by one 20ms bucket per second.** A sampling window is one second at 20ms
+resolution, so the histogram holds ~49 records — and the 99th percentile of 49 records **is the
+maximum**. Measured over two hours of production: `avg(max_ms − p99_ms) = 0.000`, exactly, in every
+window. So the band tracked the worst single bucket each second, and release required five
+*consecutive* clean seconds, which a server doing real work never strings together. One instance sat
+at `elevated` for sixteen days with its typical delay pinned at the 20ms measurement floor. The
+band now reads the median of the last 15 windows; a lone outlier cannot move a median. Replaying the
+real series: 88.6% elevated before, 99.9% normal after. A sustained storm still reads critical, and
+a single catastrophic window still escalates immediately.
+
+That also mattered beyond the label: maintenance is band-gated, so while the band was wrongly
+elevated, every prune sweep was being skipped most of the time.
+
+**Closing a play searched the device's whole history.** The query ordered every open row for a
+device and took the first — and `LIMIT 1` cannot save you when there's a sort in front of it. One
+production screen has 377,132 play rows; that query measured **153ms, on the event loop, every time
+that panel advanced an item**. Exactly the signature in the telemetry: 100–300ms spikes in pairs,
+about ten seconds apart. The server now remembers the row it opened and closes it by primary key,
+with the search kept as an indexed fallback for plays it didn't open.
+
+**Plays were started and never closed** — 36,096 open rows, the oldest from June. A play now expires
+once it has been open longer than its content could have run, at its ceiling, so downtime is still
+never credited as playback.
+
+Rehearsed against a copy of a real production database: 36,096 open rows → 11, in about three
+minutes, with no downtime credited and the sweep costing 0ms in steady state.
+
+### Fixed — the trigger form was never styled
+
+It used `.modal-backdrop`, a class defined nowhere. The app's modal CSS is `.modal-overlay`. So it
+got no positioning, no centering, no dimming and no card — it appended a stack of bare labels to the
+end of the page. Nothing errored, which is why it survived: it read as an unfinished feature rather
+than as a typo.
+
+Rebuilt on the skeleton every other dialog uses, grouped into five sections, with the sources next
+to the token they qualify and Enabled beside Save. Escape, the close button and the backdrop all
+dismiss it now — Cancel used to be the only way out.
+
+### Changed — unpublished playlists are no longer offered to a trigger
+
+The server refuses a trigger pointing at a playlist with no published snapshot, and it is right to:
+such a trigger syncs with no items and renders nothing, forever, silently. But the dropdown listed
+every playlist, so the normal way to meet that rule was to fill in the whole form and be told no.
+The one already saved on a trigger stays listed even if it has since been unpublished — dropping it
+would silently re-point that trigger at whatever happened to be first.
+
+### Added — a receipt email when a payment succeeds
+
+On `invoice.payment_succeeded`, so it covers renewals and portal payments rather than only the
+first checkout. Sent **exactly once per invoice**: Stripe retries webhooks until it gets a 2xx and
+can redeliver regardless, and nothing in the Stripe route deduped before — the other handlers only
+survived it by being idempotent updates. The claim is taken before the send, and the send happens
+after the acknowledgement so a hung mail transport cannot hold a webhook open.
+
+Zero-amount invoices (trials, full coupons, proration credits) do not produce a receipt, and neither
+does an invoice that cannot be tied to an account.
+
 ## 2.0.0-beta7
 
 The slide editor absorbs most of what the designer could do, and gains two things nothing in signage
