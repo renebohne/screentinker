@@ -23,6 +23,11 @@ const R = require('../lib/slide-render');
 const render = (elements, fields = {}) =>
   R.renderSlideHtml({ template: { elements }, fields });
 
+/* An image element only becomes an <img> when its content resolves; without a resolver it is the
+ * missing-photo placeholder, which is a different branch entirely. */
+const renderWithImages = (elements, fields = {}) =>
+  R.renderSlideHtml({ template: { elements }, fields }, { resolveImage: () => '/uploads/content/x.png' });
+
 /** Markup that would execute or restructure the document if any escape were missing. */
 const EVIL = '"><img src=x onerror=alert(1)><script>alert(2)</script>';
 
@@ -233,7 +238,9 @@ test('⚠️ an older server meeting a newer deck degrades instead of throwing',
 });
 
 test('kinds that need no configuration carry none', () => {
-  for (const kind of ['head', 'body', 'stat', 'image', 'rule', 'box']) {
+  // `image` is deliberately absent: it gained a `fit` setting, which has a sensible default and so
+  // does not make it a `config` kind, but does give it a cfg object.
+  for (const kind of ['head', 'body', 'stat', 'rule', 'box']) {
     const n = R.normalizeSlide({ template: { elements: [{ kind }] } });
     assert.equal(n.elements[0].cfg, null, `${kind} should not have gained a cfg`);
   }
@@ -248,7 +255,7 @@ test('⚠️ the AI generator is not offered kinds it cannot fill', () => {
   // And the flag is actually set on the four that need it, so the filter above has something to bite.
   assert.deepEqual(
     Object.keys(R.KINDS).filter((k) => R.KINDS[k].config).sort(),
-    ['clock', 'countdown', 'date', 'qr'],
+    ['clock', 'countdown', 'date', 'lettering', 'qr'],
   );
 });
 
@@ -319,7 +326,7 @@ test('⚠️ hostile config does not survive a save either', () => {
 
 test('a kind that needs no config gains no keys on save', () => {
   const e = savedEl(deckWith([{ kind: 'head', slot: 'a' }], { a: 'hi' }));
-  for (const k of ['clock_format', 'date_format', 'tz', 'locale', 'target', 'qr_ec', 'qr_bg']) {
+  for (const k of ['clock_format', 'date_format', 'tz', 'locale', 'target', 'qr_ec', 'qr_bg', 'fit']) {
     assert.ok(!(k in e), `a headline should not carry ${k}`);
   }
 });
@@ -412,4 +419,208 @@ test('a normal QR produces no warning', () => {
 test('the QR foreground survives a save like every other config field', () => {
   const e = savedEl(deckWith([{ kind: 'qr', slot: 'a', qr_fg: '#112233' }], { a: 'https://a.example' }));
   assert.equal(e.qr_fg, '#112233');
+});
+
+/* ============ how a photo sits in its box ============ */
+
+test('⚠️ a cut-out fits inside its box instead of being cropped to fill it', () => {
+  /*
+   * THE DEFECT A SPIKE FOUND, and the reason this option exists. `cover` fills the box and crops
+   * the overflow, which is right for a photograph used as a panel and wrong for an object with
+   * transparency around it — the crop slices through the object. Measured: a generated pumpkin laid
+   * into a 34x62 box lost its bottom third, and it reads as a bad photo rather than a setting
+   * anybody would think to look for.
+   */
+  const cover = renderWithImages([{ kind: 'image', content_id: 'x' }]);
+  const contain = renderWithImages([{ kind: 'image', content_id: 'x', fit: 'contain' }]);
+  assert.ok(!/<img class="fit"/.test(cover), 'cover is the default and needs no class');
+  assert.ok(/<img class="fit"/.test(contain), 'contain must be marked');
+  assert.ok(/\.e img\.fit \{ object-fit:contain; \}/.test(contain), 'and the rule must be present');
+});
+
+test('⚠️ a slide authored before this option renders byte for byte as it did', () => {
+  // A layout change nobody asked for is a worse bug than a missing option: these are on screens.
+  const before = renderWithImages([{ kind: 'image', content_id: 'x' }, { kind: 'head', slot: 'a' }], { a: 'hi' });
+  assert.ok(before.includes('<img src='), 'no class attribute on a default image');
+  assert.ok(!before.includes('class="fit"'));
+});
+
+test('an unknown fit falls back to cover rather than reaching the markup', () => {
+  const html = renderWithImages([{ kind: 'image', content_id: 'x', fit: '" onerror=alert(1)' }]);
+  assert.ok(!html.includes('onerror'), 'markup breakout through fit');
+  assert.ok(!html.includes('class="fit"'));
+});
+
+test('every fit in the allowlist survives, and nothing else does', () => {
+  assert.deepEqual(Object.keys(R.IMAGE_FITS).sort(), ['contain', 'cover']);
+  for (const f of ['fill', 'none', '', null, 7]) {
+    const n = R.normalizeSlide({ template: { elements: [{ kind: 'image', fit: f }] } });
+    assert.equal(n.elements[0].cfg.fit, 'cover', `${String(f)} slipped through`);
+  }
+});
+
+test('fit survives a save like every other per-element setting', () => {
+  // The same silent-loss trap: unnamed keys are dropped by sanitizeStored on every save.
+  assert.equal(savedEl(deckWith([{ kind: 'image', slot: 'a', fit: 'contain' }])).fit, 'contain');
+  assert.equal(savedEl(deckWith([{ kind: 'image', slot: 'a' }])).fit, 'cover');
+});
+
+/* ============ layered placement: keeping objects out of the words ============ */
+
+/*
+ * ⚠️ TESTED HERE BECAUSE THE FAILURE WAS SEEN ON A REAL RUN, not imagined. The plan prompt asks the
+ * model to keep objects clear of the headline; a run that produced a good background, leaf and cup
+ * also dropped a pair of mittens directly under "20% OFF". Asking is right — a cooperating model
+ * composes better than a corrected one — but it cannot be the only defence.
+ */
+const AI_SRC = require('fs').readFileSync(require.resolve('../routes/ai.js'), 'utf8');
+
+test('⚠️ object placement is ENFORCED, not merely requested in the prompt', () => {
+  assert.match(AI_SRC, /function placeClear/, 'there must be a server-side placement rule');
+  assert.match(AI_SRC, /box: placeClear\(/, 'and every object must go through it');
+});
+
+test('the text band is reserved and objects are pushed clear of it', () => {
+  // Exercised through the module's own constants so the test cannot drift from the rule.
+  const zone = AI_SRC.match(/const TEXT_ZONE = Object\.freeze\(\{ x: (\d+), y: (\d+), w: (\d+), h: (\d+) \}\)/);
+  assert.ok(zone, 'TEXT_ZONE must be declared');
+  const [, zx, zy, zw, zh] = zone.map(Number);
+  assert.ok(zw > 40 && zh > 40, 'the reserved band must actually cover where the words sit');
+  assert.ok(zx < 10 && zy < 30, 'and start where the headline starts');
+});
+
+test('⚠️ the headline box is sized for the wrap that will happen', () => {
+  /*
+   * A headline as short as "20% OFF" wrapped to two lines at 12cqw in a 52%-wide box and the second
+   * line landed on the subhead. Nothing server-side can measure text, so the geometry has to assume
+   * the wrap rather than the intent — and the subhead has to clear a two-line headline.
+   */
+  const head = AI_SRC.match(/slot: 'headline'[\s\S]*?box: \{ x: \d+, y: (\d+), w: (\d+) \}[\s\S]*?size_cqw: ([\d.]+)/);
+  const sub = AI_SRC.match(/slot: 'subhead'[\s\S]*?box: \{ x: \d+, y: (\d+), w: (\d+) \}/);
+  assert.ok(head && sub, 'both text elements must be findable');
+  const headY = Number(head[1]); const headSize = Number(head[3]); const subY = Number(sub[1]);
+  assert.ok(headSize <= 10, `headline at ${headSize}cqw is large enough to wrap unexpectedly`);
+  assert.ok(subY - headY >= 2.5 * headSize,
+    `subhead at ${subY} does not clear a two-line headline starting at ${headY} at ${headSize}cqw`);
+});
+
+test('the plan asks for text short enough for the size it is set at', () => {
+  assert.match(AI_SRC, /at most 14 characters/, 'the headline length must be constrained upstream too');
+});
+
+/* ============ lettering: a picture of words that is still a record ============ */
+
+test('⚠️ the words a lettering element depicts stay in fields', () => {
+  /*
+   * THE PROMISE THIS FEATURE COULD EASILY HAVE BROKEN. slide-render.js opens by arguing that the
+   * changeable text must stay OUT of the layout, so somebody can come back in three months and
+   * change a number. Generated lettering is an image, and the obvious implementation stops there —
+   * at which point the words have ceased to exist as data, and the slide has become the thing this
+   * whole module was written to prevent.
+   */
+  const n = R.normalizeSlide({
+    template: { elements: [{ kind: 'lettering', slot: 'w', content_id: 'c' }] },
+    fields: { w: 'AUTUMN SALE' },
+  });
+  assert.equal(n.fields.w, 'AUTUMN SALE', 'the words must survive normalization');
+  assert.ok(R.KINDS.lettering.text, 'lettering must read its field');
+});
+
+test('⚠️ the artwork carries the words as alt text', () => {
+  // A headline that is a picture is invisible to a screen reader, to a search, and to anyone
+  // reading the document as text — and the words are the one thing we reliably know about it.
+  const html = R.renderSlideHtml({
+    template: { elements: [{ kind: 'lettering', slot: 'w', content_id: 'c' }] },
+    fields: { w: 'AUTUMN SALE' },
+  }, { resolveImage: () => '/uploads/content/a.png' });
+  assert.match(html, /<img class="fit" src="[^"]+" alt="AUTUMN SALE">/);
+});
+
+test('⚠️ words that look like markup are escaped into the alt attribute', () => {
+  const html = R.renderSlideHtml({
+    template: { elements: [{ kind: 'lettering', slot: 'w', content_id: 'c' }] },
+    fields: { w: EVIL },
+  }, { resolveImage: () => '/uploads/content/a.png' });
+  assert.ok(!html.includes('<img src=x'), 'markup breakout through alt');
+  assert.ok(html.includes('&quot;'), 'the words must survive as escaped characters');
+});
+
+test('⚠️ lettering can never be cropped, and the setting is not offered', () => {
+  /*
+   * Cropping a word is not a styling choice — it removes letters, and "20% OF" two feet tall on a
+   * wall is worse than no slide. So `contain` is fixed here rather than defaulted.
+   */
+  for (const attempt of ['cover', 'fill', '', null]) {
+    const n = R.normalizeSlide({ template: { elements: [{ kind: 'lettering', slot: 'w', fit: attempt }] } });
+    assert.equal(n.elements[0].cfg.fit, 'contain', `fit=${String(attempt)} must not take effect`);
+  }
+  const html = R.renderSlideHtml({
+    template: { elements: [{ kind: 'lettering', slot: 'w', content_id: 'c', fit: 'cover' }] },
+    fields: { w: 'HI' },
+  }, { resolveImage: () => '/u/a.png' });
+  assert.match(html, /<img class="fit"/, 'the artwork must always be contained');
+});
+
+test('lettering draws no glyphs of its own, so it pulls no font onto the wire', () => {
+  const html = R.renderSlideHtml({
+    template: { elements: [{ kind: 'lettering', slot: 'w', content_id: 'c' }] },
+    fields: { w: 'HI' },
+  }, { resolveImage: () => '/u/a.png' });
+  assert.ok(!/@font-face/.test(html), 'the words are painted into the image, not set in a face');
+});
+
+test('lettering with no artwork yet shows the placeholder rather than breaking', () => {
+  // The element is placeable before it has been generated, and a missing upload must not throw.
+  const html = R.renderSlideHtml({
+    template: { elements: [{ kind: 'lettering', slot: 'w' }] }, fields: { w: 'HI' },
+  });
+  assert.ok(html.includes('class="ph"'));
+});
+
+test('lettering survives a save, words and all', () => {
+  const deck = deckWith([{ kind: 'lettering', slot: 'w', content_id: 'c' }], { w: 'AUTUMN SALE' });
+  const saved = deckLib.normalizeDeck(deck).slides[0];
+  assert.equal(saved.template.elements[0].kind, 'lettering');
+  assert.equal(saved.template.elements[0].fit, 'contain');
+  assert.equal(saved.fields.w, 'AUTUMN SALE');
+});
+
+test('⚠️ the operator is told to check the spelling, every time', () => {
+  /*
+   * Nothing server-side can verify that the picture spells the headline, and a misspelled word set
+   * two feet tall is the worst thing this feature can produce. The operator is the check, so the
+   * route has to tell them there is something to check.
+   */
+  assert.match(AI_SRC, /check it reads/i, 'the route must warn about generated spelling');
+});
+
+test('⚠️ lettering falls back to real type rather than leaving no headline', () => {
+  // A slide whose whole purpose is to say one thing must not come back saying nothing because an
+  // image endpoint had a bad minute.
+  assert.match(AI_SRC, /letteringDone/, 'there must be a fallback path');
+  assert.match(AI_SRC, /if \(headline && !letteringDone\)/, 'and it must emit a real head element');
+});
+
+test('the AI slide generator is not offered lettering either', () => {
+  // Like qr and countdown: it cannot produce a content_id, so a lettering element from it would be
+  // a permanent empty placeholder.
+  assert.ok(R.KINDS.lettering.config, 'lettering must be a config kind');
+});
+
+test('⚠️ the subhead is sized for its length, because the model ignores the cap it is given', () => {
+  /*
+   * The plan prompt asks for at most 40 characters; a real run answered with 48 — "Autumn Sale -
+   * Warm up your home with rustic charm" — which at a fixed 4.5cqw wrapped to three lines and ran
+   * out of the bottom of the text band and over the objects. Asking is still worth doing, but the
+   * geometry cannot depend on the answer.
+   */
+  assert.match(AI_SRC, /function subheadSize/, 'the subhead size must be derived, not fixed');
+  assert.match(AI_SRC, /size_cqw: subheadSize\(subhead\)/, 'and actually used');
+  const fn = AI_SRC.match(/function subheadSize\(text\) \{[\s\S]*?\n\}/)[0];
+  // eslint-disable-next-line no-new-func
+  const subheadSize = new Function(`${fn}; return subheadSize;`)();
+  assert.ok(subheadSize('Autumn Sale') > subheadSize('Autumn Sale - Warm up your home with rustic charm'),
+    'a longer subhead must be set smaller');
+  assert.equal(subheadSize('x'.repeat(48)), 3.6);
+  assert.ok(subheadSize('x'.repeat(200)) >= 3, 'and never collapse to nothing');
 });

@@ -105,6 +105,23 @@ const KINDS = Object.freeze({
   date:      { text: false, glyphs: true,  live: 'date',      config: true  },
   // The field is the message shown once the target passes ("Doors open", "We are closed").
   countdown: { text: true,  glyphs: true,  live: 'countdown', config: true  },
+  /*
+   * ⚠️ A PICTURE OF WORDS, AND THE WORDS ARE STILL A FIELD.
+   *
+   * Lettering is generated artwork — brush script, painted type, the things no bundled font can do
+   * — so what lands on the slide is an image. The obvious implementation stops there, and it
+   * quietly breaks the one promise this file opens by making: that the changeable text stays OUT of
+   * the layout, so somebody can come back in three months and change a number.
+   *
+   * So the words this artwork DEPICTS stay in `fields[slot]`, exactly as a headline's do. They are
+   * the record: the editor shows them, a regenerate reads them, and they are emitted as the image's
+   * alt text — which means a slide whose headline is a picture is still readable to anything that
+   * cannot see it. What is lost is only that editing the words needs the artwork remade, and the
+   * editor can say so, rather than the words simply ceasing to exist.
+   *
+   * glyphs is false: it draws no text of its own, so it needs no @font-face.
+   */
+  lettering: { text: true,  glyphs: false, live: null,        config: true  },
 });
 
 const clamp = (v, lo, hi, dflt) => {
@@ -171,6 +188,17 @@ const DATE_FORMATS = Object.freeze({ long: 1, short: 1, numeric: 1, weekday: 1 }
 const QR_EC = Object.freeze({ L: 1, M: 1, Q: 1, H: 1 });
 
 /*
+ * How a photo sits in its box.
+ *
+ * ⚠️ `contain` EXISTS FOR CUT-OUTS, and without it they are unusable. `cover` fills the box and
+ * crops whatever does not fit, which is right for a photograph used as a panel — and wrong for an
+ * object with transparency around it, because the crop slices the object itself. Measured: a
+ * generated pumpkin laid into a 34x62 box lost its bottom third, and it looks like a bad
+ * photograph rather than a setting anybody would think to change.
+ */
+const IMAGE_FITS = Object.freeze({ cover: 1, contain: 1 });
+
+/*
  * An IANA zone name, structurally. Deliberately NOT a list of the ~600 real ones: that list moves
  * (zones are added and renamed by the tzdb), and a stale copy here would refuse a zone the panel
  * actually supports. Structure is checked so nothing strange reaches an attribute; whether the zone
@@ -223,6 +251,14 @@ function kindConfig(kind, src) {
       };
     case 'countdown':
       return { target: instant(src.target) };
+    case 'image':
+      // Not marked `config` in KINDS: it has a sensible default, so the AI generator can still be
+      // offered image elements without having to reason about it.
+      return { fit: pick(IMAGE_FITS, src.fit, 'cover') };
+    case 'lettering':
+      // ⚠️ Always contained, and not settable. Cropping a word is not a styling choice: it removes
+      // letters, and "20% OF" on a wall is worse than no slide at all.
+      return { fit: 'contain' };
     case 'qr':
       /*
        * ⚠️ THE MODULES ARE BLACK ON WHITE BY DEFAULT, AND THEY DO NOT INHERIT style.color.
@@ -616,10 +652,28 @@ function renderSlideHtml(rawConfig, opts = {}) {
     if (e.kind === 'image') {
       const url = resolveImage(e.contentId);
       css.push('overflow:hidden');
+      // Only the non-default is emitted, so every slide authored before this renders byte for byte
+      // as it did — a layout change nobody asked for is a worse bug than a missing option.
+      const fitCls = e.cfg.fit === 'contain' ? ' class="fit"' : '';
       const inner = url
-        ? `<img src="${escapeHtml(url)}" alt="">`
+        ? `<img${fitCls} src="${escapeHtml(url)}" alt="">`
         // A slide whose photo is missing says so, quietly, rather than leaving a hole an operator
         // has to guess at. It is deliberately unobtrusive: on a wall this is better than a red box.
+        : `<div class="ph"></div>`;
+      return `<div class="e" style="${css.filter(Boolean).join(';')}">${inner}</div>`;
+    }
+
+    if (e.kind === 'lettering') {
+      const url = resolveImage(e.contentId);
+      css.push('overflow:hidden');
+      /*
+       * ⚠️ THE ALT TEXT IS THE ACTUAL WORDS, from the field. A headline that is a picture is
+       * invisible to a screen reader, to a search, and to anybody reading this document as text —
+       * and the one thing we reliably know about the picture is what it was asked to say.
+       */
+      const words = escapeHtml(slide.fields[e.slot] || '');
+      const inner = url
+        ? `<img class="fit" src="${escapeHtml(url)}" alt="${words}">`
         : `<div class="ph"></div>`;
       return `<div class="e" style="${css.filter(Boolean).join(';')}">${inner}</div>`;
     }
@@ -728,6 +782,8 @@ function renderSlideHtml(rawConfig, opts = {}) {
   .scrim { position:absolute; inset:0; }
   .t { line-height:1.08; white-space:pre-wrap; word-break:break-word; }
   .e img { width:100%; height:100%; object-fit:cover; display:block; }
+  /* A cut-out must fit inside its box, not be cropped to fill it. See IMAGE_FITS. */
+  .e img.fit { object-fit:contain; }
   .ph { width:100%; height:100%; background:rgba(255,255,255,.06);
         border:1px dashed rgba(255,255,255,.18); box-sizing:border-box; }
   @keyframes st-fade    { from { opacity:0 } to { opacity:1 } }
@@ -746,7 +802,7 @@ function renderSlideHtml(rawConfig, opts = {}) {
 
 module.exports = {
   ANIMATIONS, EASINGS, KINDS,
-  CLOCK_FORMATS, DATE_FORMATS, QR_EC,
+  CLOCK_FORMATS, DATE_FORMATS, QR_EC, IMAGE_FITS,
   MAX_ELEMENTS, MAX_FIELD_CHARS, MAX_FIELDS,
   normalizeSlide, settleTime, renderSlideHtml,
   // Exported for tests: the QR matrix and the constant script are the two pieces whose properties
