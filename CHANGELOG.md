@@ -1,5 +1,100 @@
 # Changelog
 
+## 2.0.0-beta7
+
+The slide editor absorbs most of what the designer could do, and gains two things nothing in signage
+does: slides generated as separately animated cut-out layers, and video behind the words.
+
+### Added — clock, date, countdown and QR are slide elements
+
+Four kinds moved out of the designer, which is now labelled **Designer (deprecating)** in the nav
+rather than removed: widgets made with it still play and are still re-editable there, and pulling
+the entry would strand them in the raw HTML editor.
+
+The security argument is the whole reason this could be done at all. The designer implements these
+by building a **script per element**, interpolating an element's configuration into JavaScript
+source — `setInterval` with a date pasted in, `fetch` with a URL pasted in — so operator input
+becomes program text. The slide renderer has spent its life keeping script out of its output.
+
+Here the script is a **constant**: byte-identical in every document, with no interpolation of any
+kind. Configuration reaches it as `data-` attributes through the HTML escaper, is read with
+`getAttribute`, and is written with `textContent`, never `innerHTML`. There is no path from a
+slide's configuration to executed code, and the tests assert it directly — the emitted script is
+compared byte-for-byte against the constant.
+
+Formats are allowlists rather than format strings, time zones and locales are structural regexes,
+the countdown target is normalised to epoch milliseconds, and a QR payload only ever becomes module
+coordinates. QR codes are drawn server-side from the already-bundled `qrcode` library, so a code
+needs no network at the panel and no third-party image service.
+
+Worth knowing if you have used it: **the designer's QR was never real.** Its editor drew a box with
+the word "QR" in it, and its publish path has no `qr` case at all, so the element vanished entirely
+from the published widget.
+
+### Added — layered slides: generated objects, cut out and animated separately
+
+Describe a scene and get back a background plate plus individual objects with real transparency,
+each landing as its own element with its own entrance — rather than one flat picture with text on
+top.
+
+The pieces are **generated**, not extracted. Segmenting an object out of a finished image needs a
+model, which means a native dependency and a ~100MB asset on a product that deliberately dropped
+`sharp`; it is also worse at the job, because an object composited onto a soft background has no
+clean boundary and the edges come back ragged around exactly the thin features a viewer looks at.
+Instead each object is generated alone on a flat chroma backdrop and keyed out in pure JavaScript.
+
+A bad cut-out still looks like a cut-out, so two measurements decide whether one is kept: how far
+the backdrop's border wanders from its median, and whether the key removed anything at all. An
+object that fails is skipped, named, and reported — a slide comes back with three layers or two, and
+the difference is never something an operator has to notice for themselves.
+
+### Added — lettering: a generated headline that is painted, not typeset
+
+Brush script and painted display type, the things no bundled font can do. **The words stay a
+field**: the editor shows them, a regenerate is asked for them, and they are emitted as the image's
+alt text, so a slide whose headline is a picture is still readable to anything that cannot see it.
+It can never be cropped, and it falls back to real type if it cannot be generated — a slide whose
+whole purpose is to say one thing must not come back saying nothing.
+
+Image models misspell, and nothing can verify that the picture spells the headline, so the operator
+is told to check it every time.
+
+### Added — video backgrounds
+
+The background layer can be a clip, sitting in front of the still rather than replacing it: the
+still becomes the video's `poster`, so what shows while the video loads — and for good on a panel
+that cannot decode it — is the picture rather than a black rectangle.
+
+Always muted, and not configurable: autoplay without a gesture is only permitted for muted media,
+the player already decides which zone owns the audio, and scenery that talks over the next zone is
+a support call.
+
+**Proven on a live XT245.** With hardware z-order a video decodes onto a plane the DOM sits behind,
+so a background would play *over* the headline — the inverse of a background. The renderer emits
+`hwz="off"`, and a probe on real hardware confirmed DOM composites over a playing video (three
+captures seconds apart, the overlay steady while the footage moved). Every other platform ignores
+the unknown attribute.
+
+### Added — `fit` on slide images
+
+`cover` fills the box and crops the overflow, which is right for a photograph and wrong for a
+cut-out, where the crop slices through the object itself. `cover` remains the default and slides
+authored before this render byte for byte as they did.
+
+### Fixed
+
+- A QR added with no styling was a **solid white square**: its modules inherited the element colour,
+  which defaults to white, on the white panel behind them. Modules now have their own colour
+  defaulting to black, and a deck warning catches an unscannable pair at authoring time rather than
+  on a wall.
+- Per-element configuration was **silently dropped on every save**. The deck writer rebuilds each
+  stored element key by key, so a clock would have lost its time zone the next time the deck was
+  touched for an unrelated reason, with the editor still showing the operator's own choice until
+  they reloaded.
+- Generated objects landed **under the headline**, and a headline as short as "20% OFF" wrapped into
+  the subhead. The text band is now reserved server-side, and the geometry assumes the wrap rather
+  than the intent.
+
 ## 2.0.0-beta6
 
 Two things that had never worked on a BrightSign now do, both proven on a live XT245 rather than
