@@ -1,5 +1,126 @@
 # Changelog
 
+## 2.0.0
+
+The 2.0 line, gathering everything from `2.0.0-alpha0` through `2.0.0-beta8`. Those entries stay
+below and are the detailed history; this is what changed since **1.9.x**.
+
+Upgrading from 1.9.x is a normal upgrade — schema migrations run on first boot, nothing needs doing
+by hand, and no existing content, playlist, schedule or device pairing changes meaning. The
+"Upgrading" section at the end of this entry lists the three things worth knowing first.
+
+### Added — slides
+
+A real authoring surface for the thing most people were using a text widget for. `config.template`
+is a view — geometry, style, motion, a slot name per element — and `config.fields` is a record. They
+meet at render time and nowhere else, so editing a headline three months later writes one string
+and leaves the layout untouched. Fifteen signage products were surveyed before this was designed and
+not one of them makes the changeable text part of the template; the single vendor that does is the
+one where editing later genuinely breaks.
+
+- **Elements**: headlines, text, big numbers, photos, rules and panels, plus **clock, date,
+  countdown and QR** moved over from the designer. QR codes are drawn server-side, so a code needs
+  no network at the panel and no third-party image service.
+- **Fonts**, bundled and served with the slide, so a deck renders the same on Android, Tizen,
+  BrightSign and a browser instead of falling back to whatever a panel happened to have. Uploads are
+  supported and carry a licence note, because this server redistributes the file.
+- **Motion** per element, with the editor showing when the last element settles against the slide's
+  own dwell — an animation that outlives its slide reads as a broken player, not a mis-timed one.
+- **Portrait and other shapes**, so a deck can be authored for the screen it will land on.
+- **Picture and video backgrounds**, with a scrim so white text stays readable over both. A video
+  background keeps the still as its poster, so a slow or undecodable clip shows the picture rather
+  than a black rectangle.
+- **Generated slides**, and then **layered** ones: a background plate plus individual objects cut
+  out with real transparency, each landing as its own element with its own entrance, and a headline
+  painted as artwork rather than typeset. The words behind that artwork stay a field, so they remain
+  editable and are read out to anything that cannot see the picture.
+
+The **Designer is marked deprecating** in the navigation. Widgets made with it still play and are
+still editable there; new work belongs in Slides.
+
+### Added — triggers
+
+An external system — a Crestron or Extron panel, a PLC, a button — can put a playlist over whatever
+a screen is showing. **Resolved on the screen itself**, so an alarm still works with the WAN down,
+which is the entire point: a trigger that needs the server is a trigger that fails in the situation
+it exists for. Assigning a trigger is what makes a screen download and pin the target playlist's
+media, so an unassigned trigger is a row in a database that will never fire.
+
+Fired over HTTP or UDP, in four wire shapes, because an integrator should not have to know which
+kind of box is behind the address. Where a player cannot bind a socket, the server can hold the door
+open instead — opt-in, and still gated per device.
+
+### Added — node mesh
+
+Servers can federate: a hub can see a customer's screens, transfer content to them, ask them to
+reboot or reload, and read diagnostics — each under its own grant, with the **customer deciding**
+what they accept and able to see what was done to them. There is a relay tier for topologies that
+need one.
+
+⚠️ Deliberately conservative for this release: enrollment and uplinks are **opt-in**, depth is capped
+at two tiers, and the mesh is read-only for the things it does not yet carry across a link
+(content, schedules, widgets and layouts are not mirrored).
+
+### Added — running the server on the player
+
+A BrightSign can now run ScreenTinker itself: the server as a real Node process, the player in the
+widget beside it. Screenshots, audio-plane muting and LAN trigger ingress all work on that shape.
+Video backgrounds composite behind slide content there too, which took a hardware session to prove.
+
+### Added — proof of play that survives an outage
+
+Players queue what they played while offline and flush it on reconnect, deduplicated by a
+player-minted id so a re-flush cannot double-count. A 20,963-second hole in the record was what
+prompted it.
+
+### Added — workspaces, SSO, and the rest
+
+A second workspace per account; per-organisation SSO/OIDC with DNS-verified domains; HTML bundles
+(`.wgt` / `.zip`) as a playlist item; bulk selection and group actions; playlist inheritance that
+forks instead of overwriting; Japanese localisation, and locales that no longer have to be complete
+to ship. Licences are gated in CI and an SBOM is published with every release.
+
+### Added — a receipt when a payment succeeds
+
+On `invoice.payment_succeeded`, so it covers renewals and portal payments rather than only the first
+checkout, and exactly once per invoice — Stripe retries webhooks until it gets a 2xx and can
+redeliver regardless.
+
+### Fixed — the event loop was really blocked, and the band was lying about it (#307)
+
+Reported from a 70-screen deployment, and it turned out to be three things at once.
+
+**The band was decided by one 20ms bucket per second.** A sampling window holds ~49 records, and the
+99th percentile of 49 records is the maximum — measured on a production instance,
+`avg(max_ms − p99_ms) = 0.000` in every window across two hours. Release required five *consecutive*
+clean seconds, which a working server never strings together, so one instance sat at `elevated` for
+sixteen days with its typical delay at the measurement floor. The band now reads the median of the
+last 15 windows. Replaying the real series: 88.6% elevated before, 99.9% normal after. Maintenance
+is band-gated, so this was also quietly throttling every prune sweep.
+
+**Closing a play searched the device's whole history** — and `LIMIT 1` cannot help when there is a
+sort in front of it. One screen with 377,132 play rows made that query cost **153ms on the event
+loop every time it advanced an item**. The server now remembers the row it opened and closes it by
+primary key, with an indexed fallback for plays it did not open.
+
+**Plays were started and never closed** — 36,096 open rows, the oldest three months old, and that
+set was what the query above had to search. A play now expires once it has been open longer than its
+content could have run, closed at its ceiling so a dark screen is never credited with playback.
+
+### Fixed — the trigger form was never styled
+
+It used a CSS class that does not exist, so it rendered as a bare stack of labels appended to the
+page. Rebuilt as a proper dialog, and unpublished playlists are no longer offered as a target —
+the server refuses them, so listing them only meant filling in the form to be told no.
+
+### Upgrading
+
+- **Nothing to do by hand.** Migrations run on first boot. The #307 index is created then, on a
+  1.4M-row table, in about 150ms.
+- **The mesh is off unless you turn it on.** No server joins anything by default.
+- **The Designer still works.** It is marked deprecating, not removed, and existing widgets are
+  unaffected.
+
 ## 2.0.0-beta8
 
 A production bug from a 70-screen deployment, the trigger form finally looking
