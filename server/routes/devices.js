@@ -11,7 +11,7 @@ const { accessContext } = require('../lib/tenancy');
 // already rejects workspace_viewer — the same check requireFleetWrite performs in routes/triggers.js.
 const { requireScope } = require('../middleware/apiToken');
 const { ALLOWED_COMMANDS, deliverCommand } = require('../lib/device-command');
-const { stripDeviceSecrets, stripDeviceSecretsForList, stripTriggerSecretForTokens } = require('../lib/device-sanitize');
+const { stripDeviceSecrets, stripDeviceSecretsForList, stripSecretsForTokens } = require('../lib/device-sanitize');
 const { layoutZones, orphanCountsByDevice } = require('../lib/zone-validate');
 const deviceSettings = require('../lib/device-settings'); // #150 delete+re-pair settings preservation
 const playerCapabilities = require('../lib/player-capabilities');
@@ -126,7 +126,7 @@ router.get('/:id', (req, res) => {
   if (ctx.actingAs) device._actingAs = true;
   // SELECT d.* now carries trigger_secret. A read-scoped token must not be able to turn "list my
   // screens" into "inject content on any of them" — see lib/device-sanitize.js.
-  stripTriggerSecretForTokens(device, req.viaToken);
+  stripSecretsForTokens(device, req.viaToken);
 
   const telemetry = db.prepare(
     'SELECT * FROM device_telemetry WHERE device_id = ? ORDER BY reported_at DESC LIMIT 20'
@@ -374,9 +374,9 @@ router.put('/:id', (req, res) => {
 
   const updated = db.prepare('SELECT * FROM devices WHERE id = ?').get(req.params.id);
   // ⚠️ stripDeviceSecrets only removes device_token. GET /:id additionally calls
-  // stripTriggerSecretForTokens; these two echo paths did not, so a token got the trigger secret
+  // stripSecretsForTokens; these two echo paths did not, so a token got the trigger secret
   // back from a rename — the escalation lib/device-sanitize.js exists to prevent.
-  res.json(stripTriggerSecretForTokens(stripDeviceSecrets(updated), req.viaToken));
+  res.json(stripSecretsForTokens(stripDeviceSecrets(updated), req.viaToken));
 });
 
 // #146 Item D: operator BLOCK / UNBLOCK toggle. Writes devices.blocked; the device
@@ -715,9 +715,9 @@ router.post('/:id/re-adopt', (req, res) => {
   const updated = db.prepare('SELECT * FROM devices WHERE id = ?').get(req.params.id);
   console.log(`[#150] re-adopted settings (fp ${fingerprint.slice(0, 8)}…) onto device ${req.params.id} by user ${req.user.id}`);
   // ⚠️ stripDeviceSecrets only removes device_token. GET /:id additionally calls
-  // stripTriggerSecretForTokens; these two echo paths did not, so a token got the trigger secret
+  // stripSecretsForTokens; these two echo paths did not, so a token got the trigger secret
   // back from a rename — the escalation lib/device-sanitize.js exists to prevent.
-  res.json(stripTriggerSecretForTokens(stripDeviceSecrets(updated), req.viaToken));
+  res.json(stripSecretsForTokens(stripDeviceSecrets(updated), req.viaToken));
 });
 
 // Delete device

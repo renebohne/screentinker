@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.0.3
+
+### Fixed — an API token could read a display's enrolment key
+
+The enrolment key added in 2.0.1 was withheld from the device list, which is the rule that governs
+`settings_pin`: one consumer, so do not hand it to every member on every dashboard load. It was not
+withheld from an API token, and that is the rule that governs `trigger_secret` — `GET
+/api/devices/:id` has no scope gate, so a READ-scoped integration token could read the key off the
+detail response.
+
+The key is the stronger of the two credentials. The trigger secret lets its holder push content to a
+screen; the enrolment key lets its holder BE the screen — register as that display, take its
+playlist and its commands, and report as it. So it now sits behind the same gate, and the helper is
+named for the category rather than for one member of it.
+
+Scope, honestly: enrolment keys are opt-in and only exist on displays somebody deliberately made a
+web player for, and an API token is already a workspace credential. This narrows an exposure inside
+an authenticated surface; it is not a path from the outside.
+
+A dashboard session still reads the key, because the operator has to be able to copy the player URL.
+
 ## 2.0.2
 
 ### Fixed — the "what's new" panel was empty in every container

@@ -157,8 +157,14 @@ test('⚠️ ...and is NEVER given to an API token, even on the detail route', (
 });
 
 test('the detail route actually calls the strip', () => {
+  /*
+   * The helper was renamed to stripSecretsForTokens when the enrolment key joined the trigger
+   * secret behind the same gate — one credential is not a special case, it is a category. Matched
+   * on either name so the assertion tracks the CALL rather than the spelling, and the reason it
+   * exists (the helper existing is not the same as it being used) is unchanged.
+   */
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'devices.js'), 'utf8');
-  assert.match(src, /stripTriggerSecretForTokens\(device, req\.viaToken\)/,
+  assert.match(src, /strip(SecretsForTokens|TriggerSecretForTokens)\(device, req\.viaToken\)/,
     'the helper existing is not the same as it being used');
 });
 

@@ -14,6 +14,13 @@
   ],
   "releases": [
     {
+      "version": "2.0.3",
+      "date": "2026-09-01",
+      "notes": [
+        "Tightens who can read a display’s web player key. It was already hidden from the display list, and is now also withheld from API tokens — so an integration with read access cannot pick up a key that would let it act as that screen. Your own dashboard still shows it."
+      ]
+    },
+    {
       "version": "2.0.2",
       "date": "2026-09-01",
       "notes": [
