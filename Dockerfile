@@ -41,6 +41,11 @@ COPY frontend/ /app/frontend/
 # without it). Small, and keeps the .glsl files the single source across server + player + Tizen.
 COPY shared/ /app/shared/
 COPY VERSION /app/VERSION
+# ⚠️ AND THE RELEASE NOTES, which the server reads from the repo ROOT at runtime
+# (server/lib/release-notes.js). Missing here, the API answers `current: null` and the "what's new"
+# panel is empty on every containerised install — while the unit tests pass, because they read the
+# file out of the source tree. Found on alpha, on the release that introduced the panel.
+COPY release-notes.json /app/release-notes.json
 # the /openapi.yaml route serves ../docs/openapi.yaml (the spec Redoc on /docs fetches);
 # without this it 404s in the image even though it serves fine from a dev checkout.
 COPY docs/openapi.yaml /app/docs/openapi.yaml

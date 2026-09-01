@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.0.2
+
+### Fixed — the "what's new" panel was empty in every container
+
+2.0.1 added the panel that tells you what changed after an upgrade, and did not ship the file it
+reads. `release-notes.json` lives at the repo root; the Dockerfile copies the root files it needs one
+by one and this one was never added, so `/api/release-notes` answered with nothing on every
+containerised install. Everything passed on the way out — the unit tests read the file out of the
+source tree, where it was present the whole time. Found by deploying it and looking, which is the
+expensive way to find it.
+
+The Dockerfile now copies it, and a test reads every repo-root path the server code resolves at
+runtime and asserts the image ships each one, so the next root file is caught the day somebody adds
+the read rather than on a deploy.
+
+Nothing else changed. If your 2.0.1 install is otherwise behaving, this only affects that panel.
+
 ## 2.0.1
 
 Two things the field found in 2.0.0. Neither is a new feature; both are places where the product
