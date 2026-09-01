@@ -84,7 +84,21 @@ function normalizeDeck(raw) {
    */
   const aspect = ASPECTS.includes(doc.aspect) ? doc.aspect : '16:9';
 
-  return { slides, aspect };
+  /*
+   * ⚠️ THE BED IS A PROPERTY OF THE DECK, NOT OF A SLIDE — and that is the whole reason it plays
+   * continuously. Publish stamps this one value onto every slide it emits, so every item in the
+   * deck's playlist names the same track; the player then keeps a single element alive across
+   * items because the id did not change. Storing it per slide would let two slides disagree, and
+   * the bed would restart in the middle of the deck.
+   *
+   * Returned explicitly, like `aspect` above and for the identical reason: this function builds a
+   * new object, so a field it does not name is deleted on the next save.
+   */
+  const music = typeof doc.music === 'string' && doc.music.length <= 64 ? doc.music : null;
+  const mv = Number(doc.music_volume);
+  const music_volume = Number.isFinite(mv) ? Math.min(1, Math.max(0, mv)) : 0.4;
+
+  return { slides, aspect, music, music_volume };
 }
 
 /*
@@ -137,6 +151,23 @@ function sanitizeStored(templateIn, fieldsIn) {
     background_content_id: settled.backgroundContentId,
     background_video_content_id: settled.backgroundVideoContentId,
     background_dim: settled.backgroundDim,
+    /*
+     * ⚠️ THE VOICEOVER ONLY. THE BED IS DELIBERATELY NOT STORED PER SLIDE.
+     *
+     * A voiceover belongs to a slide, so it is named here — and it has to be named, or it is
+     * deleted on the next save, the mechanism that once dropped background_content_id.
+     *
+     * The bed belongs to the DECK. It reaches a slide exactly once, when publish writes it into the
+     * widget config, and it is never written back into the document. Storing it here as well would
+     * give a deck two places to disagree about one setting: a stale id on one slide would survive
+     * saves, and the bed would restart in the middle of the deck — which is the single failure this
+     * whole design exists to avoid. normalizeSlide still READS music, because that is how a
+     * published widget config arrives at the renderer; it just never round-trips through here.
+     */
+    audio: {
+      vo: settled.audio.vo,
+      vo_volume: settled.audio.voVolume,
+    },
     elements: settled.elements.map((e) => ({
       slot: e.slot,
       kind: e.kind,
@@ -202,7 +233,14 @@ function contrastRatio(a, b) {
 /** Below this a code is unreliable in the field even when it renders perfectly. */
 const QR_MIN_CONTRAST = 3;
 
-function deckWarnings(deck) {
+/**
+ * @param {object} deck        a normalized deck
+ * @param {object} [durations] content_id -> seconds, for media the deck references. Passed in by
+ *                             the caller rather than looked up here: this function has no database,
+ *                             which is what lets it be tested against a document and nothing else —
+ *                             the same reason normalizeSlide takes a resolver instead of a table.
+ */
+function deckWarnings(deck, durations = {}) {
   const out = [];
   for (const s of deck.slides) {
     for (const e of normalizeSlide({ template: s.template, fields: s.fields }).elements) {
@@ -218,6 +256,27 @@ function deckWarnings(deck) {
         contrast: Number(ratio.toFixed(2)),
       });
     }
+    /*
+     * ⚠️ A VOICEOVER THAT OUTLIVES ITS SLIDE IS THE SAME DEFECT AS MOTION THAT DOES, and it is
+     * worse to watch: the slide changes mid-sentence and the next slide inherits a voice talking
+     * about the last one. The motion warning below has been here since decks shipped; this is the
+     * identical rule applied to the identical mistake, so an operator who trusts one can trust both.
+     *
+     * Silent when the duration is unknown (a caller that passed nothing, a clip whose length was
+     * never probed) — a warning that fires on missing data teaches people to ignore warnings.
+     */
+    const voSec = Number(durations[normalizeSlide({ template: s.template, fields: s.fields }).audio.vo]);
+    if (Number.isFinite(voSec) && voSec > s.dwell_sec) {
+      out.push({
+        slide_id: s.id,
+        kind: 'vo-outlives-dwell',
+        message: `The voiceover on "${s.name}" runs ${voSec.toFixed(1)}s but the slide is replaced at `
+          + `${s.dwell_sec}s — the end of it is never heard.`,
+        vo_sec: Number(voSec.toFixed(2)),
+        dwell_sec: s.dwell_sec,
+      });
+    }
+
     const settle = settleTime(normalizeSlide({ template: s.template, fields: s.fields }));
     if (settle > s.dwell_sec) {
       out.push({
@@ -266,7 +325,37 @@ function publishDeck(db, { deck, doc, userId, playlistId, publishedWidgetIds }) 
     // ---------------------------------------------------------------- widgets, one per slide
     const ownedNow = [];
     normalized.slides.forEach((s, i) => {
-      const config = JSON.stringify({ template: s.template, fields: s.fields });
+      /*
+       * ⚠️ THE DECK'S BED IS STAMPED ONTO EVERY SLIDE, and that is what makes it continuous.
+       *
+       * The player keeps one audio element alive across items for as long as consecutive items
+       * name the SAME track. A deck is N separate playlist items by the time it plays, so the
+       * only way the bed survives an advance is for every one of those items to agree on the id.
+       * Written here at publish rather than stored per slide, so the deck stays the single place
+       * the operator sets it and two slides can never disagree.
+       *
+       * Also written when it is null — clearing the deck's music has to clear it everywhere, and
+       * leaving a stale id on one slide would restart the bed in the middle of the deck.
+       */
+      const template = {
+        ...s.template,
+        audio: { ...s.template.audio, music: normalized.music, music_volume: normalized.music_volume },
+        /*
+         * ⚠️ AND THE DECK'S SHAPE, for the same structural reason as the bed above: by the time it
+         * plays, a deck is N independent widgets and nothing downstream can still ask the deck
+         * anything. Stored on the deck, stamped here, so two slides can never disagree about the
+         * shape they were laid out in.
+         *
+         * CARRIED, NOT YET HONOURED. The renderer still gives the stage the panel's whole box, so a
+         * 16:9 deck on a 2560x1800 screen is a different composition (cover backgrounds cropped,
+         * text past the edges). The CSS that fixes it needs container queries, which the Android
+         * WebView on a lot of signage hardware does not have — see the long note in
+         * test/slide-render.test.js. Stamping it now means every deck published from today already
+         * carries its shape when the renderer can use it, with no republish needed then.
+         */
+        aspect: normalized.aspect,
+      };
+      const config = JSON.stringify({ template, fields: s.fields });
       const name = `${deck.name} — ${s.name}`.slice(0, 200);
 
       let existing = s.widget_id

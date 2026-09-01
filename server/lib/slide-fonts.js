@@ -4,7 +4,7 @@
  * The fonts a slide can be set in, bundled with the product.
  *
  * ⚠️ WHY BUNDLE ANYTHING AT ALL. Until now there was no font pipeline at any layer of ScreenTinker:
- * no @font-face anywhere, no font files, and lib/upload-sniff.js accepts only image and video magic
+ * no @font-face anywhere, no font files, and lib/upload-sniff.js accepts only image, video and audio magic
  * bytes, so a font could not even be uploaded. The Content Designer offered "Impact" — a face that
  * exists on none of Android, Tizen or BrightSign — so the same slide rendered as something
  * different on every panel, and differently again on each. For a feature whose entire pitch is

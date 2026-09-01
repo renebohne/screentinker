@@ -21,6 +21,7 @@ const { getMaintenanceStats } = require('../db/database');
 const { getCheckpointerState } = require('../db/wal-checkpointer');   // #240
 const heartbeat = require('../services/heartbeat');
 const appSettings = require('../lib/app-settings');
+const bootDefer = require('../lib/boot-defer');   // 2.0.1 first-boot player defer
 
 // Public status page
 router.get('/', (req, res) => {
@@ -51,6 +52,20 @@ router.get('/', (req, res) => {
      */
     screen_capture: require('../lib/brightsign-capture').available(),
   };
+
+  /*
+   * 2.0.1 — WHY PLAYERS ARE BEING REFUSED, on the endpoint compose already polls.
+   *
+   * ⚠️ STILL 200, STILL `status: 'ok'`. The healthcheck in docker-compose.example.yml treats a
+   * non-2xx as unhealthy and restarts the container; failing it during scheduled maintenance would
+   * restart the very boot that is trying to finish — the #146 restart loop with a new cause. The
+   * container IS healthy. It is deliberately not taking players yet, and this block says so.
+   *
+   * Omitted entirely once players are accepted normally, so a healthy install's status payload is
+   * byte-identical to 2.0.0's.
+   */
+  const maintenance = bootDefer.statusBlock();
+  if (maintenance) body.maintenance = maintenance;
 
   // #146: the debug block is admin-toggleable (app_settings.status_debug_enabled),
   // defaulting to the STATUS_DEBUG_ENABLED env behavior. Cheap cached boolean. When off,

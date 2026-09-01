@@ -65,6 +65,46 @@ function requirePlaylistWrite(req, res, next) {
   next();
 }
 
+/*
+ * Slide audio, resolved from content ids into URLs the player can actually fetch.
+ *
+ * ⚠️ RESOLVED HERE BECAUSE ONLY HERE CAN. The slide config stores content IDs, and a player has no
+ * way to turn one into a file: /api/content/:id/file is authenticated and a player is not a
+ * dashboard user. Every other media item in this snapshot is denormalized the same way — the
+ * player is handed a path, never an id to look up.
+ *
+ * ⚠️ THE MUSIC ID IS SENT AS WELL AS ITS URL, and that is the load-bearing part. The player keeps
+ * one bed alive across items for as long as consecutive items name the SAME track; it compares the
+ * id, not the URL, because /api/content/:id/replace keeps the id and writes a new filepath — so
+ * comparing URLs would restart the music the first time somebody swapped the file.
+ *
+ * Silent for everything that is not a slide with audio, so the snapshot for every other item is
+ * byte-identical to what it was.
+ */
+function attachSlideAudio(it) {
+  if (it.widget_type !== 'slide' || !it.widget_config) return;
+  let cfg;
+  try { cfg = JSON.parse(it.widget_config); } catch { return; }
+  const a = cfg && cfg.template && cfg.template.audio;
+  if (!a || (!a.vo && !a.music)) return;
+
+  const url = (id) => {
+    if (!id) return null;
+    const row = db.prepare('SELECT filepath, remote_url FROM content WHERE id = ?').get(id);
+    if (!row) return null;
+    return row.remote_url || (row.filepath ? `/uploads/content/${row.filepath}` : null);
+  };
+
+  const vo = url(a.vo);
+  const music = url(a.music);
+  if (!vo && !music) return;
+
+  it.audio = {
+    ...(vo ? { vo_url: vo, vo_volume: typeof a.vo_volume === 'number' ? a.vo_volume : 1 } : {}),
+    ...(music ? { music_id: a.music, music_url: music, music_volume: typeof a.music_volume === 'number' ? a.music_volume : 0.4 } : {}),
+  };
+}
+
 // Build the snapshot item list for a playlist (denormalized for device payload)
 function buildSnapshotItems(playlistId) {
   const items = db.prepare(`
@@ -96,6 +136,7 @@ function buildSnapshotItems(playlistId) {
     const blocks = schedulesForItem(it._iid);
     if (blocks.length) it.schedules = blocks;
     delete it._iid;
+    attachSlideAudio(it);
   }
 
   /*

@@ -34,6 +34,7 @@ import com.remotedisplay.player.player.TransitionGLView
 import com.remotedisplay.player.player.PlaylistController
 import com.remotedisplay.player.player.PlaylistItem
 import com.remotedisplay.player.player.PipOverlay
+import com.remotedisplay.player.player.SlideAudioPlayer
 import com.remotedisplay.player.player.WallController
 import com.remotedisplay.player.player.GroupScheduleController
 import com.remotedisplay.player.player.ZoneManager
@@ -61,6 +62,7 @@ class MainActivity : AppCompatActivity() {
     private var bound = false
     private lateinit var mediaPlayer: MediaPlayerManager
     private lateinit var playlistController: PlaylistController
+    private var slideAudioPlayer: SlideAudioPlayer? = null
     private lateinit var updateChecker: UpdateChecker
     private var zoneManager: ZoneManager? = null
     private lateinit var wallController: WallController
@@ -252,6 +254,7 @@ class MainActivity : AppCompatActivity() {
             this, pipLayout, contentCache,
             setBaseAudioSuppressed = { on ->
                 try { if (::mediaPlayer.isInitialized) mediaPlayer.setTriggerMute(on) } catch (e: Throwable) { }
+                try { slideAudioPlayer?.setMuted(on) } catch (e: Throwable) { }
             }
         ) { level, message -> wsService?.sendLog("trigger", level, message) }
         triggerManager = com.remotedisplay.player.trigger.TriggerManager(trigOverlay) { level, message ->
@@ -300,6 +303,13 @@ class MainActivity : AppCompatActivity() {
         playlistController.setContentReadyCheck { item ->
             item.isWidget || item.isRemote || contentCache.isContentCached(item.contentId, item.contentRev)
         }
+
+        // Slide audio: a deck's voiceover and music bed. They live OUTSIDE the widget WebView that
+        // renders the slide, because a slide is published as a widget and a widget iframe makes no
+        // sound of its own — the same reason the web and Tizen players own these elements too.
+        slideAudioPlayer = SlideAudioPlayer(this)
+        playlistController.setSlideAudioPlayer(slideAudioPlayer)
+        playlistController.setServerBase { config.serverUrl }
 
         // feat/transition-engine: full-screen GLES2 overlay that plays image/video wipes. Inserted just
         // BELOW the status overlay (so the connecting/idle screen still covers it) and ABOVE the image/
@@ -1750,6 +1760,11 @@ class MainActivity : AppCompatActivity() {
         // — inflating Total Plays and Hours in Reports, and racing over the resume position that
         // #234 relies on. Widget items also re-entered showWidget on a WebView nobody owned.
         if (::playlistController.isInitialized) playlistController.stop()
+        // Belt and braces: controller.stop() already releases these, but two ExoPlayers on the main
+        // looper are exactly the kind of thing that outlives an Activity if the controller never got
+        // as far as being initialized.
+        try { slideAudioPlayer?.stop() } catch (e: Throwable) { }
+        slideAudioPlayer = null
         if (::updateChecker.isInitialized) updateChecker.shutdown()
         // The 30s failure-check loop and anything else this Activity posted.
         handler.removeCallbacksAndMessages(null)

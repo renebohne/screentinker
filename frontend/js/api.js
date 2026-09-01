@@ -503,6 +503,11 @@ export const api = {
   // #74/#75 per-item schedule blocks
   getItemSchedules: (id, itemId) => request(`/playlists/${id}/items/${itemId}/schedules`),
   setItemSchedules: (id, itemId, blocks) => request(`/playlists/${id}/items/${itemId}/schedules`, { method: 'PUT', body: JSON.stringify({ blocks }) }),
+  // #313: create a display that has no player yet, and get the URL that will become one.
+  createWebPlayerDisplay: (name) => request('/devices/web-player', { method: 'POST', body: JSON.stringify({ name }) }),
+  // #313: mint or roll the enrolment key that lets a storage-less web player identify itself.
+  createEnrolKey: (id) => request(`/devices/${id}/enrol-key`, { method: 'POST' }),
+  revokeEnrolKey: (id) => request(`/devices/${id}/enrol-key`, { method: 'DELETE' }),
   assignPlaylistToDevice: (playlistId, device_id) => request(`/playlists/${playlistId}/assign`, { method: 'POST', body: JSON.stringify({ device_id }) }),
   clearDevicePlaylist: (device_id) => request(`/devices/${device_id}/playlist`, { method: 'DELETE' }),
   publishPlaylist: (id) => request(`/playlists/${id}/publish`, { method: 'POST' }),

@@ -159,8 +159,31 @@ function ensureFontFaces() {
  */
 const VIDEO_EXT = /\.(mp4|webm|ogv|mov|mkv|m4v)$/i;
 function videoContent() {
-  return (state.contentIndex || []).filter((c) => (c.type && String(c.type).startsWith('video'))
+  // `mime_type`, not `type`: the API field is mime_type and the old `c.type` read was always
+  // undefined, so this silently fell back to guessing from the filename.
+  return (state.contentIndex || []).filter((c) => String(c.mime_type || '').startsWith('video/')
     || VIDEO_EXT.test(c.filename || ''));
+}
+
+/*
+ * Audio the operator can choose for a voiceover or a bed.
+ *
+ * Same shape as videoContent above, and the same reason for the extension fallback: `type` is the
+ * stored mime and is empty for anything uploaded before it was recorded, so a library that predates
+ * it would offer nothing at all.
+ */
+const AUDIO_EXT = /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|weba)$/i;
+/*
+ * The index holds three kinds now, so the image picker has to say so. It used to take the whole
+ * index unfiltered, which was correct only while the index happened to be images alone.
+ */
+function imageContent() {
+  return (state.contentIndex || []).filter((c) => String(c.mime_type || '').startsWith('image/')
+    || (!c.mime_type && !VIDEO_EXT.test(c.filename || '') && !AUDIO_EXT.test(c.filename || '')));
+}
+function audioContent() {
+  return (state.contentIndex || []).filter((c) => String(c.mime_type || '').startsWith('audio/')
+    || AUDIO_EXT.test(c.filename || ''));
 }
 
 function newElement(kind) {
@@ -289,6 +312,11 @@ function renderEditor(container) {
       <div style="display:flex;gap:8px">
         <button class="btn btn-secondary" id="backBtn">← All decks</button>
         <button class="btn btn-secondary" id="saveBtn">Save</button>
+        <!--
+          Preview opens the real player in preview mode against this deck's playlist, so what plays
+          is the payload a screen would get — same renderer, same transitions, same audio.
+        -->
+        <button class="btn btn-secondary" id="previewBtn">▶ Preview</button>
         <button class="btn btn-primary" id="pubBtn">Publish</button>
       </div>
     </div>
@@ -336,6 +364,22 @@ function renderEditor(container) {
             so this changes what you DESIGN against, not what ships. A portrait screen laid out on a
             16:9 stage looks right here and wrong on the wall, which is the whole reason it exists.
           -->
+          <!--
+            The music bed. A DECK property, deliberately, not a slide one: it plays continuously
+            under the whole deck, and the only way that can work is for every slide to name the
+            same track. Setting it per slide would let two slides disagree and the music would
+            restart in the middle.
+          -->
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted)">
+            Music
+            <select id="deckMusic" class="input" style="margin:0;padding:3px 6px;font-size:12px;max-width:170px">
+              <option value="">— none —</option>
+            </select>
+          </label>
+          <label id="deckMusicVolWrap" style="display:none;align-items:center;gap:6px;font-size:12px;color:var(--text-muted)">
+            Level
+            <input type="range" id="deckMusicVol" min="0" max="1" step="0.05" style="width:80px">
+          </label>
           <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted)">
             Shape
             <select id="aspectSel" class="input" style="margin:0;padding:3px 6px;font-size:12px">
@@ -365,12 +409,48 @@ function renderEditor(container) {
     await render(container);
   });
   container.querySelector('#saveBtn').addEventListener('click', () => save(container));
+
+  /*
+   * Preview the deck as a screen would receive it.
+   *
+   * ⚠️ IT PREVIEWS WHAT IS PUBLISHED, NOT WHAT IS ON THIS CANVAS, and it says so rather than
+   * quietly showing something else. The player renders from the deck's PLAYLIST, and a slide
+   * reaches that playlist only when Publish writes its widget — so an unsaved or unpublished edit
+   * genuinely is not in there. A preview that silently showed stale slides would be worse than no
+   * preview: it is the button people press specifically to trust what they are about to ship.
+   *
+   * ⚠️ AND IT IS A NEW TAB, DELIBERATELY. Audio is the reason this button exists, and audio needs
+   * a real page the operator can click in — a browser refuses unmuted autoplay without a gesture,
+   * so the player offers its unmute affordance and a click there starts the sound. An iframe in
+   * this editor would inherit the same restriction with nowhere obvious to click.
+   */
+  container.querySelector('#previewBtn').addEventListener('click', () => {
+    const d = state.deck;
+    if (!d || !d.playlist_id) {
+      showToast('Publish the deck first — preview plays the deck\'s playlist, which Publish creates.', 'error');
+      return;
+    }
+    if (state.dirty && !confirm('This deck has unsaved changes. Preview shows the last PUBLISHED version — continue?')) return; // eslint-disable-line no-alert
+    window.open(`/player?preview=1&playlist=${encodeURIComponent(d.playlist_id)}`, '_blank', 'noopener');
+  });
   container.querySelector('#pubBtn').addEventListener('click', () => publish(container));
   container.querySelector('#playBtn').addEventListener('click', play);
   container.querySelector('#aspectSel').addEventListener('change', (e) => {
     state.deck.doc.aspect = e.target.value;
     touch(container);
     paintAll(container);
+  });
+  container.querySelector('#deckMusic').addEventListener('change', (e) => {
+    state.deck.doc.music = e.target.value || null;
+    // A bed nobody set a level for should not arrive at full volume under a voice.
+    if (!e.target.value) state.deck.doc.music_volume = undefined;
+    else if (state.deck.doc.music_volume == null) state.deck.doc.music_volume = 0.4;
+    touch(container);
+    paintAll(container);
+  });
+  container.querySelector('#deckMusicVol').addEventListener('input', (e) => {
+    state.deck.doc.music_volume = Number(e.target.value);
+    touch(container);
   });
   container.querySelector('#aiGenBtn').addEventListener('click', () => aiGenerate(container));
   container.querySelector('#aiBgBtn').addEventListener('click', () => aiGenerateBackground(container));
@@ -603,6 +683,22 @@ function renderStage(container) {
   stage.style.aspectRatio = aspectCss();      // the shape this deck is authored for
   const sel = container.querySelector('#aspectSel');
   if (sel && sel.value !== deckAspect()) sel.value = deckAspect();
+
+  const musicSel = container.querySelector('#deckMusic');
+  if (musicSel) {
+    const cur = (state.deck && state.deck.doc && state.deck.doc.music) || '';
+    // Rebuilt rather than patched: the content library is fetched after this markup exists, so the
+    // options are empty on the first paint and complete on the next.
+    const opts = ['<option value="">— none —</option>'].concat(
+      audioContent().map((c) => `<option value="${esc(c.id)}"${c.id === cur ? ' selected' : ''}>${esc(c.filename)}</option>`));
+    const next = opts.join('');
+    if (musicSel.innerHTML !== next) musicSel.innerHTML = next;
+    musicSel.value = cur;
+    const volWrap = container.querySelector('#deckMusicVolWrap');
+    const vol = container.querySelector('#deckMusicVol');
+    if (volWrap) volWrap.style.display = cur ? 'flex' : 'none';
+    if (vol) vol.value = state.deck.doc.music_volume == null ? 0.4 : state.deck.doc.music_volume;
+  }
   stage.style.background = s.template.background || '#000';
   stage.innerHTML = '';
   /*
@@ -845,6 +941,9 @@ function renderProps(container) {
   const s = slide(); if (!s) { host.innerHTML = ''; return; }
 
   if (state.tab === 'slide') {
+    if (!s.template.audio || typeof s.template.audio !== 'object') s.template.audio = {};
+    const voId = s.template.audio.vo || '';
+    const voVol = s.template.audio.vo_volume == null ? 1 : s.template.audio.vo_volume;
     const bgId = s.template.background_content_id || '';
     const bgVid = s.template.background_video_content_id || '';
     const dim = s.template.background_dim == null ? 0 : s.template.background_dim;
@@ -856,12 +955,24 @@ function renderProps(container) {
            <div class="sl-slide"><input type="range" id="sDwell" min="1" max="60" step="1" value="${s.dwell_sec}">
              <input type="number" class="sl-num" id="sDwelln" min="1" max="60" step="1" value="${s.dwell_sec}"></div></div>
        </div>`
+      + `<div class="sl-group"><p class="sl-legend">Voiceover</p>
+           <div class="sl-row"><label for="sVo">Track</label>
+             <select class="input" id="sVo"><option value="">— none —</option>${
+               audioContent().map((c) => `<option value="${esc(c.id)}" ${
+                 c.id === voId ? 'selected' : ''}>${esc(c.filename)}</option>`).join('')}</select></div>
+           ${voId ? `<div class="sl-row"><label for="sVoVol">Volume</label>
+             <div class="sl-slide"><input type="range" id="sVoVol" min="0" max="1" step="0.05" value="${voVol}">
+               <input type="number" class="sl-num" id="sVoVoln" min="0" max="1" step="0.05" value="${voVol.toFixed(2)}"></div></div>
+             <p class="sl-note">Plays while this slide is up and stops when it changes — so a track
+                longer than the dwell above is cut off. Screens are muted unless the display is set
+                to allow audio.</p>` : ''}
+         </div>`
       + `<div class="sl-group"><p class="sl-legend">Background</p>
            <div class="sl-row"><label for="sBg">Colour</label>
              <input type="color" class="sl-colour" id="sBg" value="${esc(s.template.background || '#000000')}"></div>
            <div class="sl-row"><label for="sBgImg">Photo</label>
              <select class="input" id="sBgImg"><option value="">— none —</option>${
-               (state.contentIndex || []).map((c) => `<option value="${esc(c.id)}" ${
+               imageContent().map((c) => `<option value="${esc(c.id)}" ${
                  c.id === bgId ? 'selected' : ''}>${esc(c.filename)}</option>`).join('')}</select></div>
            <div class="sl-row"><label for="sBgVid">Video</label>
              <select class="input" id="sBgVid"><option value="">— none —</option>${
@@ -882,6 +993,13 @@ function renderProps(container) {
     host.querySelector('#sName').oninput = (e) => { s.name = e.target.value; touchValue(container); };
     host.querySelector('#sBg').oninput = (e) => { s.template.background = e.target.value; touchValue(container); };
     // Changing the photo shows or hides the Dim row, so this one genuinely rebuilds the panel.
+    // Rebuilds the panel, because choosing a track reveals the volume row.
+    host.querySelector('#sVo').onchange = (e) => {
+      s.template.audio.vo = e.target.value || null;
+      if (!e.target.value) delete s.template.audio.vo_volume;
+      else if (s.template.audio.vo_volume == null) s.template.audio.vo_volume = 1;
+      state.dirty = true; paintAll(container);
+    };
     host.querySelector('#sBgImg').onchange = (e) => {
       s.template.background_content_id = e.target.value || null;
       if (!e.target.value && !s.template.background_video_content_id) delete s.template.background_dim;
@@ -907,6 +1025,7 @@ function renderProps(container) {
       r.oninput = (ev) => apply(ev.target.value, 'range');
       n.onchange = (ev) => apply(ev.target.value, 'num');
     };
+    bindSlidePair('sVoVol', (v) => { s.template.audio.vo_volume = v; }, 2);
     bindSlidePair('sDwell', (v) => { s.dwell_sec = Math.round(v); }, 0);
     bindSlidePair('sDim', (v) => { s.template.background_dim = v; }, 2);
     host.querySelector('#delSlide').onclick = () => {
@@ -964,7 +1083,7 @@ function renderProps(container) {
         ? row('Text', `<textarea class="input" id="pText" rows="3" style="resize:vertical">${esc(s.fields[e.slot] || '')}</textarea>`)
         : e.kind === 'image'
           ? row('Photo', `<select class="input" id="pImg"><option value="">— none —</option>${
-              (state.contentIndex || []).map((c) => `<option value="${esc(c.id)}" ${
+              imageContent().map((c) => `<option value="${esc(c.id)}" ${
                 c.id === e.content_id ? 'selected' : ''}>${esc(c.filename)}</option>`).join('')}</select>`)
             + row('Fit', `<select class="input" id="pFit">
                  <option value="cover" ${(e.fit || 'cover') === 'cover' ? 'selected' : ''}>Fill the box (crop)</option>
@@ -1693,13 +1812,29 @@ async function loadFonts() {
 async function loadContent() {
   try {
     /*
-     * ⚠️ IMAGES, AND THE SERVER'S MAXIMUM. `/content` with no query returns the 100 newest rows of
-     * EVERY type and this filters to images afterwards — so a workspace whose last hundred uploads
-     * were videos offers an empty image list here while its library is full of pictures.
+     * ⚠️ ONE REQUEST PER KIND, AND THE SERVER'S MAXIMUM ON EACH. `/content` with no query returns
+     * the 100 newest rows of EVERY type, so a workspace whose last hundred uploads were videos
+     * would offer an empty image list while its library is full of pictures. Asking per type is
+     * what makes each picker complete.
+     *
+     * ⚠️ AND IT IS THREE KINDS, NOT ONE. This used to fetch images alone, which quietly emptied
+     * every other picker built on this index: videoContent() filters it for the background-video
+     * selector and could never match, because the only rows in it were images. The audio pickers
+     * added for voiceovers and music beds would have been the third casualty of the same line.
+     *
+     * mime_type is CARRIED, because the filters key on it. The previous shape dropped it, so those
+     * filters were reduced to guessing from the filename — which fails outright for remote URLs,
+     * where the name is whatever the operator typed and carries no extension at all.
      */
-    const all = await api.get('/content?type=image&limit=500');
-    state.contentIndex = (Array.isArray(all) ? all : [])
-      .filter((c) => (c.mime_type || '').startsWith('image/'))
-      .map((c) => ({ id: c.id, filename: c.filename, filepath: c.filepath, remote_url: c.remote_url }));
+    const [images, videos, audios] = await Promise.all([
+      api.get('/content?type=image&limit=500').catch(() => []),
+      api.get('/content?type=video&limit=500').catch(() => []),
+      api.get('/content?type=audio&limit=500').catch(() => []),
+    ]);
+    state.contentIndex = [images, videos, audios]
+      .flatMap((list) => (Array.isArray(list) ? list : []))
+      .map((c) => ({
+        id: c.id, filename: c.filename, filepath: c.filepath, remote_url: c.remote_url, mime_type: c.mime_type,
+      }));
   } catch (e) { state.contentIndex = []; }
 }

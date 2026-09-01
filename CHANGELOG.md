@@ -1,5 +1,226 @@
 # Changelog
 
+## 2.0.1
+
+Two things the field found in 2.0.0. Neither is a new feature; both are places where the product
+made someone do work it should have done itself.
+
+### Added — slides can talk, and a deck can have music under it
+
+A slide can carry a **voiceover**, and a deck can carry one **background music** track that plays
+continuously underneath the whole thing. **Audio files can now be uploaded** — mp3, m4a, wav, ogg
+and flac — which the content library previously refused outright.
+
+The interesting part is where the audio lives, because the obvious answer is wrong twice. A slide is
+a widget in an iframe, and a deck publishes as one widget per slide plus a playlist — so a looping
+track inside a slide would restart on every advance, which is the one thing a bed must not do. Audio
+in there would also be invisible to the rule that decides which zone owns the sound, and to the
+per-item mute, the wall-follower rule and the browser's autoplay gesture — the same reason a slide's
+background video has always been unconditionally silent.
+
+So neither track is rendered into the slide. The player owns both elements: the voiceover for as
+long as its item is up, the bed across items that name the same track. Publish stamps one track id
+across every slide in the deck, and the player leaves a playing bed alone when the id has not
+changed — compared by id rather than URL, because replacing an audio file keeps the id and changes
+the path. The bed is stored once, on the deck, so two slides can never disagree about it.
+
+Both tracks play on **every player**, not just a browser tab: the web player, Tizen, BrightSign and
+Android each own the two elements themselves, with the same rule in all four — the bed is keyed on
+its track id and a matching id is left completely alone, never re-prepared and never restarted. On
+Android that is two ExoPlayer instances of its own, deliberately not the one that owns the video
+surface, whose lifetime ends with every item. A panel that has not updated declares no support and
+the dashboard stops offering a deck with a voiceover to a screen that cannot say it.
+
+A voiceover longer than its slide's dwell is now flagged in the editor, exactly like motion that
+outlives its dwell has been since decks shipped — the slide changes mid-sentence otherwise.
+
+Screens stay silent by default. Audio still goes through the same mute decision as everything else,
+which on a signage panel with no user gesture means muted.
+
+### Added — a web player that survives a host with no storage (#313)
+
+Reported by someone driving vMix signage from a browser input. A vMix browser input deletes its
+entire browser profile when vMix closes — vMix's own staff say so on their forum — so localStorage,
+cookies and IndexedDB all go together and the player comes back knowing nothing. A player with no
+identity pairs as a NEW display, so every restart of the production PC left another dead screen in
+the dashboard.
+
+Add Display now has a checkbox — *"This player can't stay paired"* — which creates the display
+from the dashboard and hands back a **web player URL**: `…/player?k=…`. There is no code to type,
+because there is no player yet to show one. The key in that URL identifies the screen, so a player
+with nothing else comes back as the display it was rather than as a stranger, and the URL is always
+available afterwards on that display's **Web player** tab.
+
+**Nothing gets one of these unless it is asked for.** Ordinary pairing does not mint a key, the
+register path never creates one, and the tab only appears on a display that actually has one — so
+every display added the usual way is exactly as it was.
+
+- **It is a separate credential, not the device token.** The token authenticates every message and
+  cannot be changed without re-pairing the screen. This does one thing — names a display and proves
+  you may be it — and an operator can roll it from the display's page and paste a new URL without
+  touching the screen. Same reach while it is secret; a completely different recovery when it is not.
+- **It is an exchange at the door.** The key is turned into the display's id and token in the first
+  lines of the register handler, so the blocked gate, the flap limiter, the token check and the
+  reconnect path all run exactly as they always did. A parallel authentication path would have been
+  a parallel set of bugs.
+- **A key that resolves to nothing is refused, never fallen through.** Dropping to the pairing path
+  would provision a new row — and a storage-less player would do that on every restart, which is
+  the failure being fixed.
+- Offered only on web players, never handed out in a device list response, and counted against the
+  same per-IP lockout that guards pairing codes.
+
+Onboarding is unchanged: pair the screen the way you always did, then take its URL from the display
+page and paste that into vMix.
+
+### Fixed — a slide was a different composition on every screen shape
+
+A slide is laid out in percentages and in units relative to the stage, so **the stage's aspect is
+the composition**. The renderer handed the stage whatever box the panel had, which meant a deck
+designed at 16:9 became a different slide on anything else: a background set to cover was cropped
+about a fifth off each side, headlines ran past the edges, and the eyebrow could sit off-screen
+entirely. Found on a 2560x1800 Android panel, where the whole slide was one background image and a
+fifth of it was simply missing.
+
+The stage is now fitted to the shape the deck was authored in and centred, with the surrounding
+frame painted black — so the slide is the same composition on a 16:9 panel, an ultrawide, a portrait
+screen or inside a zone. The deck's shape is stamped onto every published slide at publish time,
+the same way the music bed's id is, so nothing downstream has to ask the deck anything. A deck
+published before this carries no shape and is treated as 16:9, which is the editor's default and
+what those decks were laid out in.
+
+⚠️ **The fitting is done in script, and that is the load-bearing half.** Container query units
+shipped in Chrome 105, and a lot of signage hardware still runs an Android WebView from 2021 — where
+every type size on a slide was an invalid declaration the engine threw away, so those panels have
+never rendered a slide at the authored size. The oversized, clipped text people were seeing there
+was the browser's default size being auto-inflated, not a layout bug. The fitter converts those
+units to pixels against the fitted stage, reading the number out of the element's style attribute
+rather than the CSSOM — on an engine that rejected the declaration the CSSOM has nothing left to
+read. Three CSS-only versions of this were tried first and abandoned; the note in
+`server/test/slide-render.test.js` records why, so nobody rebuilds one. If the script cannot run,
+the stage falls back to the full box and the slide renders exactly as it did before — degraded,
+never blank.
+
+### Fixed — a 2.0.0 first boot could be flattened by its own fleet
+
+Reported from a 73-device install on a Synology DS225+ over spinning SATA, upgrading 1.9.39 to
+2.0.0. Migrations and the playlist-source backfill were fine. What was not:
+
+- **The `play_logs` index build printed nothing for over five minutes.** It sat in uninterruptible
+  disk sleep, which from outside is indistinguishable from a hang — and the natural response to a
+  hang is to kill it, which is the one thing that must not happen during a migration. The build now
+  logs an estimated row count and a warning before it starts, and its duration afterwards. There is
+  deliberately no progress *during* it: `db.exec` is one synchronous call and nothing else in the
+  process can run until it returns, so the honest options are a line either side or silence.
+- **All 73 players reconnected at once and HTTP was unreachable for about twenty minutes**, even
+  though the WebSocket layer was accepting. The #142 shed was working exactly as designed and could
+  not help — nothing was misbehaving, there were simply 73 well-behaved players arriving together
+  while the stranded-play sweep was still draining. Setting `SCREENTINKER_DEFER_PLAYERS=1` (and, by
+  default, the first boot after a migration that touched plays) now refuses players with a 503
+  until the sweep reports idle. `/api/status` keeps answering 200 with a `maintenance` block saying
+  why — failing a healthcheck mid-maintenance is how a slow boot becomes a restart loop — and the
+  dashboard is untouched, so an operator can watch the drain rather than being locked out with the
+  fleet. It always lifts: when the sweep drains, or after 30 minutes, whichever comes first.
+  This is the reporter's own workaround (stop nginx → let maintenance finish → start nginx) made
+  into something nobody has to know.
+- **The stranded sweep now logs every batch** — `batch i/n closed=X remaining=Y duration=Z` — and
+  raises to warn past two seconds, so slow storage is visible in the same stream as the shed lines.
+  On the reported hardware each batch held the loop for one to two seconds and nothing said so.
+
+The batch size was already right; it has not changed.
+
+**The "36,096 stranded plays" figure in the 2.0.0 notes was the investigation set, not the
+universe.** That was one database's open rows. This install had **494,000**. Wording corrected in
+the entries below.
+
+### Added — onboarding can put a playlist on the screen before you walk away
+
+The wizard ended when a display existed, congratulated you, and left the screen blank; assigning
+something was a separate hunt through Playlists that nothing in the wizard mentioned. Raised by a
+vendor running Juuno alongside this, and it is a fair hit.
+
+The last step now asks "What should this screen play?" and offers the playlists the workspace
+already has. It writes through the same endpoint the Displays picker uses, so the assignment is a
+real per-screen override rather than something the inheritance resolver quietly undoes later.
+Skipping it behaves exactly as before — the wizard never blocks on it. Nothing new is created and
+no new kind of playlist exists.
+
+### Fixed — onboarding said content was playing when the screen was blank
+
+Found while adding the step above, and it is the more serious half. Adding an item to a playlist
+marks that playlist a draft, and a player's payload is built from the published snapshot with no
+fallback to the live items — so a playlist that has never been published sends the screen an empty
+list.
+
+The wizard's upload step created the display's playlist, added the clip, said "Content uploaded and
+assigned!", and finished on "Your display is paired and content is playing!" — with nothing on the
+screen and nothing anywhere saying a publish was still owed. The Displays page at least shows a
+Publish button and a draft marker; onboarding showed neither.
+
+It now publishes what it assigns, so the wizard's claim is true. Choosing an existing playlist on
+the last step publishes it too, but ONLY if it has never been published — one that already has a
+snapshot may carry draft edits somebody is midway through, and pushing those to every screen using
+it is not a setup wizard's decision to make.
+
+### Fixed — the getting-started checklist was a dead end
+
+It lived only on the dashboard, so following one of its own steps lost it: click "Add some
+content", land on the Content Library, and the thing that sent you there is gone — no step, no
+progress, nothing naming what you were in the middle of.
+
+Worse, its buttons did nothing once you arrived. Only step 1 carried an in-page action; the rest
+fell back to setting the location hash, which is a no-op when it is already the page you are on. So
+on Playlists, the checklist's "New playlist" button sat there doing nothing while the page's own
+New Playlist button opened the dialog.
+
+The checklist now appears on every page its steps link to — including the two it hands you off to
+mid-flow: the page for a playlist you just created, and the screen's own page where the last step
+sends you — and every step acts in place: "Add content" opens
+the file picker, "New playlist" opens the same dialog the page's own button does, and "Assign"
+opens the display's page. Where a step means something different from where you are standing, it
+says so and does that instead: inside an empty playlist it reads "Add content" and fills that
+playlist, and on a screen's own page it reads "Choose playlist", opens the Playlist tab the picker
+is hidden behind, and puts the cursor in it. One shared
+mount rather than a copy per view, and a test derives the affected pages from the steps themselves,
+so adding a step that points somewhere new fails until that page handles it.
+
+Assigning a playlist to a screen no longer counts as finished until that playlist is **published**.
+It used to tick on the assignment alone, so "Get your first screen live" reported 4 of 4 while the
+display sat dark — and the banner that explains why ("Devices will show nothing until you publish")
+was not even rendered: it is built from the device's playlist status at page-render time, and
+assigning only repainted the item list. So it appeared on the next full page load, which is also
+when a completed checklist disappears, making it look as though the warning only showed up once the
+checklist got out of the way. The page now re-renders after an assign, so the warning and the
+outstanding step are on screen together. A layout with no playlist stopped counting too — there is
+nothing to put in its zones.
+
+And an empty playlist no longer ticks "Put content in a playlist". It used to count the moment one
+existed — which is what step 3's own button produces — so the checklist marked itself done and sent
+the user on to "Send it to the screen" with nothing in it. That puts a blank playlist on a display,
+which is the same failure as the onboarding publish bug reached from a different direction.
+
+### Added — the app says what changed after an upgrade
+
+Until now an upgrade was invisible from inside the product. The admin page could tell you a newer
+version existed and offer to install it, the nav grew a badge, Settings showed a number — and
+nothing anywhere said what you got.
+
+A "What's new" panel now appears on the dashboard the first time you sign in after the running
+version changes, with a few plain-language lines about what is different. It is a panel in the
+page, not a dialog in the way, and it is dismissed per version rather than once and forever, so
+the next release is announced too. The full list, including older versions, lives under
+Settings → About.
+
+The notes are written by hand for each release (`release-notes.json`) rather than generated from
+this changelog. This file is for whoever touches the code next; that one is for someone who wants
+to know whether anything they do has changed.
+
+### Upgrading
+
+An ordinary upgrade. If this instance runs 50 or more players on spinning storage and is coming
+from 1.9, read
+[Upgrading 1.9 to 2.0 on slow storage](docs/operations.md#upgrading-19-to-20-on-slow-storage)
+first — it applies to the 2.0.0 boot you may not have taken yet.
+
 ## 2.0.0
 
 The 2.0 line, gathering everything from `2.0.0-alpha0` through `2.0.0-beta8`. Those entries stay
@@ -103,8 +324,10 @@ sort in front of it. One screen with 377,132 play rows made that query cost **15
 loop every time it advanced an item**. The server now remembers the row it opened and closes it by
 primary key, with an indexed fallback for plays it did not open.
 
-**Plays were started and never closed** — 36,096 open rows, the oldest three months old, and that
-set was what the query above had to search. A play now expires once it has been open longer than its
+**Plays were started and never closed** — 36,096 open rows in the database this was investigated
+against, the oldest three months old, and that set was what the query above had to search. (That
+figure is one instance's open set, not a ceiling: a 73-device field install upgrading to 2.0.0 had
+494,000. See 2.0.1.) A play now expires once it has been open longer than its
 content could have run, closed at its ceiling so a dark screen is never credited with playback.
 
 ### Fixed — the trigger form was never styled
@@ -150,9 +373,11 @@ that panel advanced an item**. Exactly the signature in the telemetry: 100–300
 about ten seconds apart. The server now remembers the row it opened and closes it by primary key,
 with the search kept as an indexed fallback for plays it didn't open.
 
-**Plays were started and never closed** — 36,096 open rows, the oldest from June. A play now expires
-once it has been open longer than its content could have run, at its ceiling, so downtime is still
-never credited as playback.
+**Plays were started and never closed** — 36,096 open rows in the database this was investigated
+against, the oldest from June. A play now expires once it has been open longer than its content
+could have run, at its ceiling, so downtime is still never credited as playback. (Read that count
+as one instance's backlog, not the size of the problem: a 73-device field install upgrading to
+2.0.0 had 494,000 open rows. See 2.0.1.)
 
 Rehearsed against a copy of a real production database: 36,096 open rows → 11, in about three
 minutes, with no downtime credited and the sweep costing 0ms in steady state.

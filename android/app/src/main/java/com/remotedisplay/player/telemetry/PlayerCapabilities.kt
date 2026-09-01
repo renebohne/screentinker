@@ -50,6 +50,13 @@ object PlayerCapabilities {
                 // URL, so this build can always do it. It says nothing about offline: nothing here
                 // unpacks an archive, so a bundle needs the server even on a panel that caches media.
                 "playback.bundle",
+                // Slide decks with a voiceover / music bed. SlideAudioPlayer owns two ExoPlayers of
+                // its own, outside the widget WebView that draws the slide — so this build really
+                // does make the sound. Note the android BASELINE in player-capabilities.js does NOT
+                // grant it: a fielded panel on an older APK renders the slide silently, and would be
+                // lying if the server claimed it on the panel's behalf. This line is how an updated
+                // panel earns it.
+                "playback.slide_audio",
                 // Mute reaches the YouTube embed through the IFrame API bridge, not just <video>,
                 // so this is a real claim rather than the half-truth the browser players carried.
                 "audio.mute", "audio.volume",

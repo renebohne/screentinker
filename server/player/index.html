@@ -413,6 +413,22 @@
       location.reload();
     }
 
+    /*
+     * #313 — the enrolment key from the URL, for players whose storage does not come back.
+     *
+     * A vMix browser input deletes its whole CEF profile when vMix closes, so localStorage,
+     * cookies and IndexedDB all vanish together and this player boots with nothing but its URL.
+     * Without an identity it would pair as a NEW display every restart, leaving the operator a
+     * dashboard full of dead screens. `?k=` is the identity that survives, because the URL is the
+     * one thing vMix does keep.
+     *
+     * Read once, here, so every caller of getConfig() sees it — including the boot path that
+     * decides whether we are paired.
+     */
+    function urlEnrolKey() {
+      try { return new URLSearchParams(location.search).get('k') || null; } catch (e) { return null; }
+    }
+
     function getConfig() {
       let cfg = {};
       try { cfg = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch { cfg = {}; }
@@ -432,6 +448,16 @@
             cfg.paired = true;
           }
         } catch (e) { /* registry unavailable — carry on unpaired */ }
+      }
+      /*
+       * ⚠️ STORED CREDENTIALS ALWAYS WIN. The key is only carried when this player has no deviceId
+       * of its own, so a screen whose storage IS working is completely unaffected by a key sitting
+       * in its URL — it keeps using the identity it already has, and the server never sees the key.
+       * That also means a working display cannot be quietly re-pointed by editing its URL.
+       */
+      if (!cfg.deviceId) {
+        const k = urlEnrolKey();
+        if (k) { cfg.enrolKey = k; cfg.paired = true; }   // paired: we know who we are, so skip the code screen
       }
       return cfg;
     }
@@ -1162,6 +1188,154 @@
       return window.MediaMute ? window.MediaMute.resolveMuted(muteState(item)) : true;
     }
 
+    /* =============== slide audio: a voiceover per item, a music bed across items ===============
+     *
+     * ⚠️ THE ELEMENTS LIVE HERE, IN THE SHELL, AND NOT IN THE SLIDE.
+     *
+     * A slide is a widget in an iframe, and an iframe is the wrong lifetime for both tracks. A deck
+     * publishes as one widget per slide plus a playlist, so every advance destroys it — a looping
+     * bed inside would restart on each slide, which is the one thing a bed must not do. And audio
+     * in there would be invisible to applyMute() below, which sweeps `video, audio` across this
+     * document: the wall-follower rule, the operator's remote mute, the per-item flag and the
+     * autoplay gesture would all stop applying. That is the same reason a slide's background video
+     * is unconditionally muted (see lib/slide-render.js).
+     *
+     * So both elements are created here, appended to this document, and left to applyMute() like
+     * every other piece of media. The ONLY difference between the two tracks is what happens on an
+     * advance: the voiceover is replaced, the bed is left alone while its id is unchanged.
+     */
+    let voEl = null;
+    let bedEl = null;
+    let bedTrackId = null;
+
+    function stopSlideVo() {
+      if (!voEl) return;
+      try { voEl.pause(); voEl.remove(); } catch (e) { /* already gone */ }
+      voEl = null;
+    }
+
+    function stopSlideBed() {
+      if (!bedEl) return;
+      try { bedEl.pause(); bedEl.remove(); } catch (e) { /* already gone */ }
+      bedEl = null;
+      bedTrackId = null;
+    }
+
+    /*
+     * Re-apply the mute decision and RESTART anything the autoplay policy refused.
+     *
+     * ⚠️ THE SECOND HALF IS THE ONE THAT MATTERS, and leaving it out is why a preview stayed silent
+     * even after being clicked. A browser refuses `play()` on unmuted audio without a gesture, so
+     * the elements created at item start are left both muted and PAUSED. The existing gesture
+     * handler only revisits <video> (tryUnmuteLeader) and the YouTube embed — nothing went back to
+     * an <audio> element to try again, so it sat at currentTime 0 for the rest of the deck.
+     *
+     * Unmuting alone is not enough: a paused element makes no sound however unmuted it is.
+     */
+    function resumeSlideAudio() {
+      const item = playlist[currentIndex];
+      for (const el of [voEl, bedEl]) {
+        if (!el) continue;
+        try { el.muted = applyMuteWanted(item); } catch (e) { /* torn down */ }
+        if (el.paused) el.play().catch(() => { /* still refused; a later gesture may succeed */ });
+      }
+    }
+
+    /*
+     * A click target for sound, because the slide's own iframe eats the one the player relies on.
+     *
+     * ⚠️ THE GESTURE NEVER ARRIVES OTHERWISE. Autoplay policy needs a user gesture, and the player
+     * listens for one on `document` — but a slide fills the screen with an iframe, and a click
+     * inside it never reaches the parent. So clicking the picture did nothing at all: the audio
+     * stayed muted with no indication why. The YouTube embed has had exactly this overlay for
+     * exactly this reason; a slide with audio is the same shape of problem.
+     *
+     * ⚠️ PREVIEW ONLY, DELIBERATELY. On a wall nobody is going to click, so the overlay would be a
+     * permanent "Click for sound" caption burnt into a signage screen — and a screen SHOULD stay
+     * silent. Preview is the case where a person is present, looking at it, and wants to hear it.
+     */
+    function offerSlideUnmute(item) {
+      const old = document.getElementById('slideAudioUnmute');
+      if (old) old.remove();
+      if (!PREVIEW_MODE) return;
+      const a = (item && item.audio) || {};
+      if (!a.vo_url && !a.music_url) return;
+      // Only when a gesture is the ONLY thing in the way — prompting on an item somebody muted on
+      // purpose trains people to click a button that undoes their decision.
+      const offer = window.MediaMute ? window.MediaMute.shouldOfferUnmute(muteState(item)) : !userHasInteracted;
+      if (!offer) return;
+
+      /*
+       * ⚠️ ON document.body, NOT IN #playerContainer — and position:fixed to match. applySlideAudio
+       * runs early in playCurrentItem, and renderContent REBUILDS that container immediately after,
+       * so an overlay parented there is appended and then wiped before anybody sees it. (The same
+       * note already exists further down for the element teardownCurrentMedia would remove.)
+       */
+      const ov = document.createElement('div');
+      ov.id = 'slideAudioUnmute';
+      ov.style.cssText = 'position:fixed;inset:0;z-index:2147483000;cursor:pointer;display:flex;align-items:end;'
+        + 'justify-content:center;padding-bottom:40px';
+      ov.innerHTML = '<div style="background:rgba(0,0,0,0.7);color:#fff;padding:10px 24px;border-radius:8px;'
+        + 'font:14px sans-serif;pointer-events:none">🔊 Click for sound</div>';
+      ov.onclick = (e) => {
+        e.stopPropagation();
+        userHasInteracted = true;
+        try { unlockAudioContext(); } catch (err) { /* best effort */ }
+        resumeSlideAudio();
+        applyMute(playlist[currentIndex]);
+        ov.remove();
+      };
+      document.body.appendChild(ov);
+    }
+
+    function applySlideAudio(item) {
+      const a = (item && item.audio) || {};
+
+      // ---- voiceover: this item's, and only this item's.
+      stopSlideVo();
+      if (a.vo_url) {
+        voEl = document.createElement('audio');
+        voEl.src = a.vo_url;
+        try { voEl.volume = typeof a.vo_volume === 'number' ? a.vo_volume : 1; } catch (e) { /* */ }
+        // Muted through the same decision as everything else. On a signage panel there is no
+        // gesture, so this is normally true and the voice simply does not play — which is correct:
+        // a lobby screen must not start talking, and the capture-source case is the exception that
+        // has to be asked for.
+        voEl.muted = applyMuteWanted(item);
+        document.body.appendChild(voEl);
+        voEl.play().catch(() => { /* autoplay refused; the element stays for applyMute to revisit */ });
+      }
+
+      offerSlideUnmute(item);
+
+      // ---- bed: continuous for as long as consecutive items name the same track.
+      if (!a.music_id) { stopSlideBed(); return; }
+
+      if (a.music_id !== bedTrackId) {
+        /*
+         * A DIFFERENT track (or the first). Only here does the music restart — which is why publish
+         * stamps one id across a whole deck: every slide agrees, so this branch is taken once when
+         * the deck starts and not again until it ends.
+         *
+         * Compared by id rather than URL on purpose: /api/content/:id/replace keeps the id and
+         * writes a new filepath, so a URL comparison would restart the bed the first time somebody
+         * swapped the file.
+         */
+        stopSlideBed();
+        bedEl = document.createElement('audio');
+        bedEl.src = a.music_url;
+        bedEl.loop = true;
+        bedTrackId = a.music_id;
+        document.body.appendChild(bedEl);
+        bedEl.play().catch(() => { /* autoplay refused; applyMute revisits it after a gesture */ });
+      }
+      // Same track: deliberately NOT touched beyond volume and mute. Re-assigning src, or calling
+      // play() on an element that is already playing, is what a naive version does — and it is
+      // audible as a stutter at every slide change.
+      try { bedEl.volume = typeof a.music_volume === 'number' ? a.music_volume : 0.4; } catch (e) { /* */ }
+      bedEl.muted = applyMuteWanted(item);
+    }
+
     function applyMute(item) {
       if (item !== undefined) activeMuteItem = item;
       const want = window.MediaMute
@@ -1373,6 +1547,10 @@
         if (isWallFollower()) return;
         if (wasFirst) console.log('[wall/audio] first user gesture detected — attempting unmute');
         tryUnmuteLeader();
+        // Slide voiceover and music bed. Sits with tryUnmuteLeader because it is the same job for a
+        // different element type — and below the wall-follower return above, so tapping a follower
+        // still cannot make it talk.
+        resumeSlideAudio();
         // Unmute YouTube player if active. Guarded like the identical block in unlockAudio: a tap
         // on a touch panel during an alarm must not restore the BASE playlist's audio underneath it.
         if (activeYtPlayer && typeof activeYtPlayer.unMute === 'function' && !baseAudioSuppressed) {
@@ -1508,7 +1686,10 @@
       saveConfig(config);
     }
 
-    if (config.serverUrl && config.deviceId && config.paired) {
+    // #313: `config.enrolKey` is an identity too — a player whose storage did not survive knows who
+    // it is from its URL, so it takes the same path as one that read its id out of localStorage
+    // rather than falling through to the pairing-code screen.
+    if (config.serverUrl && (config.deviceId || config.enrolKey) && config.paired) {
       // Restore cached playlist immediately so content plays even if offline —
       // but ONLY if we also know the layout, else we'd guess fullscreen and flash
       // before the payload arrives. Key presence (not value) is the test: an absent
@@ -3288,6 +3469,10 @@
         'playback.bundle',
         // #129 per-item mute plus the operator volume added alongside it.
         'audio.mute', 'audio.volume',
+        /* Slide voiceover + deck music bed. This player owns those elements itself (see
+         * applySlideAudio), which is what the capability asserts — a player that only renders the
+         * widget iframe would make no sound, because the tracks are metadata on the item. */
+        'playback.slide_audio',
         // CSS transform in a browser; the host rotates the output on BrightSign. Both real.
         'display.rotation',
         'remote.input',
@@ -3499,7 +3684,14 @@
       // was wiped can still be rematched to its row — but only when that value is unambiguous.
       data.fingerprint = generateBrowserFingerprint();
       data.hw_fingerprint = generateHardwareFingerprint();
-      console.log(`[register] device_id=${data.device_id || 'none'}, has_token=${!!data.device_token}, token_len=${data.device_token?.length || 0}, paired=${config.paired}, pairing_code=${data.pairing_code || 'none'}`);
+      /*
+       * #313: the enrolment key from ?k=, sent ONLY when we have no device_id of our own. The
+       * server exchanges it for this display's id and token at the top of its register handler, so
+       * everything after that is an ordinary reconnect. A player with working storage never sends
+       * it, because getConfig() only carries it when there is no stored identity to prefer.
+       */
+      if (!data.device_id && config.enrolKey) data.enrol_key = config.enrolKey;
+      console.log(`[register] device_id=${data.device_id || 'none'}, has_token=${!!data.device_token}, token_len=${data.device_token?.length || 0}, paired=${config.paired}, pairing_code=${data.pairing_code || 'none'}, enrol_key=${data.enrol_key ? 'yes' : 'no'}`);
       socket.emit('device:register', data);
     }
 
@@ -4350,6 +4542,10 @@
     function playCurrentItem() {
       if (!playlist.length || !Number.isFinite(currentIndex)) {
         teardownCurrentMedia();
+        // The bed survives an ADVANCE, not the playlist going away — otherwise a screen with
+        // nothing to show would sit there playing music to an empty stage.
+        stopSlideVo();
+        stopSlideBed();
         showStatus('Waiting for content...');
         isPlaying = false;
         return;
@@ -4360,12 +4556,26 @@
       const item = playlist[currentIndex];
       console.log('Playing:', item.filename, `(${currentIndex + 1}/${playlist.length})`);
       currentItemStartedAt = Date.now();
+      // Slide audio, if this item carries any. Runs on every advance: the voiceover is replaced,
+      // the bed is left playing when the next slide names the same track.
+      applySlideAudio(item);
 
       // Only the leader (or single, non-walled players) records a play_start —
       // followers would just spam duplicate proof-of-play rows for the same item.
       // #299: offline, the same leader test decides who QUEUES, so a follower cannot
       // backfill duplicates of what the leader already recorded.
-      if (!socket?.connected && (!wallConfig || wallConfig.is_leader)) {
+      /*
+       * ⚠️ NOT IN PREVIEW. A preview is somebody checking a deck in a browser tab, not a screen
+       * playing to a room, and proof-of-play is a billing and reporting record — inventing rows
+       * from an operator clicking Preview would put fiction into a report an advertiser is shown.
+       *
+       * It also happens to be why preview froze on its first item. queueOfflinePlay is defined
+       * INSIDE connect(), which a preview never calls, so the matching close in nextItem threw
+       * ReferenceError before the advance timer could re-arm. Real offline playback was never
+       * affected — it has always connected at least once — but preview advanced no further than
+       * slide one, silently, and looked like a rendering problem.
+       */
+      if (!PREVIEW_MODE && !socket?.connected && (!wallConfig || wallConfig.is_leader)) {
         offlinePlayOpen = {
           content_id: item.content_id || null,
           widget_id: item.widget_id || null,
@@ -4417,7 +4627,17 @@
        * do not know when it began, and inventing a time would put fabricated data into a report,
        * so an unmatched end is dropped rather than guessed at.
        */
-      if (playlist[currentIndex] && !socket?.connected && offlinePlayOpen) {
+      /*
+       * ⚠️ !PREVIEW_MODE FIRST, AND IT HAS TO BE FIRST. `offlinePlayOpen` and queueOfflinePlay are
+       * both declared inside connect(), which a preview never calls — so merely READING
+       * offlinePlayOpen here threw ReferenceError, before the advance timer could re-arm. A preview
+       * therefore froze on its first item and looked like a rendering fault rather than a crash.
+       *
+       * Guarding rather than hoisting those declarations: a preview has no business recording
+       * proof-of-play at all. It is somebody checking a deck in a browser tab, and these rows end
+       * up in reports an advertiser is billed from.
+       */
+      if (!PREVIEW_MODE && playlist[currentIndex] && !socket?.connected && offlinePlayOpen) {
         const open = offlinePlayOpen; offlinePlayOpen = null;
         queueOfflinePlay(open, true);
       }

@@ -832,6 +832,10 @@ window.addEventListener('keydown', (e) => {
 // Auto-reload on frontend update (no more hard refresh needed)
 let knownHash = null;
 export function updateVersionIndicator({ version, latest_version, update_available }) {
+  // Published like window.__ST_BRAND_NAME, and for the same reason: things that need the running
+  // version should not each fetch it. components/whats-new.js reads this to decide whether it has
+  // anything to fetch at all, so a dashboard load on an unchanged build costs no extra request.
+  try { if (version) window.__ST_VERSION = version; } catch (_) { /* non-fatal */ }
   const label = document.getElementById('versionLabel');
   const badge = document.getElementById('versionBadge');
   if (label) label.textContent = version ? 'v' + version : '-';

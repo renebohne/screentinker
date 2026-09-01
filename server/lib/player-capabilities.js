@@ -35,6 +35,12 @@ const CAPABILITIES = [
   'playback.bundle',
   // audio
   'audio.mute', 'audio.volume',
+  /* A slide's voiceover and a deck's music bed. Declared by a player that owns those audio
+   * elements ITSELF — the tracks are metadata on the item, not something inside the slide, so a
+   * player that simply renders the widget iframe plays nothing. Separate from audio.mute because
+   * the questions are different: audio.mute asks whether a screen can be silenced, this asks
+   * whether it can make that particular sound at all. */
+  'playback.slide_audio',
   // display
   'display.rotation', 'display.power', 'display.resolution', 'display.brightness',
   // remote view / control
@@ -127,6 +133,7 @@ const BASELINE = {
     // on every fielded panel. (HEAD ships applyVolume, but see the note on BASELINE.web: it reads
     // payload.value while the dashboard sends payload.level, so even HEAD's slider is dead. The
     // baseline stays out until a released .wgt honours the payload the product actually sends.)
+    'playback.slide_audio',
     'audio.mute',
     'display.rotation',
     // Both really are implemented in the shipped player (captureAndSend / startStreaming), so
@@ -167,6 +174,7 @@ const BASELINE = {
     'playback.video', 'playback.image', 'playback.widget', 'playback.youtube',
     'playback.zones', 'playback.transitions', 'playback.pip',
     'playback.bundle',
+    'playback.slide_audio',
     'audio.mute',
     // CSS transform. Graphics rotate; with hwz the video sits on a hardware plane that ignores it,
     // so this is partial — but nothing routes a COMMAND to display.rotation and no control is
@@ -222,6 +230,7 @@ const BASELINE = {
     'playback.video', 'playback.image', 'playback.widget', 'playback.youtube',
     'playback.zones', 'playback.transitions', 'playback.pip',
     'playback.bundle',
+    'playback.slide_audio',
     'audio.mute',
     'display.rotation',
     'remote.screenshot', 'remote.stream', 'remote.input',

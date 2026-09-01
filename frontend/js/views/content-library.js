@@ -1,4 +1,5 @@
 import { api, assertLocalCallAllowed } from '../api.js';
+import * as gettingStarted from '../components/getting-started.js';
 import { showToast } from '../components/toast.js';
 import { esc, hydrateAuthImages } from '../utils.js';
 import { t } from '../i18n.js';
@@ -56,6 +57,10 @@ export function render(container) {
       </div>
     </div>
 
+    <!-- The checklist follows the user here. Arriving from its "Add content" step and finding
+         nothing that mentions it is how someone loses the thread. -->
+    <div id="gettingStarted"></div>
+
     <div class="content-toolbar" style="display:flex;gap:16px;margin-bottom:24px">
       <div class="upload-area" id="uploadArea" style="flex:1;margin-bottom:0">
         <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -65,7 +70,7 @@ export function render(container) {
         </svg>
         <p>${t('content.drop')}</p>
         <p class="upload-hint">${t('content.upload_hint')}</p>
-        <input type="file" id="fileInput" style="display:none" multiple accept="video/*,image/*,.zip,.wgt">
+        <input type="file" id="fileInput" style="display:none" multiple accept="video/*,image/*,audio/*,.zip,.wgt">
         <div class="upload-progress" id="uploadProgress" style="display:none">
           <div class="upload-progress-bar">
             <div class="upload-progress-fill" id="uploadProgressFill" style="width:0%"></div>
@@ -89,6 +94,8 @@ export function render(container) {
           <option value="video/webm">${t('content.mime.video_webm')}</option>
           <option value="image/jpeg">${t('content.mime.image_jpeg')}</option>
           <option value="image/png">${t('content.mime.image_png')}</option>
+          <option value="audio/mpeg">${t('content.mime.audio_mpeg')}</option>
+          <option value="audio/wav">${t('content.mime.audio_wav')}</option>
         </select>
         <button class="btn btn-primary" id="addRemoteBtn">${t('content.remote_add_btn')}</button>
       </div>
@@ -141,6 +148,21 @@ export function render(container) {
   // File upload handling
   const uploadArea = document.getElementById('uploadArea');
   const fileInput = document.getElementById('fileInput');
+
+  /*
+   * The checklist, if this account still has one. Fire-and-forget: it fetches devices and
+   * playlists (never content — the caller has none to give here and getContent is this page's own
+   * expensive call), and hides itself when there is nothing left to do.
+   */
+  gettingStarted.mount(document.getElementById('gettingStarted'), {
+    // Step 2 points at this page, so its button must DO something here rather than re-navigate to
+    // the page it is already on. Clicking the upload area is the page's own path to the file
+    // picker — and it stays inside the user's click, which is what the browser requires to open one.
+    onAction: (a) => {
+      if (a === 'add-content') { document.getElementById('uploadArea')?.click(); return true; }
+      return false;
+    },
+  }).catch(() => {});
 
   uploadArea.addEventListener('click', () => fileInput.click());
 
@@ -612,6 +634,10 @@ async function loadContent() {
   } catch (err) {
     grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><h3>${t('content.failed_to_load')}</h3><p>${esc(err.message)}</p></div>`;
   }
+
+  // #313/checklist: adding content ticks a step, and this is the one path every add
+  // (file, remote URL, YouTube) already goes through.
+  gettingStarted.refresh().catch(() => {});
 }
 
 // #213: the batch toolbar — shown only when something is selected. `visible` is the current
@@ -789,7 +815,7 @@ function showEditModal(contentItem, onSave) {
         ${!isRemote ? `
         <div class="form-group">
           <label>${t('content.label_replace_file')}</label>
-          <input type="file" id="editFileReplace" accept="video/*,image/*,.zip,.wgt" style="font-size:13px;color:var(--text-secondary)">
+          <input type="file" id="editFileReplace" accept="video/*,image/*,audio/*,.zip,.wgt" style="font-size:13px;color:var(--text-secondary)">
           <p style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('content.replace_file_hint')}</p>
         </div>
         ` : ''}

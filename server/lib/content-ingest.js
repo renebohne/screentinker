@@ -69,7 +69,10 @@ async function deriveMediaMetadata(sourcePath, filepath, mime) {
       // they are independently useful, and losing them would letterbox the asset wrongly.
       if (metadata.thumbnailWritten) thumbnailPath = thumbName;
       else console.warn(`Thumbnail write failed for ${filepath}: ${metadata.thumbnailError}`);
-    } else if (mime.startsWith('video/')) {
+    } else if (mime.startsWith('video/') || mime.startsWith('audio/')) {
+      // Audio takes the same branch as video: ffprobe reads its duration the same way, and that
+      // number is what lets the slide editor warn when a voiceover outruns the slide it is on.
+      // The thumbnail half below simply produces nothing for audio, which is correct.
       try {
         // execFile, NOT execFileSync. These two spawns each carry a 15s timeout, and run
         // synchronously they block the event loop for their whole duration — nothing else on

@@ -28,6 +28,9 @@ data class PlaylistItem(
     val contentRev: Long = 0L,
     val widgetType: String? = null,
     val schedules: List<ScheduleEval.Block> = emptyList(),
+    /* Slide voiceover + deck music bed. Metadata on the ITEM, not inside the slide document — a
+     * player that only renders the widget iframe makes no sound, which is why this exists. */
+    val slideAudio: SlideAudio? = null,
     // feat/transition-engine: the resolved GL transition this item plays INTO (null = hard cut).
     val transition: TransitionSpec? = null
 ) {
@@ -101,6 +104,14 @@ class PlaylistController(
     // the cache); the default keeps every item playable so behavior is unchanged until it's set.
     private var contentReady: (PlaylistItem) -> Boolean = { true }
     fun setContentReadyCheck(f: (PlaylistItem) -> Boolean) { contentReady = f }
+
+    // Slide audio. Injected like contentReady above, for the same reason: this class should not
+    // know where the server URL is stored, and a controller with neither set still behaves exactly
+    // as it did before the feature existed.
+    private var serverBase: (() -> String)? = null
+    fun setServerBase(f: () -> String) { serverBase = f }
+    private var slideAudioPlayer: SlideAudioPlayer? = null
+    fun setSlideAudioPlayer(p: SlideAudioPlayer?) { slideAudioPlayer = p }
     // True while a valid item is rendered on screen — so we NEVER blank it for a pending download.
     private var hasContentOnScreen = false
 
@@ -196,7 +207,8 @@ class PlaylistController(
                     contentRev = obj.optLong("content_rev", 0L),
                     widgetType = if (obj.isNull("widget_type")) null else obj.optString("widget_type", "").ifEmpty { null },
                     schedules = parseSchedules(obj.optJSONArray("schedules")),
-                    transition = Transitions.parse(obj.optJSONObject("transition"))
+                    transition = Transitions.parse(obj.optJSONObject("transition")),
+                    slideAudio = parseSlideAudio(obj.optJSONObject("audio"))
                 )
             )
         }
@@ -399,6 +411,9 @@ class PlaylistController(
         hasContentOnScreen = false
         pendingItems = null
         pendingSuccessorId = null
+        // Here and not in the per-item path: the bed has to survive an advance, and only a real
+        // stop ends it.
+        try { slideAudioPlayer?.stop() } catch (_: Throwable) {}
         // Proof-of-play: close the open row so its duration is recorded on shutdown/screen-off.
         loggedItem?.let { onPlayLog?.invoke("play_end", it, true) }
         loggedItem = null
@@ -484,6 +499,10 @@ class PlaylistController(
         // #234: remember where we are so a controller rebuilt seconds from now can carry on.
         try { saveResume?.invoke(currentIndex, itemStartedAt) } catch (_: Throwable) {}
         Log.i("PlaylistController", "Playing: ${item.filename} (index $currentIndex)")
+        // Slide audio: replaces the voiceover, leaves a bed playing when the id has not changed.
+        try { slideAudioPlayer?.apply(item.slideAudio, item.muted || wallFollower) } catch (t: Throwable) {
+            Log.w("PlaylistController", "slide audio failed: ${t.message}")
+        }
         onItemChanged(item)
         hasContentOnScreen = true // a valid item is now rendered — protect it from being blanked
 
@@ -622,6 +641,31 @@ class PlaylistController(
             }
         }
         handler.postDelayed(retryRunnable!!, 30_000L)
+    }
+
+    /**
+     * The audio block, with URLs made absolute.
+     *
+     * ⚠️ ABSOLUTE, ALWAYS. The server sends `/uploads/content/...`; ExoPlayer has no document to
+     * resolve a relative path against and simply fails. serverBase is the same value every other
+     * media path here is built on.
+     */
+    private fun parseSlideAudio(o: JSONObject?): SlideAudio? {
+        if (o == null) return null
+        fun abs(u: String?): String? {
+            if (u.isNullOrEmpty()) return null
+            if (u.startsWith("http://") || u.startsWith("https://")) return u
+            val base = (serverBase?.invoke() ?: "").trimEnd('/')
+            return if (base.isEmpty()) null else base + u
+        }
+        val a = SlideAudio(
+            voUrl = abs(if (o.isNull("vo_url")) null else o.optString("vo_url", "")),
+            voVolume = o.optDouble("vo_volume", 1.0).toFloat(),
+            musicId = if (o.isNull("music_id")) null else o.optString("music_id", "").ifEmpty { null },
+            musicUrl = abs(if (o.isNull("music_url")) null else o.optString("music_url", "")),
+            musicVolume = o.optDouble("music_volume", 0.4).toFloat(),
+        )
+        return if (a.isEmpty) null else a
     }
 
     private fun parseSchedules(arr: JSONArray?): List<ScheduleEval.Block> {

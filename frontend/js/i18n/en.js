@@ -91,9 +91,13 @@ export default {
   'gs.playlist.title': 'Put content in a playlist',
   'gs.playlist.desc': 'A playlist is the running order your screen loops through.',
   'gs.playlist.cta': 'New playlist',
+  // Same step, seen from inside an empty playlist: the thing to press there is Add content.
+  'gs.playlist.cta_here': 'Add content',
   'gs.assign.title': 'Send it to the screen',
-  'gs.assign.desc': 'Open the screen and assign the playlist — it starts playing straight away.',
+  'gs.assign.desc': 'Open the screen you wish content to be played on, click on Playlist, select your layout, if not using full screen select where you want your content to be played, and click Publish.',
   'gs.assign.cta': 'Assign',
+  // Same step, seen from the screen's own page: the picker is one tab over.
+  'gs.assign.cta_here': 'Choose playlist',
   'gs.reopen': 'Show getting-started checklist',
 
   // #zone-orphan dashboard warnings
@@ -382,7 +386,7 @@ export default {
   'content.subtitle': 'Upload and manage your media files',
   'content.help_tip': 'Upload videos and images here. Select multiple files for bulk upload. Use Remote URL to stream from external sources. Click a thumbnail to preview.',
   'content.drop': 'Drop files here, or click to select one or more',
-  'content.upload_hint': 'Supports MP4, WebM, AVI, MKV, JPEG, PNG, GIF, WebP',
+  'content.upload_hint': 'Supports MP4, WebM, AVI, MKV, JPEG, PNG, GIF, WebP, MP3, M4A, WAV, OGG, FLAC',
   'content.upload_progress': 'Uploading...',
   'content.upload_progress_named': 'Uploading {name}...',
   'content.upload_progress_named_pct': 'Uploading {name}... {pct}%',
@@ -481,6 +485,9 @@ export default {
   'content.mime.image_png': 'Image (PNG)',
   'content.mime.image_gif': 'Image (GIF)',
   'content.mime.image_webp': 'Image (WebP)',
+  // Remote audio, so a voiceover or a music bed can be a URL rather than an upload.
+  'content.mime.audio_mpeg': 'Audio (MP3)',
+  'content.mime.audio_wav': 'Audio (WAV)',
   // Content errors / toasts
   'content.error_enter_url': 'Enter a URL',
   'content.error_enter_youtube_url': 'Enter a YouTube URL',
@@ -656,6 +663,20 @@ export default {
   'device.pin.updated_live': 'PIN updated — the display has it now',
   'device.pin.updated_offline': 'PIN saved — the display will pick it up when it reconnects',
   'device.pin.failed': 'Could not update the PIN',
+  // #313: the web player URL, for players whose storage does not survive a restart (a vMix
+  // browser input deletes its whole CEF profile when vMix closes).
+  'device.tab.webplayer': 'Web player',
+  'device.tab.webplayer_tip': 'A URL that identifies this screen, for players that lose their storage when they restart.',
+  'device.enrol.label': 'Web player URL',
+  'device.enrol.hint': 'For players that lose their storage on restart — a vMix browser input, or a kiosk that resets on reboot. This URL identifies the screen, so it comes back as this display instead of pairing as a new one.',
+  'device.enrol.copy': 'Copy',
+  'device.enrol.roll': 'New URL',
+  'device.enrol.warning': 'Treat this like a password: anyone with the URL can become this screen. If it gets out, press New URL and update the player.',
+  'device.enrol.created': 'Player URL created',
+  'device.enrol.rolled': 'New URL created — update the player, the old one no longer works',
+  'device.enrol.copied': 'URL copied',
+  'device.enrol.copy_failed': 'Could not copy — select the text and copy it manually',
+  'device.enrol.confirm_roll': 'Create a new URL? The current one stops working, and any player using it must be updated.',
   'device.info.settings_pin': 'Settings PIN',
   'device.info.settings_pin_hint': 'On-device settings menu (2× Back)',
   'device.info.screen_resolution': 'Screen Resolution',
@@ -1457,6 +1478,14 @@ export default {
   'device.clock.skew': '⚠ clock off by {amount} — schedules may fire at the wrong local time',
 
   // Onboarding
+  // "What's new" — the release-notes panel on the dashboard and the list under Settings -> About.
+  // {version} and {date} come from release-notes.json.
+  'whatsnew.title': "What's new in {version}",
+  'whatsnew.dismiss': 'Dismiss',
+  'whatsnew.full_notes': 'Full notes',
+  'whatsnew.history_title': "What's new",
+  'whatsnew.version_line': '{version} — {date}',
+  'whatsnew.version_current': '{version} — {date} (running)',
   'onboarding.back': 'Back',
   'onboarding.next': 'Next',
   'onboarding.skip': 'Skip Wizard',
@@ -1481,10 +1510,17 @@ export default {
   'onboarding.step.upload.title': 'Step 3: Upload Content',
   'onboarding.step.upload.intro': 'Upload a video or image to display.',
   'onboarding.step.upload.click_to_select': 'Click to select a file',
-  'onboarding.step.upload.formats': 'MP4, WebM, JPEG, PNG, GIF',
+  'onboarding.step.upload.formats': 'MP4, WebM, JPEG, PNG, GIF, MP3, WAV',
   'onboarding.step.upload.uploading': 'Uploading...',
   'onboarding.step.done.title': "You're All Set!",
+  // #313: the pairing path ends with a screen that is already playing; the URL path ends with a
+  // display that cannot come online until someone pastes its URL into the player.
+  'onboarding.step.done.intro_url': 'Your display is set up. Paste the URL below into the player to bring it online.',
   'onboarding.step.done.intro': 'Your display is paired and content is playing!',
+  // 2.0.1: the last step now offers the workspace's existing playlists, so a freshly paired
+  // screen can leave the wizard playing something without a trip to Playlists.
+  'onboarding.step.done.assign_label': 'What should this screen play?',
+  'onboarding.step.done.assign_none': 'Nothing yet',
   'onboarding.step.done.whats_next': "What's next?",
   'onboarding.step.done.next_content': 'Add more content in the <strong>Content Library</strong>',
   'onboarding.step.done.next_layouts': 'Create multi-zone layouts in <strong>Layouts</strong>',
@@ -1497,9 +1533,13 @@ export default {
   'onboarding.toast.pair_failed': 'Pairing failed',
   'onboarding.toast.pair_failed_with_error': 'Pairing failed: {error}',
   'onboarding.toast.paired': 'Display paired!',
+  'onboarding.toast.display_created': 'Display created — copy its URL into the player',
   'onboarding.toast.uploaded_assigning': 'Uploaded! Assigning to display...',
   'onboarding.toast.content_assigned': 'Content uploaded and assigned!',
   'onboarding.toast.upload_failed': 'Upload failed',
+  'onboarding.toast.playlist_assigned': 'Playlist assigned',
+  'onboarding.toast.assign_failed': 'Could not assign that playlist',
+  'onboarding.toast.publish_failed': 'Could not publish the playlist, so nothing would play yet',
   'onboarding.toast.error_with_error': 'Error: {error}',
 
   // Admin (platform admin panel)
@@ -1915,6 +1955,12 @@ export default {
   'add_display.pairing_code': 'Pairing Code',
   'add_display.display_name': 'Display Name (optional)',
   'add_display.name_placeholder': 'e.g., Lobby TV',
+  // #313: adding a display for a player that cannot stay paired.
+  'add_display.no_storage': "This player can't stay paired (vMix browser input, resetting kiosk)",
+  'add_display.no_storage_hint': 'Creates the display here and gives you a URL to paste into the player instead of a pairing code.',
+  'add_display.intro_no_storage': 'Name the display. You will get a URL to paste into the player — no pairing code needed.',
+  'add_display.create_btn': 'Create Display',
+  'add_display.created_intro': 'Display created. Paste this URL into the player — it identifies this screen, so it comes back as this display every time it restarts.',
   'add_display.need_player': 'Need a player app? Install one to get a pairing code:',
   'add_display.android_apk': 'Android APK',
   'add_display.web_player': 'Web Player',

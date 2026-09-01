@@ -4,6 +4,7 @@ import { showToast } from '../components/toast.js';
 import { esc, livenessBadge, isPlatformAdmin, screenshotUrl } from '../utils.js';
 import { t, tn } from '../i18n.js';
 import * as gettingStarted from '../components/getting-started.js';
+import * as whatsNew from '../components/whats-new.js';
 import { showDeviceOwnerQRModal } from '../components/device-owner-qr-modal.js';
 import { frameDeviceOutput } from '../lib/device-frame.js';
 import { selectedRemoteOrg } from '../components/workspace-switcher.js';
@@ -425,6 +426,7 @@ export function render(container) {
         </button>
       </div>
     </div>
+    <div id="whatsNew"></div>
     <div id="gettingStarted"></div>
       <div id="dashStats" class="dash-stats-row" style="display:flex;gap:12px;margin-bottom:16px"></div>
     <div style="display:flex;gap:12px;margin-bottom:16px;align-items:center">
@@ -447,6 +449,7 @@ export function render(container) {
   const addBtn = container.querySelector('#addDeviceBtn');
   addBtn.addEventListener('click', () => {
     document.getElementById('addDeviceModal').style.display = 'flex';
+    resetAddDeviceDialog();   // #313: a previous create must not leave the dialog on its result panel
     document.getElementById('pairingCodeInput').value = '';
     document.getElementById('deviceNameInput').value = '';
     document.getElementById('pairingCodeInput').focus();
@@ -488,9 +491,54 @@ export function render(container) {
 
   // Setup pairing
   const pairBtn = document.getElementById('pairDeviceBtn');
+
+  /*
+   * #313 — two ways to add a display, one dialog.
+   *
+   * Ticking "this player can't stay paired" swaps the pairing code for nothing at all: the display
+   * is created here and given a URL that carries its identity. That inversion exists because a
+   * vMix browser input deletes its whole profile when vMix closes, so the ordinary flow — player
+   * shows a code, operator types it — works exactly once and asks for a new code on every restart.
+   *
+   * The code field is HIDDEN rather than made optional. A form with two meanings for one input is
+   * how an operator ends up typing a code into a box that is ignoring it.
+   */
+  document.getElementById('createdCopyBtn')?.addEventListener('click', () => {
+    const input = document.getElementById('createdPlayerUrl');
+    input.select();
+    // execCommand, not navigator.clipboard: plenty of self-hosted dashboards are plain HTTP on a
+    // LAN, where the async clipboard API does not exist.
+    try { document.execCommand('copy'); showToast(t('device.enrol.copied')); }
+    catch { showToast(t('device.enrol.copy_failed'), 'error'); }
+  });
+
+  const noStorageBox = document.getElementById('addDeviceNoStorage');
+  const codeGroup = document.getElementById('pairingCodeGroup');
+  const introEl = document.getElementById('addDeviceIntro');
+  const syncMode = () => {
+    const noStorage = !!noStorageBox?.checked;
+    if (codeGroup) codeGroup.style.display = noStorage ? 'none' : '';
+    if (introEl) introEl.textContent = noStorage ? t('add_display.intro_no_storage') : t('add_display.intro');
+    pairBtn.textContent = noStorage ? t('add_display.create_btn') : t('add_display.pair_btn');
+  };
+  noStorageBox?.addEventListener('change', syncMode);
+  syncMode();
+
   pairBtn.onclick = async () => {
-    const code = document.getElementById('pairingCodeInput').value.trim();
     const name = document.getElementById('deviceNameInput').value.trim();
+
+    if (noStorageBox?.checked) {
+      try {
+        const r = await api.createWebPlayerDisplay(name || undefined);
+        showWebPlayerUrl(r.player_url);
+        loadDashboard();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+      return;
+    }
+
+    const code = document.getElementById('pairingCodeInput').value.trim();
     if (!code || code.length !== 6) {
       showToast(t('dashboard.error_pairing_code'), 'error');
       return;
@@ -504,6 +552,46 @@ export function render(container) {
       showToast(err.message, 'error');
     }
   };
+
+  /*
+   * #313 — show the URL in place of the form once the display exists.
+   *
+   * ⚠️ NOT A TOAST. This URL is the entire product of the flow and the operator has to move it into
+   * another application; a message that fades after four seconds is the wrong container for the one
+   * thing they came here to get. It stays until they close the dialog, and it is also on the
+   * display's own Web player tab, so closing too early costs nothing.
+   */
+  function showWebPlayerUrl(url) {
+    const form = document.getElementById('addDeviceForm');
+    const result = document.getElementById('addDeviceResult');
+    const input = document.getElementById('createdPlayerUrl');
+    if (!form || !result || !input) { showToast(url, 'success'); return; }
+
+    // Swap visibility. The form is NEVER removed: this dialog's markup lives in index.html and is
+    // reused for every open, so destroying it broke the next Add Display — normal pairing included.
+    form.style.display = 'none';
+    result.style.display = '';
+    input.value = url;
+    input.select();
+    document.getElementById('pairDeviceBtn').style.display = 'none';
+  }
+
+  /* Put the dialog back to the form. Called on every open, so one create cannot strand the next. */
+  function resetAddDeviceDialog() {
+    const form = document.getElementById('addDeviceForm');
+    const result = document.getElementById('addDeviceResult');
+    if (form) form.style.display = '';
+    if (result) result.style.display = 'none';
+    const pairBtnEl = document.getElementById('pairDeviceBtn');
+    if (pairBtnEl) pairBtnEl.style.display = '';
+    const box = document.getElementById('addDeviceNoStorage');
+    if (box) {
+      box.checked = false;
+      // Fire the change listener rather than calling syncMode directly, so the intro text, the
+      // code field and the button label all revert through the one path that owns them.
+      box.dispatchEvent(new Event('change'));
+    }
+  }
 
   // Multi-select: a checkbox on each device card adds to selectedDeviceIds.
   // The selection bar shows when 1+ are selected; "Create Video Wall" is the
@@ -848,22 +936,43 @@ async function loadDashboard() {
     for (const d of rawDevices) seen.set(d.id, d);
     const devices = Array.from(seen.values());
 
-    // Getting started. Skipped entirely once put away or finished, so the extra content
-    // lookup only ever happens for an account that still has something left to do.
-    const gsHost = document.getElementById('gettingStarted');
-    if (gsHost && !gettingStarted.isDismissed()) {
-      try {
-        const content = await api.getContent();
-        const state = gettingStarted.computeSteps({ devices, content: content || [], playlists: playlists || [] });
-        if (state.complete) gettingStarted.dismiss();   // finished: never costs a fetch again
-        gettingStarted.render(gsHost, state, {
-          onAction: (a) => {
-            if (a === 'add-device') { document.getElementById('addDeviceBtn')?.click(); return true; }
-            return false;
-          },
-        });
-      } catch (_) { /* guidance must never break the dashboard */ }
+    /*
+     * What's new. shouldFetch() is a localStorage read against the version app.js already knows,
+     * so an unchanged build makes no request at all; the one request happens on the first
+     * dashboard load after an upgrade, which is the one the panel exists for.
+     */
+    const wnHost = document.getElementById('whatsNew');
+    if (wnHost) {
+      wnHost.style.display = 'none';
+      if (whatsNew.shouldFetch()) {
+        try {
+          const notes = await whatsNew.fetchNotes();
+          if (notes) whatsNew.render(wnHost, notes);
+        } catch (_) { /* a release note must never break the dashboard */ }
+      }
     }
+
+    // Getting started. devices and playlists are already in hand from the load above, so this
+    // still costs exactly the one content request it always did — and it is skipped entirely
+    // once put away or finished.
+    await gettingStarted.mount(document.getElementById('gettingStarted'), {
+      devices,
+      playlists: playlists || [],
+      onAction: (a) => {
+        if (a === 'add-device') { document.getElementById('addDeviceBtn')?.click(); return true; }
+        /*
+         * Step 4 points back at this page, so it needs an in-page answer too or its button is
+         * dead the same way step 3's was. Assigning happens on a display's own page, and step 4
+         * is only ever the next step once a display exists — so open the first one rather than
+         * leaving the operator to work out that "the screen" means clicking a card.
+         */
+        if (a === 'assign') {
+          const first = devices && devices[0];
+          if (first) { window.location.hash = `#/device/${first.id}`; return true; }
+        }
+        return false;
+      },
+    });
 
     // Stats
     const online = devices.filter(d => d.status === 'online').length;

@@ -105,6 +105,7 @@ router.get('/', (req, res) => {
     case 'web':     sql += " AND remote_url IS NOT NULL AND mime_type != 'video/youtube'"; break;
     // HTML bundles are their own bucket: they are neither image nor video, and without a case here
     // they appear only under "all" — present in the library and unfindable.
+    case 'audio':   sql += " AND mime_type LIKE 'audio/%'"; break;
     case 'bundle':  sql += " AND mime_type = '" + htmlBundle.BUNDLE_MIME + "'"; break;
     // default / 'all' / unknown: no type constraint
   }

@@ -312,3 +312,47 @@ test('the dim is clamped, so it can never hide the slide outright', () => {
   assert.equal(n.backgroundDim, 1);
   assert.equal(S.normalizeSlide({ template: { background_dim: -5, elements: [] } }).backgroundDim, 0);
 });
+
+/*
+ * ⚠️ THE SHAPE IS CARRIED, AND THE RENDERER DOES NOT YET USE IT.
+ *
+ * Positions are % and sizes are cqw, both against the stage — so the stage's aspect IS the
+ * composition, and handed the panel's own box a 16:9 deck on a 2560x1800 screen becomes a different
+ * slide: the `cover` background crops ~20% off each side, headlines run past the edges, the eyebrow
+ * sits off-screen. Reproduced on an Android panel.
+ *
+ * ⚠️ AND THE OBVIOUS CSS FIX IS THE ONE THAT MUST NOT SHIP. Letterboxing the stage with
+ * `width:min(100cqw, calc(100cqh * W / H))` is correct on a modern engine and was verified as such
+ * — and on Android WebView 91 (what a lot of signage hardware still runs, and what this was found
+ * on) it painted the FIRST slide of a deck and then went black for every one after it. Tried three
+ * ways: a flex wrapper, an absolutely-positioned wrapper, and containment moved onto the body with
+ * no wrapper at all. All three black; the unchanged document renders every slide. @supports does
+ * not save it either, because WebView 91 has no container queries, so the guard is simply false and
+ * the panel is left on a rule that was already wrong for it.
+ *
+ * So the deck's shape is stamped onto every published slide and normalised here, ready — but the
+ * renderer keeps the full-box stage until the sizing stops depending on container queries at all
+ * (a fixed design canvas plus a scale transform, which fixes cqw on those panels too). Publishing
+ * it now means every deck published from today already carries the shape when that lands.
+ */
+test('the deck’s shape is carried on the slide, defaulting to what those decks were laid out in', () => {
+  assert.equal(S.normalizeSlide({ template: { elements: [] } }).aspect, '16:9');
+  assert.equal(S.normalizeSlide({ template: { aspect: 'wide', elements: [] } }).aspect, '16:9');
+  assert.equal(S.normalizeSlide({ template: { aspect: '9:16', elements: [] } }).aspect, '9:16');
+});
+
+/*
+ * ⚠️ AND THE STAGE STAYS A PLAIN FULL BOX UNTIL THEN. This is the regression test for the black
+ * panel above: body’s direct child is the stage, with no wrapper element, and no container unit
+ * appears in its sizing. Every variant that broke WebView 91 violated one of these two lines.
+ */
+test('the stage is body’s direct child and sized without container units', () => {
+  const html = S.renderSlideHtml({ template: { aspect: '16:9', elements: [] }, fields: {} });
+  assert.match(html, /<body><div class="stage">/, 'no wrapper may sit between body and the stage');
+  assert.ok(!/class="frame"/.test(html), 'and no frame element may come back');
+
+  const stage = html.slice(html.indexOf('.stage {'), html.indexOf('}', html.indexOf('.stage {')) + 1);
+  assert.match(stage, /width:100%/);
+  assert.match(stage, /height:100%/);
+  assert.ok(!/cq[wh]/.test(stage), `the stage’s own size must not use container units: ${stage}`);
+});

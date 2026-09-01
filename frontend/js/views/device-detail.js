@@ -5,6 +5,7 @@ import { esc, livenessBadge, hydrateAuthImages, screenshotUrl } from '../utils.j
 import { t, tn } from '../i18n.js';
 import { showDeviceOwnerQRModal } from '../components/device-owner-qr-modal.js';
 import { frameDeviceOutput, displayAspectRatio } from '../lib/device-frame.js';
+import * as gettingStarted from '../components/getting-started.js';
 
 // The player distinguishes three cases for the Wi-Fi name, because "--" was hiding a real
 // answer: Android 8.1+ refuses to reveal the SSID to an app without location permission, and a
@@ -366,6 +367,10 @@ async function loadDevice(deviceId, activeTab = null) {
         <button class="btn btn-secondary btn-sm" id="t2KioskOff">${t('device.tier2.kiosk_off')}</button>` : ''}
       </div>` : ''}
 
+      <!-- Step 4 sends you to this page to assign a playlist. Losing the checklist on arrival is
+           the same dead end the Content, Playlists and playlist-detail pages had. -->
+      <div id="gettingStarted"></div>
+
       <div class="tabs">
         <div class="tab active" data-tab="nowplaying">${t('device.tab.now_playing')} <span class="help-tip" data-tip="${t('device.tab.now_playing_tip')}">?</span></div>
         <div class="tab" data-tab="playlist">${t('device.tab.playlist')} <span class="help-tip" data-tip="${t('device.tab.playlist_tip')}">?</span></div>
@@ -373,6 +378,12 @@ async function loadDevice(deviceId, activeTab = null) {
         ${(can('remote.stream') || can('remote.input') || can('remote.screenshot')) ? `<div class="tab" data-tab="remote">${t('device.tab.remote')} <span class="help-tip" data-tip="${t('device.tab.remote_tip')}">?</span></div>` : ''}
         ${(can('audio.volume') || can('display.brightness') || can('system.brightness') || can('system.screen_timeout')) ? `<div class="tab" data-tab="controls">${t('device.tab.controls')} <span class="help-tip" data-tip="${t('device.tab.controls_tip')}">?</span></div>` : ''}
         ${device.tier === 2 ? `<div class="tab" data-tab="terminal">${t('device.tab.terminal')} <span class="help-tip" data-tip="${t('device.tab.terminal_tip')}">?</span></div>` : ''}
+        <!--
+          #313 — only for a display that actually HAS an enrolment key, i.e. one created for a
+          player that cannot stay paired. Every other display keeps its own credentials and would
+          gain nothing from this tab but a durable secret it never needed.
+        -->
+        ${device.enrol_key ? `<div class="tab" data-tab="webplayer">${t('device.tab.webplayer')} <span class="help-tip" data-tip="${t('device.tab.webplayer_tip')}">?</span></div>` : ''}
       </div>
 
       <!-- Now Playing Tab -->
@@ -835,6 +846,15 @@ async function loadDevice(deviceId, activeTab = null) {
 
       ${(can('remote.stream') || can('remote.input') || can('remote.screenshot')) ? `
       <!-- Remote Control Tab -->
+      <!-- Web player Tab (#313) -->
+      ${device.enrol_key ? `
+      <div class="tab-content" id="tab-webplayer">
+        <h3 style="font-size:16px;margin-bottom:4px">${t('device.enrol.label')}</h3>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px;max-width:70ch">${t('device.enrol.hint')}</div>
+        <div id="enrolBody"></div>
+      </div>
+      ` : ''}
+
       <div class="tab-content" id="tab-remote">
         <div class="remote-container">
           ${can('remote.stream') ? `
@@ -1043,6 +1063,27 @@ async function loadDevice(deviceId, activeTab = null) {
     setupActions(device);
     setupRemote(device);
     setupPlaylistActions(device);
+    setupEnrolKey(device);
+
+    /*
+     * The checklist, at the end of its own trail.
+     *
+     * ⚠️ THE ASSIGN CONTROL IS BEHIND A TAB. Step 4 says "Open the screen and assign the playlist"
+     * and lands here — on the Now Playing tab, with the playlist picker one tab over and nothing
+     * pointing at it. So the action opens the Playlist tab and focuses the picker, rather than
+     * falling back to `location.hash = '#/'`, which would bounce the user back to the dashboard
+     * they just came from.
+     */
+    gettingStarted.mount(document.getElementById('gettingStarted'), {
+      onAction: (a) => {
+        if (a !== 'assign') return false;
+        document.querySelector('.tab[data-tab="playlist"]')?.click();
+        const picker = document.getElementById('playlistPicker');
+        if (picker) { picker.scrollIntoView({ block: 'center' }); picker.focus(); }
+        return true;
+      },
+      ctaFor: { assign: t('gs.assign.cta_here') },
+    }).catch(() => {});
 
     // Restore active tab if specified (e.g. after layout change)
     if (activeTab) {
@@ -1279,6 +1320,63 @@ function renderPlaylist(assignments) {
       </div>
     </div>
   `).join('');
+}
+
+/*
+ * #313 — the web player URL an operator pastes into vMix.
+ *
+ * ⚠️ WHY IT IS NOT MINTED AUTOMATICALLY. Nearly every display keeps its own credentials and needs
+ * none of this. A key created for all of them would be a durable secret sitting on rows that never
+ * use one, for no benefit. So the operator asks for it on the screen that needs it.
+ */
+function setupEnrolKey(device) {
+  const host = document.getElementById('enrolBody');
+  if (!host) return;
+
+  const draw = () => {
+    if (!device.enrol_key) return;   // the tab only renders for a display that has one
+    const url = `${window.location.origin}/player?k=${encodeURIComponent(device.enrol_key)}`;
+    host.innerHTML = `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <input class="input" id="enrolUrl" readonly value="${esc(url)}"
+               style="flex:1;min-width:260px;font-family:monospace;font-size:11px">
+        <button class="btn btn-secondary btn-sm" id="enrolCopyBtn">${t('device.enrol.copy')}</button>
+        <button class="btn btn-secondary btn-sm" id="enrolRollBtn">${t('device.enrol.roll')}</button>
+      </div>
+      <div style="font-size:11px;color:#fbbf24;margin-top:6px">${t('device.enrol.warning')}</div>`;
+
+    host.querySelector('#enrolCopyBtn').addEventListener('click', () => {
+      const el = host.querySelector('#enrolUrl');
+      el.select();
+      // execCommand rather than navigator.clipboard: the dashboard is served over plain HTTP on
+      // plenty of self-hosted LANs, where the async clipboard API is unavailable.
+      try { document.execCommand('copy'); showToast(t('device.enrol.copied')); }
+      catch { showToast(t('device.enrol.copy_failed'), 'error'); }
+    });
+    host.querySelector('#enrolRollBtn').addEventListener('click', () => {
+      if (!confirm(t('device.enrol.confirm_roll'))) return;
+      mint(true);
+    });
+    /*
+     * ⚠️ THERE IS DELIBERATELY NO REVOKE BUTTON HERE, and the API route that can do it is not
+     * wired to one. This display exists BECAUSE its player cannot remember credentials: the URL is
+     * the only way it ever gets back. Revoking would brick it at its next restart, with the
+     * dashboard still showing a perfectly healthy-looking screen. "New URL" is the recovery for a
+     * leak — it invalidates the old link without stranding anything — and a display that should
+     * genuinely stop existing is removed with Remove, up in the header, which says what it does.
+     */
+  };
+
+  async function mint(rolled) {
+    try {
+      const r = await api.createEnrolKey(device.id);
+      device.enrol_key = r.enrol_key;
+      showToast(rolled ? t('device.enrol.rolled') : t('device.enrol.created'));
+      draw();
+    } catch (err) { showToast(err.message, 'error'); }
+  }
+
+  draw();
 }
 
 function setupTabs() {
@@ -1611,12 +1709,22 @@ function setupActions(device) {
           await api.clearDevicePlaylist(device.id);
         }
         device.playlist_id = newPlaylistId || null;
-        const assignments = await api.getAssignments(device.id);
-        const pc = document.getElementById('playlistContainer');
-        pc.innerHTML = renderPlaylist(assignments);
-        hydrateAuthImages(pc);
-        attachRemoveHandlers(device);
         showToast(t('device.toast.playlist_changed'));
+        /*
+         * ⚠️ RE-RENDER THE PAGE, NOT JUST THE ITEM LIST.
+         *
+         * This used to patch #playlistContainer by hand, which repaints the items and nothing
+         * else — and the "Unpublished changes" banner is rendered from device.playlist_status,
+         * which only the page render reads. So assigning a playlist that had never been published
+         * left the screen dark with the one banner that explains why NOT IN THE DOM AT ALL. It
+         * appeared on the next full load, which is also when the getting-started checklist
+         * vanishes, so it read as "the warning only shows up once the steps go away".
+         *
+         * loadDevice re-reads the device (playlist_status, playlist_has_published included) and
+         * restores the Playlist tab — the same thing the discard handler above does, for the same
+         * reason.
+         */
+        loadDevice(device.id, 'playlist');
       } catch (err) {
         showToast(err.message, 'error');
       }

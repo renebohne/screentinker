@@ -45,8 +45,28 @@ function present(deck) {
     created_at: deck.created_at,
     updated_at: deck.updated_at,
     doc,
-    warnings: deckLib.deckWarnings(doc),
+    warnings: deckLib.deckWarnings(doc, voDurations(doc)),
   };
+}
+
+/*
+ * Lengths for the voiceovers a deck references, so deckWarnings can say when one outruns its slide.
+ *
+ * Looked up HERE rather than inside deckWarnings, which has no database on purpose — the same split
+ * as normalizeSlide's injected image resolver. One query for the whole deck, not one per slide.
+ *
+ * `duration_sec` is null for anything never probed (an image, an upload ffprobe could not read), and
+ * those ids are simply absent from the map — the lint stays quiet rather than guessing.
+ */
+function voDurations(doc) {
+  const ids = [...new Set((doc.slides || [])
+    .map((s) => s.template && s.template.audio && s.template.audio.vo)
+    .filter((id) => typeof id === 'string' && id))];
+  if (!ids.length) return {};
+  const rows = db.prepare(
+    `SELECT id, duration_sec FROM content WHERE duration_sec IS NOT NULL AND id IN (${ids.map(() => '?').join(',')})`
+  ).all(...ids);
+  return Object.fromEntries(rows.map((r) => [r.id, r.duration_sec]));
 }
 
 /*

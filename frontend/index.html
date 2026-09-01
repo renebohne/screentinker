@@ -216,8 +216,22 @@
         </button>
       </div>
       <div class="modal-body">
-        <p class="modal-description" style="margin-bottom:16px" data-i18n="add_display.intro">Enter the 6-digit pairing code shown on the display.</p>
-        <div class="form-group">
+       <div id="addDeviceForm">
+        <p class="modal-description" style="margin-bottom:16px" id="addDeviceIntro" data-i18n="add_display.intro">Enter the 6-digit pairing code shown on the display.</p>
+        <!--
+          #313 — the escape hatch for a player that cannot remember it was paired. A vMix browser
+          input deletes its whole profile when vMix closes, so pairing it the ordinary way works
+          exactly once. Ticking this creates the display here and hands back a URL that carries its
+          identity, so there is no code to type and nothing for the player to forget.
+        -->
+        <label style="display:flex;gap:8px;align-items:flex-start;margin-bottom:16px;cursor:pointer">
+          <input type="checkbox" id="addDeviceNoStorage" style="margin-top:3px">
+          <span>
+            <span style="font-size:13px" data-i18n="add_display.no_storage">This player can't stay paired (vMix browser input, resetting kiosk)</span>
+            <span style="display:block;font-size:11px;color:var(--text-muted,#64748b);margin-top:2px" data-i18n="add_display.no_storage_hint">Creates the display here and gives you a URL to paste into the player instead of a pairing code.</span>
+          </span>
+        </label>
+        <div class="form-group" id="pairingCodeGroup">
           <label data-i18n="add_display.pairing_code">Pairing Code</label>
           <input type="text" id="pairingCodeInput" maxlength="6" pattern="[0-9]{6}" placeholder="000000" class="pairing-input">
         </div>
@@ -254,6 +268,22 @@
             &#128242; <span data-i18n="add_display.owner_qr_btn">Show device-owner QR</span>
           </button>
         </div>
+       </div>
+       <!--
+         #313 — the URL shown after creating a display for a player that cannot stay paired.
+         A SIBLING of the form, not a replacement for it: this markup is in the page once and the
+         dialog is reopened from it every time, so overwriting the body left the dialog permanently
+         stuck on this panel — and took normal pairing with it, because the open handler clears
+         inputs that were no longer there.
+       -->
+       <div id="addDeviceResult" style="display:none">
+         <p class="modal-description" style="margin-bottom:12px" data-i18n="add_display.created_intro">Display created.</p>
+         <input class="input" id="createdPlayerUrl" readonly style="width:100%;font-family:monospace;font-size:11px">
+         <div style="display:flex;gap:8px;margin-top:10px">
+           <button type="button" class="btn btn-secondary btn-sm" id="createdCopyBtn" data-i18n="device.enrol.copy">Copy</button>
+         </div>
+         <div style="font-size:11px;color:#fbbf24;margin-top:10px" data-i18n="device.enrol.warning"></div>
+       </div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary" data-close-modal="addDeviceModal" data-i18n="common.cancel">Cancel</button>

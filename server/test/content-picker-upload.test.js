@@ -76,18 +76,37 @@ test('⚠️ the upload goes through api.uploadContent, never a bare fetch/XHR',
   assert.ok(!/\bfetch\s*\(/.test(picker), 'the picker calls fetch() directly, bypassing routing');
 });
 
-test('⚠️ the picker asks the server for IMAGES, not the 100 newest rows of every type', () => {
+test('⚠️ every picker fetch is type-filtered, not the 100 newest rows of every type', () => {
+  /*
+   * ⚠️ TYPE-FILTERED, not "image". It was image-only when the only picker was a background photo.
+   * A slide now also picks a background VIDEO and two audio tracks, so slides.js asks three times,
+   * once per type — and the rule that actually matters is unchanged: never an untyped /content on
+   * the default limit, where the newest 100 rows of every kind crowd out the ones being offered.
+   * That is the bug this test was written for, and it is what an empty picker looks like.
+   */
   for (const [name, src] of [['widgets.js', W], ['slides.js', S]]) {
     const asks = [...src.matchAll(/['"]\/content(\?[^'"]*)?['"]/g)].map((m) => m[1] || '');
     assert.ok(asks.length, `${name} no longer fetches /content at all`);
     for (const qs of asks) {
-      assert.match(qs, /type=image/,
-        `${name} fetches /content without type=image, so videos crowd out the images it wants`);
+      assert.match(qs, /type=(image|video|audio)\b/,
+        `${name} fetches /content untyped, so other kinds crowd out the ones the picker offers`);
       assert.match(qs, /limit=(\d+)/,
         `${name} fetches /content without raising the limit off the 100 default`);
       assert.ok(Number(qs.match(/limit=(\d+)/)[1]) > 100,
         `${name} asks for ${qs} — the default 100 is the bug`);
     }
+  }
+
+  /*
+   * And slides asks for all three. Each of these was empty on the screen at some point: the audio
+   * pickers because the index was images-only when the tracks were added, and the background-video
+   * picker for the whole time it had shipped — nobody had noticed, because the index it read was
+   * built for backgrounds and quietly never contained a video.
+   */
+  const slideAsks = [...S.matchAll(/['"]\/content(\?[^'"]*)?['"]/g)].map((m) => m[1] || '').join(' ');
+  for (const t of ['image', 'video', 'audio']) {
+    assert.match(slideAsks, new RegExp(`type=${t}\\b`),
+      `slides.js never asks for ${t} — that picker is empty on screen`);
   }
 });
 
@@ -110,7 +129,7 @@ test('⚠️ picking an image does not rebuild the grid under the pointer', () =
 
 test('⚠️ a refused upload reports the SERVER\'S reason, not a flat "Upload failed"', () => {
   /*
-   * The server is specific — "Unsupported file type — only image and video files are accepted", a
+   * The server is specific — "Unsupported file type — only image, video and audio files are accepted", a
    * storage-limit refusal, "Switch to a workspace before uploading". uploadContent() replaced all
    * of it with a shrug, which is how a refused upload becomes "it just doesn't work".
    */

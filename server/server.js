@@ -1333,6 +1333,20 @@ app.get('/api/version', (req, res) => {
   res.json({ hash: frontendHash, version: VERSION, latest_version: latest, update_available: updateAvailable });
 });
 
+/*
+ * User-facing release notes for the "What's new" panel and the Settings -> About list.
+ *
+ * ⚠️ DELIBERATELY NOT PART OF /api/version, which the frontend polls every 30 seconds for the
+ * build hash. The notes are static for the life of the process and are read at most once per
+ * sign-in; bolting them onto the hot poll would ship the same payload 2,880 times a day per tab.
+ *
+ * Public, like /api/version and /api/status beside it: the same text is on the GitHub release,
+ * and the running version is already readable from /api/status.
+ */
+app.get('/api/release-notes', (req, res) => {
+  res.json(require('./lib/release-notes').payload());
+});
+
 // Public status page
 app.use('/api/status', require('./routes/status'));
 
@@ -1828,6 +1842,65 @@ app.get('/api/provision/device-owner-qr', requireAuth, async (req, res) => {
 // Override provision to also notify device via WS
 const { checkDeviceLimit } = require('./middleware/subscription');
 const pairLockout = require('./lib/pair-lockout');
+/*
+ * #313 — create a display that has no player yet, and hand back the URL that will become one.
+ *
+ * ⚠️ WHY THIS EXISTS ALONGSIDE PAIRING RATHER THAN REPLACING ANY OF IT. Ordinary pairing starts at
+ * the screen: the player shows a code, the operator types it. That is the right way round when the
+ * player can remember what it learned. A vMix browser input cannot — it deletes its whole profile
+ * when vMix closes — so pairing it the normal way works exactly once, and every restart afterwards
+ * asks for a new code. The operator needs the URL BEFORE the player first runs, which means the
+ * display has to exist before the player does.
+ *
+ * So this is the inversion, and only for that case: the dashboard creates the row and mints the
+ * enrolment key, and the player adopts that identity when it starts. Nothing about the existing
+ * pairing path changes; a display made this way is an ordinary display in every other respect.
+ *
+ * Same guards as pairing: authenticated, tenanted, and counted against the plan's device limit.
+ */
+app.post('/api/devices/web-player', requireAuth, resolveTenancy, checkDeviceLimit, (req, res) => {
+  const { name } = req.body || {};
+  if (!req.workspaceId) return res.status(400).json({ error: 'No active workspace' });
+
+  const { v4: uuidv4 } = require('uuid');
+  const enrolKey = require('./lib/enrol-key');
+  const id = uuidv4();
+  const deviceName = (typeof name === 'string' && name.trim())
+    ? name.trim()
+    : 'Display ' + (db.prepare('SELECT COUNT(*) as count FROM devices WHERE user_id = ?').get(req.user.id).count + 1);
+
+  /*
+   * `offline`, not `provisioning`: a provisioning row is an unclaimed screen waiting to be
+   * adopted, and the sweep deletes those after 24h (pruneProvisioningDevices). This one is
+   * claimed the moment it is made — it is simply a display that has not connected yet, which is
+   * indistinguishable from one that is switched off.
+   *
+   * A device_token is issued now so the row is complete rather than relying on the enrolment path
+   * to fill it in, and the settings PIN is minted the same way pairing mints it.
+   */
+  db.prepare(`INSERT INTO devices (id, name, user_id, workspace_id, status, device_token, settings_pin, created_at, updated_at)
+              VALUES (?, ?, ?, ?, 'offline', ?, ?, strftime('%s','now'), strftime('%s','now'))`)
+    .run(id, deviceName, req.user.id, req.workspaceId, crypto.randomBytes(32).toString('hex'), sixDigitCode());
+
+  const key = enrolKey.setEnrolKey(db, id);
+  console.log(`[enrol] created web-player display ${id} with an enrolment key (user ${req.user.id})`);
+
+  const created = db.prepare('SELECT * FROM devices WHERE id = ?').get(id);
+  require('./lib/device-sanitize').stripDeviceSecrets(created);
+  try {
+    // Required here rather than at module scope, the same way the pairing route below does it.
+    const { workspaceRoom: wsRoom, emitToWorkspace: emitWs } = require('./lib/socket-rooms');
+    emitWs(io.of('/dashboard'), wsRoom(req.workspaceId), 'dashboard:device-added', created);
+  } catch (e) { /* the dashboard refreshes anyway; never fail the create over a notification */ }
+
+  res.status(201).json({
+    success: true,
+    device: created,
+    enrol_key: key,
+    player_url: enrolKey.playerUrl(`${req.protocol}://${req.get('host')}`, key),
+  });
+});
+
 app.post('/api/provision/pair', requireAuth, resolveTenancy, checkDeviceLimit, (req, res) => {
   // #87: lock out an IP after repeated failed pairing-code guesses (brute-force defense
   // beyond the 5/min rate-limit on /api/provision).

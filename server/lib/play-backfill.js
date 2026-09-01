@@ -151,8 +151,10 @@ function closeStrandedPlays(db, deviceId, unknownMaxSec = INFER_UNKNOWN_MAX_SEC)
 /**
  * Close plays that have been open longer than they could possibly have played.
  *
- * ⚠️ THE LEAK closeStrandedPlays CANNOT REACH, and it is not small: prod carries 36,096 open rows,
- * 35,982 of them more than a day old, the oldest from June.
+ * ⚠️ THE LEAK closeStrandedPlays CANNOT REACH, and it is not small: the database this was written
+ * against carried 36,096 open rows, 35,982 of them more than a day old, the oldest from June. Read
+ * that as one instance, NOT as the size of the problem — a 73-device field install upgrading to
+ * 2.0.0 came up with **494,000**, which is why the drain now has a boot mode (lib/boot-defer.js).
  *
  * closeStrandedPlays infers an end from THE NEXT PLAY on the same device and zone. That is the
  * better answer when it exists — it is a measurement rather than an assumption — but it needs a

@@ -171,6 +171,10 @@ function escapeHtml(s) {
 
 /** A slot name — the join key between template and record. */
 const SLOT_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/i;
+/* `W:H`, both small positive integers. Matched rather than checked against slide-deck's ASPECTS
+ * list so this module keeps no dependency on the deck editor's menu: a shape the editor stops
+ * offering must still render on the panels that already have it. */
+const ASPECT_RE = /^\d{1,2}:\d{1,2}$/;
 
 /* ============ per-kind configuration: clock, date, countdown, qr ============ */
 
@@ -309,6 +313,8 @@ function normalizeSlide(raw) {
     fields[k] = String(v).slice(0, MAX_FIELD_CHARS);
   }
 
+  const audioIn = (tplIn.audio && typeof tplIn.audio === 'object' && !Array.isArray(tplIn.audio)) ? tplIn.audio : {};
+
   const elsIn = Array.isArray(tplIn.elements) ? tplIn.elements.slice(0, MAX_ELEMENTS) : [];
   const elements = elsIn.map((e, i) => {
     const src = (e && typeof e === 'object') ? e : {};
@@ -372,6 +378,25 @@ function normalizeSlide(raw) {
   return {
     background: color(tplIn.background, '#000000'),
     /*
+     * ⚠️ THE SHAPE THE SLIDE WAS AUTHORED IN, AND WHY THE DOCUMENT HAS TO KNOW IT.
+     *
+     * Every element on a slide is positioned in % and sized in cqw AGAINST THE STAGE, so the stage
+     * is the only thing that decides what the composition looks like. Given the panel's own box it
+     * takes the panel's aspect — and a deck laid out at 16:9 on a 2560x1800 screen is then a
+     * DIFFERENT composition: a `cover` background is cropped ~20% off each side, headlines run past
+     * the edges, and the eyebrow sits off-screen entirely. Found on an Android panel, where the
+     * whole slide is one background image and a fifth of it was simply missing.
+     *
+     * Defaulting to 16:9: a deck published before this existed carries no aspect, and 16:9 is both
+     * the editor's default and what those decks were laid out in.
+     *
+     * ⚠️ CARRIED, NOT YET USED BY THE CSS BELOW. The letterbox this exists for needs container
+     * query units, and Android WebView 91 — common on signage hardware — has none, where every
+     * version of that CSS painted one slide and then blanked the panel. The full account, including
+     * what to build instead, is in test/slide-render.test.js.
+     */
+    aspect: ASPECT_RE.test(tplIn.aspect) ? String(tplIn.aspect) : '16:9',
+    /*
      * ⚠️ A PHOTO BEHIND THE WORDS, AND A SCRIM IN FRONT OF IT.
      *
      * A background image without a way to darken it is a trap on a signage product: the photo an
@@ -397,6 +422,34 @@ function normalizeSlide(raw) {
     backgroundVideoContentId: typeof tplIn.background_video_content_id === 'string'
       && tplIn.background_video_content_id.length <= 64 ? tplIn.background_video_content_id : null,
     backgroundDim: clamp(tplIn.background_dim, 0, 1, 0),
+    /*
+     * ⚠️ CARRIED, NEVER PLAYED HERE. NEITHER TRACK IS RENDERED INTO THE SLIDE DOCUMENT.
+     *
+     * The obvious implementation puts the voiceover in an <audio> tag next to the elements, and it
+     * is wrong for the same reason the background video above is unconditionally muted: the player
+     * decides which ZONE owns the audio, and a widget that makes its own noise fights that decision
+     * from inside an iframe it cannot see out of. It would also sit outside lib/media-mute — the
+     * wall-follower rule, the operator's remote mute, the per-item flag and the autoplay gesture
+     * would all stop applying to it, which is precisely the four-way drift that file exists to end.
+     *
+     * The bed has a second, independent reason. A deck publishes as one widget per slide plus a
+     * playlist, so every advance destroys the iframe; a looping element inside it would restart on
+     * each slide, which is the one thing a bed must not do.
+     *
+     * So both are metadata here and nothing more. They ride to the player in widget_config, and the
+     * player owns the elements: the voiceover for as long as its item is up, the bed across items
+     * that name the same track. The difference between the two is not a different mechanism — it is
+     * whether the id changed.
+     *
+     * Volumes are separate because the common case is a bed under a voice, and a bed at full volume
+     * buries it. The music default sits well below the voice.
+     */
+    audio: {
+      vo: typeof audioIn.vo === 'string' && audioIn.vo.length <= 64 ? audioIn.vo : null,
+      voVolume: clamp(audioIn.vo_volume, 0, 1, 1),
+      music: typeof audioIn.music === 'string' && audioIn.music.length <= 64 ? audioIn.music : null,
+      musicVolume: clamp(audioIn.music_volume, 0, 1, 0.4),
+    },
     elements,
     fields,
   };
@@ -534,6 +587,74 @@ function qrSvg(text, ec, darkIn, lightIn) {
  * fallback is a clock displaying a time that is quietly, plausibly wrong — which on a wall is worse
  * than an empty box, because nobody can tell by looking.
  */
+/*
+ * ⚠️ THE SLIDE IS SIZED BY SCRIPT, AND EVERY WORD OF THAT IS DELIBERATE.
+ *
+ * A slide is laid out in % (positions) and cqw (type) against the stage, so THE STAGE'S ASPECT IS
+ * THE COMPOSITION. Given the panel's whole box it takes the panel's aspect, and a 16:9 deck on a
+ * 2560x1800 screen becomes a different slide: `cover` backgrounds cropped a fifth off each side,
+ * headlines past the edges, the eyebrow off-screen entirely. This fits the stage to the shape the
+ * deck was authored in and centres it, so the slide is the same composition on every panel.
+ *
+ * ⚠️ AND IT CONVERTS cqw TO px, which is the half that cannot be done in CSS.
+ *
+ * Container queries shipped in Chrome 105. Android WebView 91 is still what a lot of signage
+ * hardware runs — every `font-size:6.2cqw` on it is an INVALID declaration that the engine drops,
+ * so those panels have never rendered a slide at the authored size; the oversized, clipped text
+ * that started this was the browser's default size being font-boosted, not a layout bug.
+ *
+ * The conversion reads the cqw number out of the element's own style ATTRIBUTE rather than the
+ * CSSOM, for exactly that reason: on an engine that rejected the declaration the CSSOM has nothing
+ * to read, while the attribute is still the literal text the server wrote. 1cqw is 1% of the
+ * stage's width by definition, so the arithmetic is the whole conversion.
+ *
+ * ⚠️ NOTHING HERE CHANGES THE DOM. Three CSS-only attempts at this letterbox — a flex wrapper, an
+ * absolutely-positioned wrapper, and containment moved onto the body — each made WebView 91 paint
+ * the FIRST slide of a deck and then go black for every one after it. The stage stays body's only
+ * child, keeps `position:relative`, and only its box metrics and font sizes are written. If this
+ * script never runs, the CSS below is the old full-box stage and the slide renders as it did
+ * before — degraded, never blank.
+ */
+const FIT_SCRIPT = `<script>
+(function () {
+  var AW = __AW__, AH = __AH__;
+  var stage = document.querySelector('.stage');
+  if (!stage) return;
+  // Read once: the attribute text is fixed, only the pixel result changes with the panel.
+  var sized = [];
+  var all = document.querySelectorAll('.stage [style]');
+  for (var i = 0; i < all.length; i++) {
+    var raw = all[i].getAttribute('style') || '';
+    var f = /font-size:\\s*([0-9.]+)cqw/.exec(raw);
+    var r = /border-radius:\\s*([0-9.]+)cqw/.exec(raw);
+    if (f || r) sized.push([all[i], f ? parseFloat(f[1]) : 0, r ? parseFloat(r[1]) : 0]);
+  }
+  function fit() {
+    var d = document.documentElement;
+    var bw = d.clientWidth || window.innerWidth || 0;
+    var bh = d.clientHeight || window.innerHeight || 0;
+    if (!bw || !bh) return;
+    // The largest box of the authored shape that fits, then centred: margin:auto horizontally,
+    // a computed margin vertically. No position change, no wrapper — see the note above.
+    var w = Math.min(bw, bh * AW / AH);
+    var h = w * AH / AW;
+    stage.style.width = w + 'px';
+    stage.style.height = h + 'px';
+    stage.style.marginLeft = 'auto';
+    stage.style.marginRight = 'auto';
+    stage.style.marginTop = Math.round((bh - h) / 2) + 'px';
+    for (var j = 0; j < sized.length; j++) {
+      var e = sized[j];
+      if (e[1] > 0) e[0].style.fontSize = (e[1] / 100 * w) + 'px';
+      if (e[2] > 0) e[0].style.borderRadius = (e[2] / 100 * w) + 'px';
+    }
+  }
+  fit();
+  // A panel that rotates, and a zone that is re-laid out, both arrive as a resize.
+  window.addEventListener('resize', fit);
+})();
+</script>`;
+
 const LIVE_SCRIPT = `<script>
 (function () {
   var els = document.querySelectorAll('.live');
@@ -808,14 +929,32 @@ function renderSlideHtml(rawConfig, opts = {}) {
     + ((bgUrl || bgVideoUrl) && slide.backgroundDim > 0
       ? `<div class="scrim" style="background:rgba(0,0,0,${slide.backgroundDim})"></div>` : '');
 
+  /*
+   * The shape, as two numbers for the fitter. ASPECT_RE guarantees two small integers; a zero would
+   * divide the stage out of existence, so it falls back to the editor's default rather than trusting
+   * arithmetic it cannot do.
+   */
+  const [aw, ah] = String(slide.aspect || '16:9').split(':').map((n) => parseInt(n, 10));
+  const fitScript = FIT_SCRIPT
+    .replace('__AW__', String(aw > 0 ? aw : 16))
+    .replace('__AH__', String(ah > 0 ? ah : 9));
+
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   ${faces}${customFaces ? `\n  ${customFaces}` : ''}
-  html,body { margin:0; height:100%; overflow:hidden; background:${slide.background}; }
-  /* ⚠️ container-type:size is what makes every cqw above mean anything. Without it the units
-     resolve against the viewport and a slide inside a ZONE renders at full-screen sizes. */
-  .stage { position:relative; width:100%; height:100%; container-type:size; }
+  /* Black, not the slide's colour: this is what shows in the letterbox bars beside a slide whose
+     shape is not the panel's, and a bar painted in the slide's own background reads as a broken
+     layout rather than as the edge of the slide. */
+  html,body { margin:0; height:100%; overflow:hidden; background:#000; }
+  /* ⚠️ container-type:size is what makes every cqw above mean anything on an engine that HAS
+     container queries. Without it the units resolve against the viewport and a slide inside a ZONE
+     renders at full-screen sizes. FIT_SCRIPT overwrites those sizes in px, so this is the path a
+     slide takes only until the script runs — and the whole path on an engine where it cannot.
+     The width/height are the old full-box stage, and stay that way if the script never runs.
+     overflow:hidden clips to the stage rather than to the page, so nothing spills into the bars. */
+  .stage { position:relative; width:100%; height:100%; overflow:hidden;
+           background:${slide.background}; container-type:size; }
   .e { position:absolute; }
   /* Both fill the stage and sit beneath every element, in source order: photo, then scrim. */
   .bg { position:absolute; inset:0; background-size:cover; background-position:center; }
@@ -839,7 +978,7 @@ function renderSlideHtml(rawConfig, opts = {}) {
 <body><div class="stage">
     ${bgLayers}
     ${body}
-</div>${slide.elements.some((e) => KINDS[e.kind].live) ? LIVE_SCRIPT : ''}</body></html>`;
+</div>${fitScript}${slide.elements.some((e) => KINDS[e.kind].live) ? LIVE_SCRIPT : ''}</body></html>`;
 }
 
 module.exports = {

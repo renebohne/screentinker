@@ -29,6 +29,14 @@ function stripDeviceSecretsForList(d) {
     // page, and handing it out for every device in the workspace on every list load is the same
     // data with a far wider blast radius for nothing.
     delete row.trigger_secret;
+    /*
+     * #313: same reasoning a third time. The enrolment key names a display and proves you may be
+     * it — anything holding it can become that screen. Its only consumer is the device detail
+     * page, which shows the operator the player URL to paste into vMix. Handing it out for every
+     * display in the workspace, on every dashboard load, to every member, is the same data with a
+     * far wider blast radius for nothing.
+     */
+    delete row.enrol_key;
   }
   return row;
 }

@@ -1513,6 +1513,27 @@ const migrations = [
      created_at    INTEGER NOT NULL
    )`,
   'CREATE INDEX IF NOT EXISTS idx_custom_fonts_ws ON custom_fonts(workspace_id)',
+  /*
+   * #313 — a per-display ENROLMENT KEY, so a player with no durable storage can say who it is.
+   *
+   * ⚠️ THE CASE THIS EXISTS FOR. A vMix browser input deletes its whole CEF profile when vMix
+   * closes (vMix staff, on their forum: "The Web Browser input cache is automatically cleared when
+   * closing vMix"), so localStorage, cookies and IndexedDB all go together. The web player boots
+   * with nothing but its URL, and a player with no identity provisions a NEW display row — which
+   * means a fresh unpaired screen after every restart, and a dashboard filling up with corpses.
+   *
+   * So the identity has to live in the URL. This column is the thing the URL carries.
+   *
+   * ⚠️ NOT devices.device_token, and not devices.pairing_code. The device token is used on every
+   * message and cannot be rotated without re-pairing the screen; the pairing code is six digits,
+   * which is fine displayed on a screen behind a lockout for a few minutes and far too weak as a
+   * durable secret in a URL. This is a third thing on purpose: long, rotatable from the display's
+   * page, and good for exactly one action — proving which display you are.
+   *
+   * NULL for every display that does not use one, which is nearly all of them.
+   */
+  'ALTER TABLE devices ADD COLUMN enrol_key TEXT',
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_enrol_key ON devices(enrol_key) WHERE enrol_key IS NOT NULL',
   // #299 offline proof-of-play: a player-minted id for plays replayed after an outage, so a
   // re-flush cannot double-count. Partial index — live plays leave it NULL and must not collide.
   'ALTER TABLE play_logs ADD COLUMN client_event_id TEXT',
@@ -1569,6 +1590,50 @@ const migrations = [
 // ANY OTHER error is a real, partial-migration failure: log it loudly so it's
 // visible at boot rather than as a silent runtime failure later (issue #37, where
 // a swallowed failure left users.must_change_password absent -> total auth lockout).
+/*
+ * 2.0.1 — SAY SOMETHING BEFORE BUILDING AN INDEX ON play_logs.
+ *
+ * ⚠️ THE 2.0.0 FIELD REPORT. On a 73-device install on a Synology DS225+ (spinning SATA), the
+ * idx_play_logs_open build below sat in uninterruptible disk sleep for **more than five minutes**
+ * and printed NOTHING. From outside — no log line, no CPU, an unkillable process — the upgrade was
+ * indistinguishable from a hang, and the natural operator response to a hang is to kill it, which
+ * is the one thing that must not happen in the middle of a migration.
+ *
+ * The index is not the problem: it is the #307 fix and it takes as long as the disk takes. The
+ * silence was the problem. A row estimate and a warning up front make the wait legible, and the
+ * duration afterwards makes "slow disk" visible alongside the loop-lag band and shed lines.
+ *
+ * ⚠️ WHY THERE IS NO PROGRESS DURING THE BUILD. `db.exec` is one synchronous call into SQLite; the
+ * event loop is inside it for the whole build, so no timer, interval or async log can fire until it
+ * returns. There is no honest "45% done" to print from here — the choice is a line before and a
+ * line after, or nothing. Do not add a timer here expecting it to run.
+ */
+const PLAYS_RE = /\bplay_logs\b/i;
+let _playsMigrationTouched = false;
+
+function _indexExists(name) {
+  try {
+    return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?").get(name);
+  } catch { return false; }
+}
+
+/*
+ * An ESTIMATE, and deliberately so: MAX(rowid) is an index seek to the last row, while COUNT(*) is
+ * a full scan of the table we are about to make the operator wait on. Over-counts by whatever has
+ * been deleted, which is the right direction for a "this may take a while" warning.
+ */
+function _estimateRows(table) {
+  try {
+    const r = db.prepare(`SELECT MAX(rowid) AS n FROM ${table}`).get();
+    return (r && r.n) || 0;
+  } catch { return 0; }
+}
+
+/** Anything past this on one statement is the disk, not the query — surface it at warn. */
+const SLOW_STATEMENT_MS = 2000;
+/** Above this many rows an index build is worth warning about before it starts, not just logging. */
+const LOUD_INDEX_ROWS = 50000;
+
 let _migApplied = 0;
 for (const sql of migrations) {
   // Only a successful ADD COLUMN means a genuinely-new column (it would throw
@@ -1576,14 +1641,52 @@ for (const sql of migrations) {
   // succeed, so they must NOT count toward "new migrations applied" or the boot
   // would falsely report work on every healthy start.
   const isAddColumn = /alter\s+table\s+\S+\s+add\s+column/i.test(sql);
+  const touchesPlays = PLAYS_RE.test(sql);
+
+  // An index that already exists is a no-op statement, so only announce a build that will happen.
+  const indexName = touchesPlays
+    ? (sql.match(/create\s+(?:unique\s+)?index\s+if\s+not\s+exists\s+(\w+)/i) || [])[1]
+    : undefined;
+  const buildingIndex = !!indexName && !_indexExists(indexName);
+  if (buildingIndex) {
+    // Always say the build is starting; only SHOUT when the table is big enough for the wait to be
+    // mistaken for a hang. A fresh install builds these over zero rows and should not be alarmed.
+    const est = _estimateRows('play_logs');
+    const head = `[migrate] building ${indexName} over ~${est} play_logs row(s)`;
+    if (est >= LOUD_INDEX_ROWS) {
+      console.warn(
+        `${head}. This is ONE synchronous statement: on spinning disks it can take minutes, during ` +
+        `which the process serves nothing and looks wedged. It is not. Do not kill it.`
+      );
+    } else {
+      console.log(head);
+    }
+  }
+
+  const t0 = Date.now();
+  let ok = false;
   try {
     db.exec(sql);
+    ok = true;
     if (isAddColumn) _migApplied++;
   } catch (e) {
     if (!/duplicate column name|already exists/i.test(e.message)) {
       console.error(`[migrate] FAILED: ${sql}\n          -> ${e.message}`);
     }
   }
+  const ms = Date.now() - t0;
+
+  if (buildingIndex && ok) {
+    const line = `[migrate] built ${indexName} in ${ms}ms`;
+    if (ms > SLOW_STATEMENT_MS) console.warn(`${line} — slow storage (>${SLOW_STATEMENT_MS}ms for one statement)`);
+    else console.log(line);
+  }
+  /*
+   * Did THIS boot do work on the plays table? The answer arms the 2.0.1 player defer
+   * (lib/boot-defer.js) — a cold index plus, on the installs this matters for, a large open-play
+   * backlog behind it. A healthy restart sets nothing here and pays for none of it.
+   */
+  if (ok && touchesPlays && (buildingIndex || isAddColumn)) _playsMigrationTouched = true;
 }
 if (_migApplied > 0) console.log(`[migrate] applied ${_migApplied} new column migration(s)`);
 
@@ -2371,4 +2474,8 @@ const PLAYLIST_SOURCE_BACKFILL_ID = 'playlist_source_backfill';
   }
 })();
 
-module.exports = { db, pruneTelemetry, pruneTelemetryRetention, pruneScreenshots, pruneStatusLog, getMaintenanceStats };
+// `playsMigrationTouched`: did THIS boot build a play_logs index or add a play_logs column?
+// Read once by services/heartbeat to arm the 2.0.1 player defer (lib/boot-defer.js). The loop
+// that sets it runs at require time, well above this line, so the value is already final here.
+module.exports = { db, pruneTelemetry, pruneTelemetryRetention, pruneScreenshots, pruneStatusLog, getMaintenanceStats,
+                   playsMigrationTouched: _playsMigrationTouched };

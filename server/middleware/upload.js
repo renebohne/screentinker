@@ -47,15 +47,39 @@ const fileFilter = (req, file, cb) => {
   const allowedTypes = [
     'video/mp4', 'video/webm', 'video/avi', 'video/mkv', 'video/mov',
     'video/x-msvideo', 'video/quicktime', 'video/x-matroska',
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp',
+    // Audio, for slide voiceovers and deck music beds. The prefix test below covers these too;
+    // they are named for the same reason the video and image types are — so the list reads as the
+    // set this product accepts rather than as whatever the prefix happens to admit.
+    'audio/mpeg', 'audio/mp4', 'audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/flac', 'audio/x-flac',
   ];
   const looksLikeBundle = /\.(zip|wgt)$/i.test(file.originalname || '')
     && ZIP_MIMETYPES.includes(String(file.mimetype || '').toLowerCase());
+  /*
+   * Admitted by EXTENSION as well, for the same reason bundles are: callers disagree about media
+   * types. A browser sends video/mp4 or audio/mpeg, but plenty of clients send octet-stream — curl
+   * sends it for a .wav AND for a .mp4 — and refusing those makes uploading look broken for
+   * anything that is not a file picker.
+   *
+   * ⚠️ EVERY MEDIA KIND, not just audio. This started as an audio-only fallback, which left the
+   * product accepting a script-uploaded .wav and refusing the .mp4 beside it — an inconsistency
+   * with no reason behind it, found by trying to upload a video from the command line.
+   *
+   * The extension has to AGREE with an unhelpful type, exactly as for a .wgt: bare octet-stream on
+   * its own would let every default upload reach the disk. And the real gate is unchanged either
+   * way — finalizeUpload reads the bytes and unlinks anything the magic does not recognise, so a
+   * .mp4 full of something else gets no further than this filter lets it.
+   */
+  const looksLikeMedia = /\.(mp3|m4a|m4b|wav|ogg|oga|opus|flac|mp4|m4v|webm|mkv|mov|avi|jpg|jpeg|png|gif|webp|avif|heic|bmp)$/i
+    .test(file.originalname || '')
+    && ZIP_MIMETYPES.includes(String(file.mimetype || '').toLowerCase());
   if (allowedTypes.includes(file.mimetype) || file.mimetype.startsWith('video/') || file.mimetype.startsWith('image/')
+      || file.mimetype.startsWith('audio/')
+      || looksLikeMedia
       || looksLikeBundle) {
     cb(null, true);
   } else {
-    cb(new Error('Only video, image and HTML-bundle files are allowed'), false);
+    cb(new Error('Only audio, video, image and HTML-bundle files are allowed'), false);
   }
 };
 

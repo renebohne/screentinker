@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../db/database');
+const enrolKey = require('../lib/enrol-key');   // #313
 const { resolveDevicePlaylist, resolvedLayoutId } = require('../lib/resolve-device-playlist');
 const { PLATFORM_ROLES, ELEVATED_ROLES, isPlatformStaff } = require('../middleware/auth');
 // Phase 2.2a: workspace-aware access. accessContext returns { workspaceRole, actingAs }
@@ -634,6 +635,44 @@ router.post('/:id/settings-pin', (req, res) => {
   // Deliberately NOT logging the PIN itself.
   console.log(`[settings-pin] device ${req.params.id} pin ${req.body && req.body.rotate ? 'rotated' : 'set'} by user ${req.user.id} (delivered=${delivered})`);
   res.json({ success: true, settings_pin: pin, delivered });
+});
+
+/*
+ * #313 — the enrolment key for a display, and the player URL that carries it.
+ *
+ * ⚠️ WHY THIS IS A DELIBERATE ACTION AND NOT AUTOMATIC. Nearly every display keeps its own
+ * credentials and needs none of this; minting a key for all of them would put a durable secret on
+ * rows that never use one. An operator asks for it on the screen that needs it.
+ *
+ * POST mints or ROLLS it — the same call, because rolling is the recovery when a URL leaks, and an
+ * operator reaching for it is not in the mood to hunt for a second button. The old URL stops
+ * working at the display's next connect.
+ */
+router.post('/:id/enrol-key', (req, res) => {
+  const device = checkDeviceOwnership(req, res);
+  if (!device) return;
+  const key = enrolKey.setEnrolKey(db, req.params.id);
+  const rolled = !!device.enrol_key;
+  console.warn(`[enrol] ${rolled ? 'rolled' : 'minted'} enrolment key for device ${req.params.id} (user ${req.user.id})`);
+  res.json({
+    success: true,
+    id: req.params.id,
+    enrol_key: key,
+    rolled,
+    // Built from the request's own origin so it is right on a LAN address, a tunnel or a domain,
+    // without the operator having to know which one this instance answers on.
+    player_url: enrolKey.playerUrl(`${req.protocol}://${req.get('host')}`, key),
+  });
+});
+
+/* Withdraw it. The display keeps working — it still holds its own token — but the URL stops
+ * enrolling anything, which is what you want when a link has gone somewhere it should not. */
+router.delete('/:id/enrol-key', (req, res) => {
+  const device = checkDeviceOwnership(req, res);
+  if (!device) return;
+  enrolKey.clearEnrolKey(db, req.params.id);
+  console.warn(`[enrol] revoked enrolment key for device ${req.params.id} (user ${req.user.id})`);
+  res.json({ success: true, id: req.params.id, enrol_key: null });
 });
 
 router.post('/:id/block', (req, res) => {

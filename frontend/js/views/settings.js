@@ -1,4 +1,5 @@
 import { api } from '../api.js';
+import * as whatsNew from '../components/whats-new.js';
 import { showToast } from '../components/toast.js';
 import { getLanguage, setLanguage, getAvailableLanguages, t, tn } from '../i18n.js';
 import { esc, isPlatformAdmin } from '../utils.js';
@@ -268,6 +269,9 @@ export async function render(container) {
       <div style="color:var(--text-secondary);font-size:13px">
         <p><strong>${esc(window.__ST_BRAND_NAME || 'ScreenTinker')}</strong>${appVersion ? ` v${esc(appVersion)}` : ''}</p>
         <p style="margin-top:4px">${t('settings.about_tagline')}</p>
+        <!-- The permanent home for the release notes the dashboard panel links to. Populated
+             after render because it is a fetch, and About must not wait on one. -->
+        <div id="whatsNewHistory"></div>
         <p style="margin-top:12px">
           <a href="/legal/terms.html" target="_blank" style="color:var(--accent);font-size:12px">${t('auth.terms')}</a>
           &nbsp;&middot;&nbsp;
@@ -278,6 +282,12 @@ export async function render(container) {
       </div>
     </div>
   `;
+
+  // What's new, in the place someone goes looking for it. Every version, not just the current
+  // one, so an install catching up across several upgrades can read the lot.
+  whatsNew.fetchNotes()
+    .then((notes) => { if (notes) whatsNew.renderHistory(document.getElementById('whatsNewHistory'), notes); })
+    .catch(() => { /* About must render with or without it */ });
 
   if (isAdmin) {
     loadUsers();

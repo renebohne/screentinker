@@ -34,6 +34,11 @@ function PlaylistPlayer(stageEl, getBase, getDeviceId) {
   this.timezone = null; // #74/#75: device-effective IANA tz for schedule eval
   this.wallFollower = false;   // video-wall: a follower holds the leader's item, no auto-advance
   this.currentVideoEl = null;  // current <video> (wall leader reads position; follower drift-corrects)
+  // Slide audio: a voiceover that belongs to one item, and a music bed that outlives the advance.
+  // Mirrors server/player/index.html — same fields, same rule for when the bed restarts.
+  this._voEl = null;
+  this._bedEl = null;
+  this._bedTrackId = null;
   this.itemStartedAt = 0;      // wall position fallback for non-video items
   // #170: current device orientation. Portrait/flipped VIDEO must rotate the Tizen hardware video
   // plane via AVPlay (CSS rotate can't touch it -> black screen). Set by app.js applyOrientation.
@@ -234,6 +239,8 @@ PlaylistPlayer.prototype.load = function (assignments) {
 
 PlaylistPlayer.prototype.stop = function () {
   if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+  // Here and not in clearStage(): that runs on every advance, and the bed has to survive those.
+  this.stopSlideAudio();
   this._releasePreloadImage();   // #187: drop any warmed next-image bitmap on teardown
   this.clearStage();
   // Proof-of-play: close the open row so its duration is recorded on teardown.
@@ -412,6 +419,84 @@ PlaylistPlayer.prototype._logPlay = function (event, item, completed) {
   try { this.onPlayEvent(payload); } catch (e) {}
 };
 
+/*
+ * Slide audio — a voiceover per item, one music bed across items.
+ *
+ * ⚠️ MIRRORS THE WEB PLAYER ON PURPOSE (applySlideAudio in server/player/index.html), the same way
+ * this file already mirrors media-mute and schedule-eval. The rule that matters is identical: the
+ * bed is compared by TRACK ID, and a matching id is left completely alone. Re-assigning src, or
+ * calling play() on something already playing, is audible as a stutter at every slide change — and
+ * a deck publishes the same id onto all of its slides precisely so this branch is not taken.
+ *
+ * ⚠️ THE ELEMENTS ARE NOT IN THE STAGE. clearStage() empties it on every item, which is exactly
+ * right for a voiceover and exactly wrong for a bed, so both live on document.body and are managed
+ * here instead. The bed is torn down by stop(), not by an advance.
+ *
+ * ⚠️ NO AUTOPLAY GESTURE IS NEEDED HERE. Tizen is a privileged app — the same reason renderVideo
+ * below can unmute once playing — so unlike a browser tab this actually makes sound on a wall.
+ */
+PlaylistPlayer.prototype.applySlideAudio = function (item) {
+  var a = (item && item.audio) || {};
+  var self = this;
+  // Same precedence the video path uses: a wall follower is silent regardless, so a room never
+  // gets the same voice from six panels a few milliseconds apart.
+  var wantMuted = this.wallFollower ? true : !!(item && item.muted);
+
+  // ---- voiceover: this item's, and only this item's.
+  if (this._voEl) { try { this._voEl.pause(); this._voEl.parentNode && this._voEl.parentNode.removeChild(this._voEl); } catch (e) {} this._voEl = null; }
+  if (a.vo_url) {
+    var vo = document.createElement('audio');
+    vo.src = this.absUrl(a.vo_url);
+    try { vo.volume = typeof a.vo_volume === 'number' ? a.vo_volume : 1; } catch (e) {}
+    vo.muted = wantMuted;
+    document.body.appendChild(vo);
+    try { vo.play(); } catch (e) {}
+    this._voEl = vo;
+  }
+
+  // ---- bed: continuous while consecutive items name the same track.
+  if (!a.music_id) { this.stopSlideBed(); return; }
+  if (a.music_id !== this._bedTrackId) {
+    this.stopSlideBed();
+    var bed = document.createElement('audio');
+    bed.src = this.absUrl(a.music_url);
+    bed.loop = true;
+    document.body.appendChild(bed);
+    try { bed.play(); } catch (e) {}
+    this._bedEl = bed;
+    this._bedTrackId = a.music_id;
+  }
+  // Same track: volume and mute only — never src, never play().
+  if (this._bedEl) {
+    try { this._bedEl.volume = typeof a.music_volume === 'number' ? a.music_volume : 0.4; } catch (e) {}
+    this._bedEl.muted = wantMuted;
+  }
+};
+
+PlaylistPlayer.prototype.stopSlideBed = function () {
+  if (!this._bedEl) return;
+  try { this._bedEl.pause(); this._bedEl.parentNode && this._bedEl.parentNode.removeChild(this._bedEl); } catch (e) {}
+  this._bedEl = null;
+  this._bedTrackId = null;
+};
+
+PlaylistPlayer.prototype.stopSlideAudio = function () {
+  if (this._voEl) { try { this._voEl.pause(); this._voEl.parentNode && this._voEl.parentNode.removeChild(this._voEl); } catch (e) {} this._voEl = null; }
+  this.stopSlideBed();
+};
+
+/*
+ * ⚠️ ABSOLUTE, ALWAYS. The payload gives audio as a server-relative path (/uploads/content/...),
+ * and a Tizen player is a packaged .wgt — its document origin is the widget, not the server, so a
+ * relative URL resolves against the package and 404s. getBase() is the same resolver contentUrl
+ * uses two functions up, for exactly this reason.
+ */
+PlaylistPlayer.prototype.absUrl = function (u) {
+  if (!u) return u;
+  if (/^https?:/i.test(u)) return u;
+  return this.getBase() + u;
+};
+
 PlaylistPlayer.prototype.playCurrent = function () {
   if (this.timer) { clearTimeout(this.timer); this.timer = null; }
   if (!this.items.length) { this.idle(); return; }
@@ -420,6 +505,9 @@ PlaylistPlayer.prototype.playCurrent = function () {
   this.currentVideoEl = null;        // set by renderVideo when applicable
 
   var item = this.items[this.index];
+
+  // Slide audio: replaces the voiceover, leaves a matching bed playing.
+  this.applySlideAudio(item);
 
   // Proof-of-play (parity with the web/Android players): close the outgoing item and open this one.
   // Wall followers don't log — the leader's single row represents the whole wall.

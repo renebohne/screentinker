@@ -31,6 +31,21 @@ const renderWithImages = (elements, fields = {}) =>
 /** Markup that would execute or restructure the document if any escape were missing. */
 const EVIL = '"><img src=x onerror=alert(1)><script>alert(2)</script>';
 
+/*
+ * ⚠️ COUNTED AGAINST THE FITTER, NOT AGAINST ZERO.
+ *
+ * Every slide document now carries FIT_SCRIPT — the few lines that size the stage to the deck's
+ * shape and convert cqw to px for engines with no container queries. So "this document has no
+ * script" stopped meaning zero <script> tags and started meaning "no LIVE_SCRIPT", which is what
+ * each of these assertions was actually about: a static slide must not ship a ticker, and a QR or a
+ * hostile field must not add one. Counting raw tags again would either fail on the fitter or, worse,
+ * be relaxed to `<= 2` and stop catching an injected script at all.
+ */
+const liveScripts = (html) => (html.split(R.LIVE_SCRIPT).length - 1);
+const scriptTags = (html) => (html.match(/<script/g) || []).length;
+const FITTER_SCRIPTS = 1;
+
+
 /* ============ the script is a constant, and that is the whole design ============ */
 
 test('⚠️ the live script contains NO interpolation of any kind', () => {
@@ -56,8 +71,8 @@ test('⚠️ the script contains no evaluator', () => {
 
 test('the emitted script is byte-identical to the constant', () => {
   const html = render([{ kind: 'clock' }]);
-  const emitted = html.slice(html.indexOf('<script>'), html.indexOf('</script>') + 9);
-  assert.equal(emitted, R.LIVE_SCRIPT, 'the document must carry the constant unmodified');
+  assert.ok(html.includes(R.LIVE_SCRIPT), 'the document must carry the constant unmodified');
+  assert.equal(liveScripts(html), 1, 'and carry it exactly once');
 });
 
 test('⚠️ the script selector matches the class the renderer emits', () => {
@@ -75,13 +90,14 @@ test('⚠️ the script selector matches the class the renderer emits', () => {
 test('the script rides only on documents that need it', () => {
   // Every player fetches this document fresh on every play; shipping a ticker to a slide of static
   // text is dead weight on hardware that has little to spare.
-  assert.equal((render([{ kind: 'head', slot: 'a' }]).match(/<script/g) || []).length, 0);
-  assert.equal((render([{ kind: 'image' }, { kind: 'box' }]).match(/<script/g) || []).length, 0);
+  assert.equal(liveScripts(render([{ kind: 'head', slot: 'a' }])), 0);
+  assert.equal(liveScripts(render([{ kind: 'image' }, { kind: 'box' }])), 0);
 });
 
 test('many live elements still emit exactly one script', () => {
   const html = render([{ kind: 'clock' }, { kind: 'date' }, { kind: 'countdown', slot: 'a' }]);
-  assert.equal((html.match(/<script/g) || []).length, 1);
+  assert.equal(liveScripts(html), 1);
+  assert.equal(scriptTags(html), FITTER_SCRIPTS + 1, 'the fitter and the ticker, and nothing else');
 });
 
 /* ============ configuration is validated, then escaped anyway ============ */
@@ -99,7 +115,7 @@ test('⚠️ the countdown done-message is operator text and is escaped', () => 
   const html = render([{ kind: 'countdown', slot: 'd' }], { d: EVIL });
   assert.ok(!html.includes('<img'), 'markup breakout through data-done');
   assert.ok(html.includes('&quot;&gt;&lt;img'), 'the message must survive as escaped characters');
-  assert.equal((html.match(/<script/g) || []).length, 1, 'the payload must not add a script tag');
+  assert.equal(scriptTags(html), FITTER_SCRIPTS + 1, 'the payload must not add a script tag');
 });
 
 test('a legitimate zone and locale are carried through', () => {
@@ -155,7 +171,8 @@ test('⚠️ an unusable target becomes null rather than a wrong date', () => {
 test('a QR renders as an inline SVG with no script and no external request', () => {
   const html = render([{ kind: 'qr', slot: 'q' }], { q: 'https://screentinker.com' });
   assert.ok(html.includes('<svg'), 'no svg emitted');
-  assert.equal((html.match(/<script/g) || []).length, 0, 'a QR must not need script');
+  assert.equal(liveScripts(html), 0, 'a QR must not need the ticker');
+  assert.equal(scriptTags(html), FITTER_SCRIPTS, 'and must not add a script of its own');
   assert.ok(!/https?:\/\/(?!www\.w3\.org)/.test(html.match(/<svg[\s\S]*?<\/svg>/)[0]),
     'the svg must not reference a third-party renderer');
 });
@@ -198,7 +215,7 @@ test('QR colours come from the validated palette only', () => {
   const html = render([{ kind: 'qr', slot: 'q', qr_bg: 'red;}</style><script>x()</script>' }],
     { q: 'https://a.example' });
   assert.ok(html.includes('fill="#FFFFFF"'), 'a non-hex background must fall back to white');
-  assert.equal((html.match(/<script/g) || []).length, 0);
+  assert.equal(scriptTags(html), FITTER_SCRIPTS, 'the hostile colour must not add a script');
 });
 
 /* ============ the flag split that is easy to get wrong ============ */

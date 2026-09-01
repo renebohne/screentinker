@@ -43,6 +43,10 @@
        * for that reason. It says nothing about offline: nothing here unpacks an archive, so a
        * bundle is online-only even on a panel that reports offline.cache. */
       'playback.bundle',
+      /* Slide voiceover + deck music bed. player.js owns those <audio> elements itself, and a
+       * Tizen build is a privileged app — so unlike a browser tab it needs no user gesture and
+       * genuinely makes sound on a wall. */
+      'playback.slide_audio',
 
       /*
        * ⚠️ NOT trigger.http / trigger.udp, and this is a platform limit rather than an omission.

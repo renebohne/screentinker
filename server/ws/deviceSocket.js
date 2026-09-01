@@ -6,6 +6,9 @@ const { db, pruneTelemetry, pruneScreenshots } = require('../db/database');
 const { effectiveDeviceTz } = require('../lib/device-timezone');
 const config = require('../config');
 const heartbeat = require('../services/heartbeat');
+const bootDefer = require('../lib/boot-defer');   // 2.0.1 first-boot player defer
+const enrolKey = require('../lib/enrol-key');     // #313 URL-carried display identity
+const pairLockout = require('../lib/pair-lockout');
 const liveness = require('../lib/liveness'); // v4 core pass: pure ack/liveness/identity helpers
 const commandQueue = require('../lib/command-queue');
 const reconnectThrottle = require('../lib/reconnect-throttle');
@@ -754,6 +757,32 @@ module.exports = function setupDeviceSocket(io) {
   _dashboardNsRef = io.of('/dashboard');   // so ingestScreenshot() can relay from an HTTP route too
   const dashboardNs = io.of('/dashboard');
 
+  /*
+   * 2.0.1 — REFUSE PLAYERS WHILE FIRST-BOOT MAINTENANCE IS DRAINING. See lib/boot-defer.js for the
+   * 73-device Synology report this is: HTTP unreachable for ~20 minutes after a 2.0.0 upgrade
+   * because the whole fleet reconnected into a server still working through a 494,000-row stranded
+   * backlog. #142's per-device shed was doing its job and could not help — nothing was misbehaving,
+   * there were simply 73 well-behaved players all arriving at once.
+   *
+   * ⚠️ FIRST, AND ON THE NAMESPACE. Before the flap limiter, before the throttle, before any DB
+   * work: the entire point is to spend nothing on a connection we are about to refuse.
+   *
+   * ⚠️ REFUSE, NEVER ACCEPT-AND-STALL. `next(err)` closes the connection and the client gets a
+   * connect_error carrying the reason, so it backs off on its own reconnect schedule. Accepting the
+   * socket and quietly not answering would hold the connection open, tell the player nothing, and
+   * be a slower version of the failure this prevents.
+   *
+   * ⚠️ /device ONLY. The dashboard namespace is not gated and neither is any HTTP route: an
+   * operator must be able to log in and watch the drain. Locking them out with the fleet would turn
+   * a slow boot into a blind one.
+   */
+  deviceNs.use((socket, next) => {
+    if (!bootDefer.isDeferred()) return next();
+    const err = new Error('maintenance');
+    err.data = bootDefer.rejection();
+    return next(err);
+  });
+
   // Disconnect any existing socket that is currently registered for this device_id.
   // Called when a fresh registration comes in for the same device so the old (likely
   // half-dead) socket can't fire its disconnect handler and clobber the new entry.
@@ -782,7 +811,58 @@ module.exports = function setupDeviceSocket(io) {
 
     // Device registers with a pairing code (first time) or device_id + device_token (reconnect)
     socket.on('device:register', (data) => {
-      const { pairing_code, device_id, device_token, device_info, fingerprint, hw_fingerprint } = data;
+      // `let`, because the enrolment-key exchange below may fill in device_id/device_token.
+      let { pairing_code, device_id, device_token, device_info, fingerprint, hw_fingerprint } = data;
+
+      /*
+       * #313 — ENROLMENT KEY EXCHANGE, and it is deliberately the FIRST thing in this handler.
+       *
+       * A player whose storage does not survive a restart (a vMix browser input deletes its whole
+       * CEF profile when vMix closes) arrives with nothing but what is in its URL. This turns the
+       * key from that URL into the device_id + device_token pair the rest of this handler already
+       * knows how to check — so NOTHING below changes. The blocked gate, the flap limiter, the
+       * token validation, the reconnect path and the playlist build all run exactly as they do for
+       * a player that read the same pair out of localStorage. This is a credential exchange at the
+       * door, not a second way through the building, which is the only version of this feature
+       * worth having: a parallel auth path would be a parallel set of bugs.
+       *
+       * ⚠️ A BAD KEY IS REFUSED, NEVER FALLEN THROUGH. Dropping through to the pairing path would
+       * provision a NEW display row — and because this player has no storage, it would do that on
+       * every single restart, filling the dashboard with dead screens. That is the exact failure
+       * this feature exists to prevent, so a key that does not resolve ends the connection.
+       *
+       * Only consulted when the player has no device_id of its own: stored credentials always win,
+       * so a screen that DOES have storage is completely unaffected by the key being in its URL.
+       */
+      if (!device_id && data.enrol_key) {
+        const resolved = enrolKey.resolveEnrolKey(db, data.enrol_key);
+        if (!resolved) {
+          // Counts toward the same per-IP lockout that guards pairing codes — same brute-force
+          // shape, same defence, no second mechanism to reason about.
+          try { pairLockout.recordFailure(getClientIp(socket)); } catch (_) { /* never block on this */ }
+          console.warn(`[enrol] refused an unknown enrolment key from ${getClientIp(socket)}`);
+          socket.emit('device:auth-error', { error: 'Unknown enrolment key' });
+          process.nextTick(() => { try { socket.disconnect(true); } catch (_) { /* */ } });
+          return;
+        }
+        device_id = resolved.id;
+        device_token = resolved.device_token;
+        /*
+         * ⚠️ A ROW WITH NO TOKEN STILL HAS TO BE ENROLLABLE. The key IS the proof of identity, so
+         * a display that has never held a token — imported, seeded, or one whose token was cleared
+         * — must be issued one here rather than being permanently unable to enrol. Without this the
+         * exchange resolves, validateDeviceToken then fails on the missing stored value, and the
+         * player falls back to asking for a pairing code: a NEW display row on every restart, which
+         * is the exact failure this feature exists to prevent. Same move, same reason, as the
+         * fingerprint-match path below, which issues a fresh token to a reinstalled app.
+         */
+        if (!device_token) {
+          device_token = generateDeviceToken();
+          db.prepare('UPDATE devices SET device_token = ? WHERE id = ?').run(device_token, resolved.id);
+          console.log(`[enrol] ${resolved.id} had no device token — issued one`);
+        }
+        console.log(`[enrol] ${resolved.id} identified by enrolment key`);
+      }
 
       // #146: resolve identity ONCE via the SNAT-safe chain (device_id -> fingerprint
       // -> token -> global anon), used by BOTH the operator block and the flap limiter.
