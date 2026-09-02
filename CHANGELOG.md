@@ -1,5 +1,109 @@
 # Changelog
 
+## 2.0.5
+
+### Fixed — every wipe on a portrait panel was drawn in landscape
+
+A portrait screen rotates `#playerContainer` with a CSS transform, and a transform does not move the
+layout box: `clientWidth`/`clientHeight` are the box the image is fitted into, while
+`getBoundingClientRect()` is the rotated envelope. On a portrait panel those are each other's
+transposes. The GL wipe fitted both frames into the envelope and painted them on a fixed, unrotated
+overlay, so the picture jumped to 1.8x at the start of every transition and back at the end, on all
+fourteen effects. Measured across the boundary with grid slides: 5 dB PSNR, where a 4 px shift
+scores 19 dB. The wipe now takes the stage's own box and its computed placement, which is the
+landscape case unchanged and the portrait case turned exactly as the stage is. A stage with no box
+hard-cuts instead of running a 2x2 wipe fabricated from a 0x0 rect. Reported and fixed by
+@rolbk in #315; the accompanying report notes Android's `MediaPlayerManager.runWipe` has the same
+fault, which is not fixed here.
+
+### Fixed — a clock widget's timezone was checked for its spelling, not its existence (#316)
+
+`safeTimezone` tested the value against a character class, which answers neither question a timezone
+field has. A Spanish operator hit both halves in one sitting: `España` failed the character class and
+was silently replaced with UTC, so the clock ran two hours behind with nothing saying why, while
+`Spain` and `GMT+2` passed it, are not zones, and made `toLocaleTimeString` throw inside the
+generated widget script — so the clock rendered nothing at all. Intl decides now, at save time, on
+both create and update, with a message naming the right format. The render-time fallback stays for
+configs already stored, since a wrong clock beats a blank one, but nothing new can reach it. The
+dashboard field is backed by the browser's own zone list.
+
+### Fixed — the layout editor dragged a square it had just destroyed (#316)
+
+The zone mousedown handler sets the selection and calls `renderZones()`, which removes every
+`.zone-el` and builds them again. From that point the element the handler closed over is detached, so
+dragging updated `z.x_percent` but painted onto an orphan: nothing moved under the pointer and the
+zone jumped to its new position at the next render, which is to say the next time the operator
+clicked. Reported identically in Chrome and Firefox, which is what a DOM bug looks like rather than
+an input one.
+
+### Fixed — uploads were capped at 20 files, and the refusal said nothing (#317)
+
+Somebody uploading 160 photos from a company party got an error with no number in it and worked out
+by trial that sixteen at a time went through. Two faults: the per-request cap was 20, and no
+`MulterError` was ever handled, so exceeding it surfaced as a bare unhandled error. An oversized
+single file had the same missing handler. The cap is higher and stated when hit, and the dashboard
+now chunks a large selection, reports progress across the whole selection rather than 0-100% per
+batch, and on a mid-way failure says how many files already landed.
+
+### Fixed — a signup was never recorded as a login
+
+`last_login` had one writer, called from the two interactive login finishers. `POST /api/auth/register`
+issues a session immediately and was never stamped, so anyone who signed up and kept using that
+session read as "never logged in" for as long as the account existed. On the hosted instance that was
+132 of 349 accounts, 43 of them with real authenticated activity. The column feeds admin views and
+was about to be used to select accounts for deletion, so this was one query away from removing live
+customers. `scripts/backfill-last-login.js` repairs existing rows from each user's most recent
+activity, and deliberately leaves users with no activity NULL: `activity_log` is not retained for the
+life of an instance, so for older accounts there is no evidence either way.
+
+### Fixed — the update check could only see the first 100 container tags
+
+GHCR returns 100 tags and a `Link: rel="next"` header, and the check read page one and stopped. Page
+one is in push order, so it ended wherever the project was 100 tags ago, and the highest semver tag
+visible was 1.9.40 — permanently, drifting further behind with every release. Every self-hosted
+instance was therefore told 1.9.40 was current: nobody on 1.9.x was ever offered 2.x, and instances
+already on 2.x were told they were ahead of the latest release. Nothing errored, which is why it went
+unnoticed. The walk now follows the next link, bounded at 20 pages, and a later page failing still
+uses the tags already gathered.
+
+### Added — many playlist items at once, and a whole-playlist sort (#318, #319)
+
+`POST /playlists/:id/items/bulk` takes a list of content ids and inserts them in one transaction.
+Content only: widgets and child playlists are singular things placed deliberately, and the nesting
+rules on the single-item route exist to be reasoned about one at a time. Partial success is the
+design — refusing 160 photos because one expired last week is an obstacle, but silently dropping it
+is worse, since the published snapshot filters expired content and the operator would publish a
+shorter playlist with nothing saying so. Valid rows go in, refused ones come back itemised.
+
+Sorting is computed in the dashboard and sent to the existing reorder route, so the server learns
+nothing about sort modes and the result is ordinary `sort_order` values: the operator can still drag
+afterwards. Widgets and nested playlists have no filename or duration of their own, so they keep
+their relative order and settle after the content. The picker sorts and multi-selects too, and adds
+in the order shown rather than the order ticked.
+
+### Changed — the site had no page for someone searching "hosted"
+
+Titles and meta descriptions across `guides/`, `compare/` and `integrations/` ran 61-79 and 159-247
+characters and truncated in results; sixteen titles and eighteen descriptions are now inside 60 and
+155, with `og:*` and `twitter:*` updated alongside. `cloud-digital-signage.html` is new: the site
+ranked for hosted queries and converted none of them, because every snippet said self-hosted, free
+and open source, and the page that answered those searchers did not exist. It states outright that
+the software is identical, MIT licensed, and that self-hosting is free and stays free, and carries a
+real "should you self-host instead?" section.
+
+The Samsung guide gets a content fix rather than a metadata one: it sells the URL Launcher path,
+which is exactly the path that fails on older sets, so it was recruiting the people who then arrive
+in support with a Connect button that does nothing. A "Which Samsung TVs work" section now states the
+2022-and-newer floor before the setup steps and sends older sets to the Android TV or Raspberry Pi
+guides.
+
+### Upgrading
+
+No schema changes and no configuration changes. The portrait wipe fix is in the web player, which
+the server serves, so upgrading the server delivers it — no APK or `.wgt` rebuild is required for it.
+`scripts/backfill-last-login.js` is optional and dry-run by default; run it with `--apply` if you
+report on `last_login`.
+
 ## 2.0.4
 
 Five things, and three of them are the same shape: a server refusing a player and the player never

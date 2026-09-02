@@ -14,6 +14,17 @@
   ],
   "releases": [
     {
+      "version": "2.0.5",
+      "date": "2026-09-02",
+      "notes": [
+        "Transitions on portrait screens are fixed. Every effect was being drawn in landscape shape over a portrait picture, so the image jumped larger at the start of each transition and back at the end. Thanks to Emanuel Mairoll for finding and fixing it.",
+        "A clock widget now tells you if the time zone you typed is not a real one, instead of quietly showing UTC or drawing nothing at all. The field also offers a proper list to pick from.",
+        "Squares in the layout editor can be dragged properly again. They were only moving to their new position after you clicked a second time.",
+        "You can upload far more photos at once, and add many of them to a playlist in one go instead of one at a time. Playlists can also be sorted by name, date or length in a single action.",
+        "Self-hosted servers will now correctly see that a newer version is available. The update check could only see older releases, so it kept reporting an out-of-date version as the latest one."
+      ]
+    },
+    {
       "version": "2.0.4",
       "date": "2026-09-02",
       "notes": [
