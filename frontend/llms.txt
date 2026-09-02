@@ -1,0 +1,53 @@
+# ScreenTinker
+
+> Open-source digital signage. A self-hostable CMS and player fleet manager, MIT licensed, with an optional hosted version. Runs on Android and Fire TV, Samsung Tizen, LG webOS, BrightSign, Raspberry Pi, and any web browser.
+
+ScreenTinker turns ordinary screens into managed digital signs. A server holds the content, playlists, layouts and schedules; players pair to it and pull what they should be showing. The player is a web page, so a display that can open a URL can run it, and native builds exist for the platforms that need one.
+
+The whole project is MIT licensed and self-hosting is free. A paid hosted version runs the same software on our infrastructure for people who would rather not maintain a server. There is no hosted-only feature set.
+
+## Start here
+
+- [ScreenTinker home](https://screentinker.com/): what it is, features, pricing, and platform support.
+- [What is digital signage?](https://screentinker.com/guides/what-is-digital-signage.html): plain-language explanation of how signage works, what it displays, and what it costs.
+- [Open source digital signage software](https://screentinker.com/guides/open-source-digital-signage.html): the licence, the data-ownership argument, and where ScreenTinker fits.
+
+## Choosing how to run it
+
+- [Self-hosted digital signage: complete guide](https://screentinker.com/guides/self-hosted-digital-signage.html): hardware, deployment, reverse proxy and TLS, running it as a service, and backups.
+- [Hosted digital signage platform](https://screentinker.com/cloud-digital-signage.html): the cloud version, what it does and does not change, and an honest account of when self-hosting is the better answer.
+
+## Player setup by platform
+
+- [Digital signage on a Raspberry Pi](https://screentinker.com/guides/raspberry-pi-digital-signage.html)
+- [Digital signage for Android TV and Fire TV](https://screentinker.com/guides/digital-signage-android-tv.html)
+- [Samsung TV digital signage without MagicINFO](https://screentinker.com/guides/samsung-tv-digital-signage.html): uses the built-in URL Launcher, and states which model years actually work.
+
+## Integrations
+
+- [Integrations overview](https://screentinker.com/integrations/): native widgets plus a Webpage widget that embeds any public URL.
+- [YouTube on digital signage](https://screentinker.com/integrations/youtube-digital-signage.html)
+- [Google Slides on digital signage](https://screentinker.com/integrations/google-slides-digital-signage.html)
+- [Canva designs on digital signage](https://screentinker.com/integrations/canva-digital-signage.html)
+- [Power BI dashboards on digital signage](https://screentinker.com/integrations/power-bi-digital-signage.html)
+- [RSS feeds and news tickers](https://screentinker.com/integrations/rss-digital-signage.html)
+- [Weather widget](https://screentinker.com/integrations/weather-digital-signage.html)
+
+## Comparisons with other products
+
+- [vs Yodeck](https://screentinker.com/compare/yodeck-alternative.html)
+- [vs ScreenCloud](https://screentinker.com/compare/screencloud-alternative.html)
+- [vs OptiSigns](https://screentinker.com/compare/optisigns-alternative.html)
+- [vs Xibo](https://screentinker.com/compare/xibo-alternative.html)
+- [vs Anthias (Screenly OSE)](https://screentinker.com/compare/anthias-alternative.html)
+
+## Project and API
+
+- [Source on GitHub](https://github.com/screentinker/screentinker): MIT licensed, issues and releases.
+- [REST API reference](https://screentinker.com/docs): the OpenAPI specification, rendered.
+- [Third-party licences](https://screentinker.com/legal/third-party.html)
+
+## Optional
+
+- [Terms of service](https://screentinker.com/legal/terms.html)
+- [Privacy policy](https://screentinker.com/legal/privacy.html)
