@@ -76,6 +76,30 @@ object PlaylistSelection {
      */
     fun whenNonePlayable(hasContentOnScreen: Boolean): NonePlayable =
         if (hasContentOnScreen) NonePlayable.KEEP_CURRENT else NonePlayable.SHOW_WAITING
+
+    /*
+     * ⚠️ TWO PASSES, AND THE ORDER IS THE DESIGN.
+     *
+     * `strict` is the real question — is this item scheduled AND is the copy we hold the revision the
+     * playlist asked for? That second half is what keeps "cached for offline" compatible with "and it
+     * still updates", so anything passing it must always win.
+     *
+     * `stale` is the last-resort question, asked ONLY when the strict pass finds nothing anywhere:
+     * do we have bytes for this at all? An asset cached by a build from before content revisions
+     * existed carries no revision to compare, so it can never satisfy `strict` — and a panel whose
+     * disk was full of playable media sat on "Waiting for content" after an OTA rather than showing
+     * any of it. A blank screen is worse than slightly stale content; it is not better than fresh
+     * content, which is why this runs second and never first.
+     */
+    fun firstPlayableOrStale(size: Int, strict: (Int) -> Boolean, stale: (Int) -> Boolean): Int {
+        val hit = firstPlayableIndex(size, strict)
+        return if (hit >= 0) hit else firstPlayableIndex(size, stale)
+    }
+
+    fun nextPlayableOrStale(size: Int, from: Int, strict: (Int) -> Boolean, stale: (Int) -> Boolean): Int {
+        val hit = nextPlayableIndex(size, from, strict)
+        return if (hit >= 0) hit else nextPlayableIndex(size, from, stale)
+    }
 }
 
 /**

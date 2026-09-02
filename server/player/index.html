@@ -4462,7 +4462,15 @@
 
       playlist = newItems;
       imgPreloadCache = {}; // playlist changed — drop stale one-ahead preloads (feat/player-image-preload)
-      savePlaylistCache(playlist);
+      /*
+       * ⚠️ ONLY CACHE A PAYLOAD WORTH RESTORING. This wrote unconditionally, fourteen lines before
+       * the `playlist.length === 0` check below — so one empty or degraded push replaced a good
+       * offline copy and left the screen with nothing to fall back to. It is why rebooting a stuck
+       * panel made things worse: the reboot faithfully restored the emptiness. An empty payload is a
+       * statement about right now; it is not a better answer than the last thing we could play when
+       * the network is gone. Playback still honours it immediately — that is the check below.
+       */
+      if (playlist.length > 0) savePlaylistCache(playlist);
       // The RAW assignments, not the split `playlist`: multi-zone items live in their own lists,
       // and a keep-set that omitted them would have the worker prune assets a zone is still
       // playing. This is also what makes the prune safe — it is the whole truth about what this

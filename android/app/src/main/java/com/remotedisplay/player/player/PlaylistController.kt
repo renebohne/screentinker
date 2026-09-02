@@ -105,6 +105,27 @@ class PlaylistController(
     private var contentReady: (PlaylistItem) -> Boolean = { true }
     fun setContentReadyCheck(f: (PlaylistItem) -> Boolean) { contentReady = f }
 
+    /*
+     * ⚠️ THE LAST-RESORT GATE: bytes we HAVE but cannot vouch for.
+     *
+     * contentReady above is strict, and has to be — it is what makes "cached for offline" compatible
+     * with "and it still updates", by refusing a copy whose revision does not match what the
+     * playlist is asking for. The failure was making that the ONLY question. An asset cached by a
+     * build from before content revisions existed carries no revision sidecar, so it can never match,
+     * and a panel whose disk is full of perfectly playable media sat on "Waiting for content" after
+     * an OTA — reported from a fleet, with the operator's own log showing every file present.
+     *
+     * So there are two passes, in this order, and the order is the whole design: anything with a
+     * CONFIRMED revision plays first, always, so a replaced asset still reaches the screen the moment
+     * it lands. Only when nothing at all passes that bar do we ask the weaker question — is there
+     * something here we could show? — instead of showing nothing. That is the same principle
+     * ScheduleEval states two files away: a blank screen is worse than slightly stale content.
+     *
+     * Defaults to false, so a caller that never injects it keeps exactly the old behaviour.
+     */
+    private var contentUsable: (PlaylistItem) -> Boolean = { false }
+    fun setContentUsableCheck(f: (PlaylistItem) -> Boolean) { contentUsable = f }
+
     // Slide audio. Injected like contentReady above, for the same reason: this class should not
     // know where the server URL is stored, and a controller with neither set still behaves exactly
     // as it did before the feature existed.
@@ -340,7 +361,7 @@ class PlaylistController(
             // schedule-active AND downloaded item. Distinguish the two idle reasons: daypart
             // closed (nothing scheduled) => defined idle; scheduled-but-not-yet-downloaded =>
             // keep current content / waiting, never blank.
-            val fp = PlaylistSelection.firstPlayableIndex(items.size) { playableNow(it) }
+            val fp = firstPlayable()
             if (fp >= 0) { currentIndex = fp; playCurrentItem() }
             else if (firstActiveIndex() < 0) showNothingScheduled()
             else onContentNotReady()
@@ -377,8 +398,8 @@ class PlaylistController(
         val from = PlaybackResume.resumeIndex(
             saved?.first ?: -1, saved?.second ?: 0L, System.currentTimeMillis(), items.size)
         val idx = if (from > 0 && playableNow(from)) from
-                  else if (from > 0) PlaylistSelection.nextPlayableIndex(items.size, from - 1) { playableNow(it) }
-                  else PlaylistSelection.firstPlayableIndex(items.size) { playableNow(it) }
+                  else if (from > 0) nextPlayable(from - 1)
+                  else firstPlayable()
         if (from > 0) Log.i("PlaylistController", "Resuming at index $from (reload within resume window)")
         if (idx >= 0) { currentIndex = idx; playCurrentItem() } else onContentNotReady()
     }
@@ -431,7 +452,7 @@ class PlaylistController(
             onRequestRefresh?.invoke()
             if (firstActiveIndex() < 0) { showNothingScheduled(); return }
             var idx = if (succ != null) items.indexOfFirst { it.contentId == succ } else -1
-            if (idx < 0 || !playableNow(idx)) idx = PlaylistSelection.firstPlayableIndex(items.size) { playableNow(it) }
+            if (idx < 0 || !playableNow(idx)) idx = firstPlayable()
             if (idx >= 0) { currentIndex = idx; playCurrentItem() } else onContentNotReady()
             return
         }
@@ -444,7 +465,7 @@ class PlaylistController(
         // are SKIPPED (their background download continues), so a stalled/failed download of the
         // next content never blanks the screen — we keep looping the content we already have. If
         // NOTHING is downloaded yet, keep current content / show the waiting state, never blank.
-        val idx = PlaylistSelection.nextPlayableIndex(items.size, currentIndex) { playableNow(it) }
+        val idx = nextPlayable(currentIndex)
         if (idx >= 0) { currentIndex = idx; playCurrentItem() } else onContentNotReady()
     }
 
@@ -579,6 +600,21 @@ class PlaylistController(
     // Playable NOW = schedule-active AND its content is downloaded/available.
     private fun playableNow(i: Int): Boolean =
         i in items.indices && scheduleAllows(items[i]) && contentReady(items[i])
+
+    /** Scheduled, and we hold bytes for it — but their revision could not be confirmed. */
+    private fun playableStale(i: Int): Boolean =
+        i in items.indices && scheduleAllows(items[i]) && contentUsable(items[i])
+
+    /*
+     * Strict first, stale only if strict finds nothing. Every selection goes through these two so a
+     * future call site cannot accidentally get one pass and not the other — which is precisely how
+     * the single-pass version came to be the only behaviour.
+     */
+    private fun firstPlayable(): Int =
+        PlaylistSelection.firstPlayableOrStale(items.size, { playableNow(it) }, { playableStale(it) })
+
+    private fun nextPlayable(from: Int): Int =
+        PlaylistSelection.nextPlayableOrStale(items.size, from, { playableNow(it) }, { playableStale(it) })
 
     // Screen-resilience: the scheduled item(s) exist but their content isn't downloaded yet.
     // NEVER blank a screen that is already showing content — keep it and re-check soon (the

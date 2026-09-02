@@ -303,6 +303,20 @@ class MainActivity : AppCompatActivity() {
         playlistController.setContentReadyCheck { item ->
             item.isWidget || item.isRemote || contentCache.isContentCached(item.contentId, item.contentRev)
         }
+        /*
+         * ⚠️ AND THE LAST-RESORT ANSWER, consulted only when nothing above passes.
+         *
+         * The strict check demands the cached copy carry the revision the playlist asked for, which
+         * is what lets a replaced asset reach a screen that already had the old one. But an asset
+         * cached by a build from before revisions existed has no sidecar to read, so it can never
+         * match — and a panel with a full cache showed "Waiting for content" after an OTA instead of
+         * playing media it was holding the whole time. This is the same question without the
+         * revision: do we have bytes for this at all? PlaylistController asks it only after the
+         * strict pass comes back empty, so fresh content still always wins.
+         */
+        playlistController.setContentUsableCheck { item ->
+            item.isWidget || item.isRemote || contentCache.isContentCached(item.contentId)
+        }
 
         // Slide audio: a deck's voiceover and music bed. They live OUTSIDE the widget WebView that
         // renders the slide, because a slide is published as a widget and a widget iframe makes no
@@ -379,6 +393,29 @@ class MainActivity : AppCompatActivity() {
                 val assignments = cached.getJSONArray("assignments")
                 if (assignments.length() > 0) {
                     Log.i("MainActivity", "Restoring cached playlist: ${assignments.length()} items")
+                    /*
+                     * ⚠️ RESTORE THE SHAPE OF THE SCREEN, NOT JUST ITS CONTENT.
+                     *
+                     * The cache is the WHOLE payload (`data.toString()` on every update) — layout,
+                     * orientation and wall geometry included — and this used to read only the
+                     * assignments out of it. So an offline cold start replayed the right clips in the
+                     * wrong screen: a PORTRAIT panel came back landscape, a ZONED panel flattened
+                     * every zone into one fullscreen rotation, and a wall member came back untiled
+                     * and unsynced — with the correct configuration sitting in the same string it had
+                     * just parsed. A power cut at a site with no WAN meant coming back visibly wrong
+                     * and staying that way until the server was reachable.
+                     *
+                     * Orientation first, because the layout is measured against the rotated stage.
+                     * Each piece is independently guarded: a payload cached by an older build simply
+                     * will not have the key, and must still restore everything it does have.
+                     */
+                    if (!cached.isNull("orientation")) {
+                        val o = cached.optString("orientation", "")
+                        if (o.isNotEmpty()) {
+                            Log.i("MainActivity", "Restoring cached orientation: $o")
+                            applyOrientation(o)
+                        }
+                    }
                     // #74/#75: restore the cached effective timezone too (offline schedules)
                     playlistController.setTimezone(if (cached.isNull("timezone")) null else cached.optString("timezone", "").ifEmpty { null })
                     playlistController.updatePlaylist(assignments)
@@ -735,8 +772,26 @@ class MainActivity : AppCompatActivity() {
             playlistController.setTimezone(effectiveTz)
             zoneManager?.setTimezone(effectiveTz)
 
-            // Cache playlist JSON for offline cold-start
-            config.cachedPlaylist = data.toString()
+            /*
+             * Cache playlist JSON for offline cold-start.
+             *
+             * ⚠️ ONLY IF IT IS WORTH KEEPING. This used to write unconditionally, before anything
+             * judged the payload — so one empty or degraded push replaced a perfectly good offline
+             * copy, and the panel then had nothing to fall back to. That is why rebooting a stuck
+             * screen made it worse instead of better: the reboot restored the emptiness. A payload
+             * with no assignments is a statement about right now (suspended, unassigned, still
+             * draining); it is not a better answer than what we already had on disk when the
+             * network is gone.
+             *
+             * A deliberate clear still works — playlist_id set to nothing is an operator decision
+             * and arrives as an ordinary update — but it is applied to PLAYBACK by the controller
+             * below. What survives on disk is the last payload we could actually have played.
+             */
+            if (assignments.length() > 0) {
+                config.cachedPlaylist = data.toString()
+            } else {
+                Log.i("MainActivity", "Empty playlist payload — keeping the previous offline cache")
+            }
 
             // Video-wall mode takes precedence over orientation + multi-zone: the wall is
             // fullscreen, and WallController owns the root-view slice transform and the
