@@ -14,6 +14,17 @@
   ],
   "releases": [
     {
+      "version": "2.0.4",
+      "date": "2026-09-02",
+      "notes": [
+        "Screens that were refused by the server now come back on their own. A display could get stuck showing “Waiting for content” with everything already downloaded, and only start again if you changed its playlist by hand. That is fixed, on every kind of screen.",
+        "Upgrading a busy server no longer leaves browser and Samsung screens stuck on a maintenance message until somebody power-cycles them.",
+        "Large installs should feel noticeably lighter. A repair job that ran every time any screen changed item now runs once when a screen reconnects, which is the only time it can find anything to repair.",
+        "An Android screen with a full offline cache will now play it after an update, instead of waiting for content it already had. Screens also keep their offline copy when the server sends an empty playlist, so a reboot no longer leaves them with nothing.",
+        "Platform admins get a new Diagnostics panel: how the server has been performing day by day, how big the installation is, and a one-click CPU profile to send to support. No shell access needed."
+      ]
+    },
+    {
       "version": "2.0.3",
       "date": "2026-09-01",
       "notes": [

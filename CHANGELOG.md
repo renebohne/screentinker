@@ -1,5 +1,120 @@
 # Changelog
 
+## 2.0.4
+
+Five things, and three of them are the same shape: a server refusing a player and the player never
+coming back. Two were introduced by 2.0.1 and found by deploying it and looking at what it did.
+
+### Fixed — a screen could sit on "Waiting for content" with everything it needed already cached (#314)
+
+Reported from a fleet: after an OTA the panel sat on the waiting screen indefinitely, with all media
+cached and a playlist assigned, and toggling the playlist assignment in the dashboard fixed it
+instantly. That workaround is the tell. It is a server-initiated push, the one route into a player
+that does not go through register.
+
+**The backoff window slid forward for ever.** Every retry INSIDE the window recomputed its own end
+from the moment of the retry, so a player reconnecting on its own timer pushed its release further
+away and never got back in. Measured on a running server: still refused after 70 seconds of complete
+silence, having been told to retry after 60. Because a throttled register returns before the playlist
+is sent, "never got back in" is a dark screen. Retries inside the window now report the time
+remaining and nothing more; a device that genuinely storms is still caught, and still escalates, on
+the rate path the moment the window expires.
+
+**And nobody was listening.** Three separate gates refuse a register and all three announce it with
+`device:throttled`, which no player implemented: not Android, not the web player, not Tizen, not
+BrightSign. The server asked for a pause and the client came straight back on its one-second timer,
+re-tripping the window it was waiting out. The web player (and so BrightSign) and Android now honour
+the server's number, clamped at both ends so a missing value cannot strand a screen and a zero cannot
+turn the reconnect into a busy loop.
+
+**Android could also read a full cache as an empty one.** Readiness asked whether the cached copy
+carried the revision the playlist asked for, and an asset cached by a build from before content
+revisions existed has no revision to compare, so it could never answer yes. A panel whose disk was
+full of playable media therefore waited for content it already had. Playback now prefers confirmed
+content exactly as before and falls back to "we have bytes for this" only when nothing anywhere
+passes that bar, so a replaced asset still reaches the screen the moment it lands.
+
+### Fixed — a deferred boot stranded every web and Tizen player it refused
+
+2.0.1 added a hold that keeps players off a server while it drains stranded plays. It refused them in
+Socket.IO namespace middleware, and a v4 client treats that as a denial rather than a fault: it stops
+reconnecting, fires no disconnect event, and ignores its own retry settings. The web player arms its
+reconnect supervisor from the disconnect handler and Tizen's watchdog waits on a connected socket, so
+both sat on "Connection failed: maintenance" until somebody power-cycled the panel. Android survived
+on an unrelated backstop.
+
+Which made the feature worse than the stampede it prevents, on exactly the kind of install it was
+written for. The unit test could not see it because it connected with reconnection disabled, and the
+assertion it did make required the broken behaviour.
+
+The socket is now accepted and then refused, using the same `device:throttled` the other refusal
+gates use, carrying how long to wait. A client that honours it waits and returns; a client that
+ignores it still gets an ordinary disconnect, which every player already supervises. Verified with 70
+simulated panels against a boot carrying 400,001 stranded plays: 67 were refused, and all 70
+recovered on their own.
+
+### Fixed — the most expensive thing the server did, it did on every play
+
+`closeStrandedPlays` repairs rows left open when a play's end was lost. It ran on every `play_start`.
+It is a correlated self-join of the play log against itself plus a join to content, grouped per row,
+across the device's whole history: measured against a copy of a real fleet database (3.1 million
+rows, 2.7 million on the busiest device) at **362ms, and 355ms when there was nothing to close**. The
+full price is paid whether or not it finds anything.
+
+At roughly one play per second across a 78-panel site that is a ~150ms synchronous block about once a
+second, permanently. A 60-second CPU profile from the affected server put **27.1% of all wall time**
+inside this one call, which is the entire explanation for a loop whose median sat at the measurement
+floor while its 99th percentile sat at 130-165ms. It is also why moving that customer to faster
+storage fixed their baseline and left the spikes untouched: the cost is CPU, not disk.
+
+A lost play end comes from a session ending abruptly, so the evidence for one is the FIRST play of a
+NEW connection. Inside a live session every end arrives normally and there is nothing to repair. The
+sweep is now armed per connection and disarmed once it runs. The repair itself is unchanged, including
+the same-zone rule and the per-row ceiling that stops a 20-second clip being credited with hours.
+
+### Fixed — an enrolment key could be minted by a token that should not have one
+
+2.0.3 stopped an API token READING a display's enrolment key, because that key lets its holder be that
+screen. The routes that MINT and REVOKE one were left on the default gate, where anything that is not
+a read needs only write scope, which handed the same power back through another door. Both now require
+full scope, the same as the trigger secret.
+
+Separately, the notification sent when a display is created was broadcasting the raw device row to
+every member of the workspace with only the device token removed, so the settings PIN, the trigger
+secret and the enrolment key went to everyone regardless of role. It now goes through the same
+sanitiser the device list uses.
+
+### Added — server diagnostics in platform admin
+
+Diagnosing a slow install meant sending a customer a shell script and talking them through running it
+as root on their production server. Everything it collected was already being recorded: the event loop
+writes its own timings every second, and one affected server held 205,866 rows of exactly the history
+we had spent an afternoon reconstructing by hand.
+
+Platform admin now has three read-outs: the instance shape (table sizes, payload sizes, play-log depth
+and its indexes), the loop-lag history including a daily trend, and an on-demand CPU profile. The
+daily trend is the one that matters, because a step change on a date turns "why is this server slow"
+into "what happened on the 14th".
+
+⚠️ The profile runs in-process, so no debug port is ever opened. The alternative was the recipe we
+were about to hand a customer: signal the process to open the V8 inspector, attach, capture, and hope
+somebody remembers to close it. Same data, nothing listening, nothing left behind. One at a time,
+bounded, and audited. It returns counts, timings and function names; no playlist content, no media,
+no credentials.
+
+### Fixed — the landing page had not caught up with 2.0
+
+BrightSign was missing from a page that lists supported platforms, despite running the same player as
+every browser and being able to host the server itself. The "Content Designer" card advertised the
+feature that is deprecating rather than Slides, which replaced it, and there was nothing about
+triggers or workspaces.
+
+### Upgrading
+
+Nothing to do. No schema change, no configuration change. Players pick up the throttle handling when
+they next update; the server-side fixes apply to every player already in the field, including ones
+that will never be updated.
+
 ## 2.0.3
 
 ### Fixed — an API token could read a display's enrolment key
