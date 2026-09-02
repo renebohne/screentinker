@@ -43,6 +43,8 @@ class WebSocketService : Service() {
     private lateinit var config: ServerConfig
     private lateinit var deviceInfo: DeviceInfo
     private val handler = Handler(Looper.getMainLooper())
+    // #314: pending hold from a server device:throttled, so we do not reconnect into the refusal.
+    private var throttleHold: Runnable? = null
     private var heartbeatRunnable: Runnable? = null
     private val binder = LocalBinder()
 
@@ -408,6 +410,42 @@ class WebSocketService : Service() {
                 }
 
                 safeOn("device:unpaired") { handleServerRejection("device:unpaired (removed on server)") }
+
+                /*
+                 * ⚠️ HONOUR device:throttled INSTEAD OF RECONNECTING INTO IT (#314).
+                 *
+                 * Three gates in the server's register handler can refuse — the burst throttle, the
+                 * flap limiter and the session-settle hold — and every one refuses BEFORE the
+                 * playlist is sent, then drops the socket. No player implemented this event, so the
+                 * server asked for a pause and we came straight back on the 1s reconnect timer: the
+                 * panel sat on "Waiting for content" with all its media already cached, and each
+                 * retry re-tripped the very window it was waiting out. Seen in the field after an
+                 * OTA, where the post-update relaunch cascade supplies the opening burst.
+                 *
+                 * ⚠️ AND IT MUST GO THROUGH safeOn. markAlive is wired into safeOn, so a handler
+                 * registered directly on the socket would not refresh the liveness watchdog — the
+                 * throttle notice would arrive and still count as silence from the server.
+                 *
+                 * Take the server's number, stop reconnecting for that long, come back once.
+                 * Clamped at both ends: a missing or absurd value must not strand a screen, and a
+                 * zero must not turn this into a busy loop.
+                 */
+                safeOn("device:throttled") { args ->
+                    val payload = args.firstOrNull() as? JSONObject
+                    val asked = payload?.optLong("retry_after_ms", 0L) ?: 0L
+                    val waitMs = asked.coerceIn(1000L, 5 * 60 * 1000L)
+                    val why = payload?.optString("reason", "") ?: ""
+                    Log.w("WebSocketService", "throttled by server: holding off ${waitMs}ms ($why)")
+                    throttleHold?.let { handler.removeCallbacks(it) }
+                    val resume = Runnable {
+                        throttleHold = null
+                        try { if (socket?.connected() != true) connect() } catch (e: Throwable) {
+                            Log.w("WebSocketService", "throttle resume failed: ${e.message}")
+                        }
+                    }
+                    throttleHold = resume
+                    handler.postDelayed(resume, waitMs)
+                }
 
                 safeOn("device:auth-error") { args ->
                     val msg = (args.firstOrNull() as? JSONObject)?.optString("error", "Authentication failed") ?: "Authentication failed"

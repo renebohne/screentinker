@@ -127,14 +127,29 @@ test('the key is never handed out in a device LIST response', () => {
   assert.equal(stripDeviceSecrets({ ...row }).device_token, undefined, 'the token is still never leaked');
 });
 
-test('the socket exchange refuses an unknown key instead of provisioning', () => {
-  // Pinned on the source, because the alternative is the bug: falling through to the pairing path
-  // provisions a NEW row, and a storage-less player would do that on every single restart.
+test('an unknown key is refused without poisoning the site-wide pairing lockout', () => {
+  /*
+   * ⚠️ THIS ASSERTION WAS INVERTED, AND THE OLD VERSION WAS THE BUG.
+   *
+   * It used to require recordFailure() here, reasoning that an unknown key is the same brute-force
+   * shape as an unknown pairing code. It is not, in the one way that decides it: a pairing code is
+   * six digits and worth guessing, an enrolment key is 256 bits and is not. So the lockout bought
+   * nothing — while three ordinary operator actions (rolling the key, revoking it, deleting the
+   * display) leave a player holding a dead key that it re-derives from its own URL on every load and
+   * retries every few seconds forever. Five failures locks the WHOLE IP out of pairing for fifteen
+   * minutes, so behind one office NAT a single stranded screen made every other display in the
+   * building un-pairable, on a loop, with nothing in the dashboard to explain it.
+   *
+   * The key is still refused and the connection still ends — it just no longer takes the site with
+   * it, and a player that also presented a pairing code can now be adopted instead of looping.
+   */
   const src = fs.readFileSync(path.join(__dirname, '..', 'ws', 'deviceSocket.js'), 'utf8');
   const block = src.slice(src.indexOf('if (!device_id && data.enrol_key)'), src.indexOf('// #146: resolve identity ONCE'));
-  assert.match(block, /socket\.disconnect\(true\)/, 'an unknown key must end the connection');
-  assert.match(block, /recordFailure/, 'and count toward the brute-force lockout');
-  assert.ok(!/pairing_code/.test(block), 'it must not reach the pairing path');
+
+  assert.match(block, /socket\.disconnect\(true\)/, 'a player with nothing but a dead key is still told no');
+  assert.match(block, /enrol_key_unknown/, 'and told WHY, so it can drop the key and ask for a pairing code');
+  assert.ok(!/recordFailure/.test(block),
+    'a dead player URL must not count toward the pairing lockout — it locks out the whole egress IP');
 });
 
 test('a player that already knows who it is ignores the URL key', () => {

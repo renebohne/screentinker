@@ -8,7 +8,6 @@ const config = require('../config');
 const heartbeat = require('../services/heartbeat');
 const bootDefer = require('../lib/boot-defer');   // 2.0.1 first-boot player defer
 const enrolKey = require('../lib/enrol-key');     // #313 URL-carried display identity
-const pairLockout = require('../lib/pair-lockout');
 const liveness = require('../lib/liveness'); // v4 core pass: pure ack/liveness/identity helpers
 const commandQueue = require('../lib/command-queue');
 const reconnectThrottle = require('../lib/reconnect-throttle');
@@ -836,32 +835,63 @@ module.exports = function setupDeviceSocket(io) {
        */
       if (!device_id && data.enrol_key) {
         const resolved = enrolKey.resolveEnrolKey(db, data.enrol_key);
+        /*
+         * ⚠️ AN UNKNOWN KEY IS A STALE URL, NOT AN ATTACK — AND IT MUST NOT FEED THE PAIRING
+         * LOCKOUT.
+         *
+         * The first version counted this toward pairLockout, on the theory that it is the same
+         * brute-force shape as a pairing code. It is not, in the one way that matters. A pairing
+         * code is six digits and worth guessing; an enrolment key is 256 bits, so the lockout buys
+         * nothing against it — while the cost is severe: three ordinary operator actions leave a
+         * player holding a dead key (rolling it, revoking it, deleting the display), the player
+         * re-derives that key from its own URL on every load and retries about every ten seconds,
+         * and five failures locks the WHOLE IP out of pairing for fifteen minutes. Behind one office
+         * NAT — the topology assumed all through this file — a single stranded screen in a corner
+         * makes every other display in the building un-pairable, on a loop, with nothing in the
+         * dashboard to explain why.
+         *
+         * So it is logged (coalesced: a stranded player is noisy by nature) and falls THROUGH. The
+         * register then proceeds exactly as it would for a player that never had a key, which is
+         * what an operator expects after rolling one — the display asks for a pairing code and can
+         * be adopted again on the spot, instead of looping forever behind a credential nobody can
+         * see.
+         */
         if (!resolved) {
-          // Counts toward the same per-IP lockout that guards pairing codes — same brute-force
-          // shape, same defence, no second mechanism to reason about.
-          try { pairLockout.recordFailure(getClientIp(socket)); } catch (_) { /* never block on this */ }
-          console.warn(`[enrol] refused an unknown enrolment key from ${getClientIp(socket)}`);
-          socket.emit('device:auth-error', { error: 'Unknown enrolment key' });
+          logCoalescer.record(`enrol-unknown:${getClientIp(socket)}`,
+            `[enrol] unknown enrolment key from ${getClientIp(socket)} — ignoring it and falling back to pairing`);
+        }
+        /*
+         * ...but falling through must not mean falling silent. A player carrying ONLY a stale key
+         * (the vMix shape: the URL says it is already enrolled, so it sends no pairing code) would
+         * otherwise reach the end of the handler with nothing to act on and simply hang. Tell it
+         * plainly that the key is dead, with a reason it can branch on, so it can drop the key and
+         * ask for a pairing code instead of retrying the same dead credential forever.
+         */
+        if (!resolved && !pairing_code) {
+          socket.emit('device:auth-error', { error: 'Unknown enrolment key', reason: 'enrol_key_unknown' });
           process.nextTick(() => { try { socket.disconnect(true); } catch (_) { /* */ } });
           return;
         }
-        device_id = resolved.id;
-        device_token = resolved.device_token;
-        /*
-         * ⚠️ A ROW WITH NO TOKEN STILL HAS TO BE ENROLLABLE. The key IS the proof of identity, so
-         * a display that has never held a token — imported, seeded, or one whose token was cleared
-         * — must be issued one here rather than being permanently unable to enrol. Without this the
-         * exchange resolves, validateDeviceToken then fails on the missing stored value, and the
-         * player falls back to asking for a pairing code: a NEW display row on every restart, which
-         * is the exact failure this feature exists to prevent. Same move, same reason, as the
-         * fingerprint-match path below, which issues a fresh token to a reinstalled app.
-         */
-        if (!device_token) {
-          device_token = generateDeviceToken();
-          db.prepare('UPDATE devices SET device_token = ? WHERE id = ?').run(device_token, resolved.id);
-          console.log(`[enrol] ${resolved.id} had no device token — issued one`);
+
+        if (resolved) {
+          device_id = resolved.id;
+          device_token = resolved.device_token;
+          /*
+           * ⚠️ A ROW WITH NO TOKEN STILL HAS TO BE ENROLLABLE. The key IS the proof of identity, so
+           * a display that has never held a token — imported, seeded, or one whose token was cleared
+           * — must be issued one here rather than being permanently unable to enrol. Without this the
+           * exchange resolves, validateDeviceToken then fails on the missing stored value, and the
+           * player falls back to asking for a pairing code: a NEW display row on every restart, which
+           * is the exact failure this feature exists to prevent. Same move, same reason, as the
+           * fingerprint-match path below, which issues a fresh token to a reinstalled app.
+           */
+          if (!device_token) {
+            device_token = generateDeviceToken();
+            db.prepare('UPDATE devices SET device_token = ? WHERE id = ?').run(device_token, resolved.id);
+            console.log(`[enrol] ${resolved.id} had no device token — issued one`);
+          }
+          console.log(`[enrol] ${resolved.id} identified by enrolment key`);
         }
-        console.log(`[enrol] ${resolved.id} identified by enrolment key`);
       }
 
       // #146: resolve identity ONCE via the SNAT-safe chain (device_id -> fingerprint

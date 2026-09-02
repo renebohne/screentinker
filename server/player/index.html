@@ -665,6 +665,8 @@
 
     // ==================== State ====================
     let socket = null;
+    // #314: pending 'wait before reconnecting' hold from a server device:throttled.
+    let throttleHoldTimer = null;
     let config = getConfig();
 
     /*
@@ -2118,6 +2120,37 @@
       livenessWindowMs = v4ThresholdMs(Math.random());
       socket.onAny(markAlive);
       socket.io.on('ping', markAlive);
+
+      /*
+       * ⚠️ HONOUR device:throttled INSTEAD OF RECONNECTING INTO IT (#314).
+       *
+       * Three separate gates in ws/deviceSocket.js can refuse a register — the burst throttle, the
+       * flap limiter and the session-settle hold — and all three refuse BEFORE the playlist is sent
+       * and then drop the socket. Until now no player implemented this event at all: the server was
+       * asking for a pause and the client came straight back on its 1s reconnect timer, so the
+       * screen sat on "Waiting for content" with every byte of its content already cached, while
+       * each retry re-tripped the rate window it was waiting out. Reported from a fleet after an
+       * OTA, where the post-update relaunch cascade supplies the initial burst.
+       *
+       * So: take the server's own number, hold the reconnector off for that long, then come back
+       * once. Clamped at both ends — a missing or absurd value must not strand a screen for hours,
+       * and a zero must not turn this into a busy loop.
+       */
+      socket.on('device:throttled', (d) => {
+        const asked = Number(d && d.retry_after_ms);
+        const waitMs = Math.min(Math.max(Number.isFinite(asked) ? asked : 0, 1000), 5 * 60 * 1000);
+        console.warn('[throttle] server asked us to wait ' + waitMs + 'ms (' + ((d && d.reason) || 'unspecified') + ')');
+        try { socket.io.reconnection(false); } catch (e) { /* older client build */ }
+        if (throttleHoldTimer) clearTimeout(throttleHoldTimer);
+        throttleHoldTimer = setTimeout(() => {
+          throttleHoldTimer = null;
+          try {
+            socket.io.reconnection(true);
+            // The refusal came with a disconnect, so nothing is going to retry unless we ask.
+            if (!socket.connected) socket.connect();
+          } catch (e) { console.warn('[throttle] resume failed: ' + e.message); }
+        }, waitMs);
+      });
       // v4 degrade-safe ARM: the watchdog arms ONLY after the first app-level device:heartbeat-ack.
       socket.on('device:heartbeat-ack', (data) => { livenessConfirmed = true; if (data) ingestClockSample(data.server_ms, data.client_ms); });
 
@@ -2325,7 +2358,31 @@
         enterRepairMode('Device was removed from the server. Re-pairing…');
       });
 
+
+
       socket.on('device:auth-error', (data) => {
+        /*
+         * ⚠️ A DEAD ENROLMENT KEY HAS TO BE DROPPED, OR THE DISPLAY LOOPS FOREVER.
+         *
+         * The key is re-derived from location.search on every load, and carrying one sets
+         * paired=true — so a player whose key was rolled, revoked, or whose display row was deleted
+         * keeps presenting the same dead credential, never asks for a pairing code, and never shows
+         * one. Repair mode does not help by itself: it clears deviceId and deviceToken and leaves
+         * the key exactly where it was. Without this the only recovery is editing the URL on the
+         * machine — which, for the vMix case this feature exists to serve, means editing the vMix
+         * input by hand.
+         *
+         * The server names this case (reason: 'enrol_key_unknown'), so forget the key for this
+         * session and go back to being unpaired: the next register asks for a pairing code and puts
+         * it on the screen. The URL is left alone, because the operator may roll a NEW key onto this
+         * same display and that URL should keep working.
+         */
+        if (data && data.reason === 'enrol_key_unknown') {
+          console.warn('[enrol] this player URL key is no longer valid — falling back to pairing');
+          config.enrolKey = null;
+          config.paired = false;
+        }
+
         console.warn('Device auth rejected:', data?.error || 'unknown');
         enterRepairMode('This device needs to be re-paired. Getting a new code…');
       });

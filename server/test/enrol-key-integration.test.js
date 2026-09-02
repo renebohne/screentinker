@@ -153,3 +153,37 @@ test('a display whose row has no token is still enrollable — and is issued one
   const tok = db.prepare('SELECT device_token FROM devices WHERE id = ?').get(dev.device_id).device_token;
   assert.ok(tok && tok.length > 0, 'it must be issued a token so it can authenticate from now on');
 });
+
+/*
+ * ⚠️ A STALE KEY MUST NOT LOCK THE BUILDING OUT OF PAIRING.
+ *
+ * Three ordinary operator actions leave a player holding a dead key — rolling it, revoking it, or
+ * deleting the display. The player re-derives that key from its own URL on every load and retries
+ * about every ten seconds forever. The first version counted each of those as a pairing failure, and
+ * five failures locks the whole IP out of pairing for fifteen minutes: behind one office NAT, a
+ * single stranded screen in a corner made every other display in the building un-pairable, on a
+ * loop, with nothing in the dashboard to explain it.
+ *
+ * The 256-bit key is not worth guessing, so the lockout bought nothing in exchange.
+ */
+test('a rolled-away key falls back to pairing instead of locking the IP out', async () => {
+  const enrol = require('../lib/enrol-key');
+  const dev = await provision();
+  const stale = enrol.setEnrolKey(db, dev.device_id);
+  enrol.setEnrolKey(db, dev.device_id);          // rolled: `stale` now resolves to nothing
+
+  const before = deviceCount();
+
+  // The stranded player, hammering with the dead key the way it does in the field.
+  for (let i = 0; i < 6; i++) await connectWithKey(stale);
+  assert.equal(deviceCount(), before, 'a dead key must still not provision anything by itself');
+
+  /*
+   * The check that matters: ordinary pairing from the SAME address still works. Before the fix the
+   * sixth attempt above had already tripped pairLockout and this would be refused.
+   */
+  const fresh = await provision();
+  assert.ok(fresh && fresh.device_id,
+    'pairing from this IP was refused — a stranded display has locked out the whole site');
+  assert.notEqual(fresh.device_id, dev.device_id, 'and it is a genuinely new display');
+});
