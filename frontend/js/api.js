@@ -596,6 +596,17 @@ export const api = {
   aiListModels: (base_url, api_key) => request('/ai/models', { method: 'POST', body: JSON.stringify({ base_url, api_key }) }),
 
   // Instance-level default branding (#15, platform admin).
+  /*
+   * Server diagnostics (platform admin). The profile call is deliberately given a long timeout at
+   * the call site rather than here — it is a request that is SUPPOSED to take 30-60 seconds, and a
+   * default timeout would abort the one thing it exists to do.
+   */
+  adminDiagShape: () => request('/admin/diagnostics/shape'),
+  adminDiagLag: (days = 14) => request(`/admin/diagnostics/lag?days=${encodeURIComponent(days)}`),
+  adminDiagProfile: (seconds = 30) => request('/admin/diagnostics/cpu-profile', {
+    method: 'POST', body: JSON.stringify({ seconds }),
+  }),
+
   adminGetBranding: () => request('/admin/branding'),
   adminSetBranding: (data) => request('/admin/branding', { method: 'PUT', body: JSON.stringify(data) }),
   // #146: toggle the /api/status debug block exposure (platform-admin only).

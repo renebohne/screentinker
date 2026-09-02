@@ -57,6 +57,12 @@ const JWT_ONLY_ROUTERS = [
   { path: '/api/white-label', mod: './routes/white-label',  tenancy: true },
   { path: '/api/workspaces',  mod: './routes/workspaces' },
   { path: '/api/admin',       mod: './routes/admin' },
+  /*
+   * Server diagnostics for a platform operator: instance shape, the loop-lag history the server has
+   * always recorded and never shown, and an in-process CPU profile. JWT-only and gated again inside
+   * on requirePlatformAdmin — a workspace owner is not an operator of the host.
+   */
+  { path: '/api/admin/diagnostics', mod: './routes/diagnostics' },
   { path: '/api/tokens',      mod: './routes/tokens',       tenancy: true },
 ];
 

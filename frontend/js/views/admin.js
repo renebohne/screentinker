@@ -93,6 +93,23 @@ export async function render(container) {
       <div id="allUsersTable"><p style="color:var(--text-muted)">${t('common.loading')}</p></div>
     </div>
 
+    <!-- Server diagnostics. Everything here was already being recorded and shown nowhere: the
+         loop-lag history is written every second, and the instance shape used to mean asking a
+         customer to run a shell script as root on their production box. -->
+    <div class="settings-section">
+      <h3>${t('admin.diag.title')}</h3>
+      <p style="color:var(--text-muted);font-size:12px;margin-bottom:12px">${t('admin.diag.desc')}</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <button class="btn btn-secondary" id="diagRefreshBtn">${t('admin.diag.refresh')}</button>
+        <select id="diagProfileSecs" class="form-control" style="width:auto">
+          <option value="30">30s</option><option value="60">60s</option><option value="15">15s</option>
+        </select>
+        <button class="btn btn-secondary" id="diagProfileBtn">${t('admin.diag.profile')}</button>
+        <button class="btn btn-secondary" id="diagDownloadBtn" style="display:none">${t('admin.diag.download')}</button>
+      </div>
+      <div id="diagBody"><p style="color:var(--text-muted)">${t('common.loading')}</p></div>
+    </div>
+
     <div class="settings-section">
       <h3>${t('admin.orgs.title')}</h3>
       <p style="color:var(--text-muted);font-size:12px;margin-bottom:12px">${t('admin.orgs.desc')}</p>
@@ -146,6 +163,8 @@ export async function render(container) {
 
   loadUsers();
   loadOrgs();
+  loadDiagnostics();
+  wireDiagnostics();
   loadSsoOnlyRequests();
   loadBranding();
   loadPlans();
@@ -639,3 +658,124 @@ async function loadSystem() {
 }
 
 export function cleanup() {}
+
+
+/* ------------------------------------------------------------------ server diagnostics */
+
+const num = (n) => (n == null ? '—' : Number(n).toLocaleString());
+const mb = (b) => (b == null ? '—' : `${(b / 1048576).toFixed(1)} MB`);
+
+/*
+ * ⚠️ THE POINT OF THIS SCREEN. Diagnosing a slow install used to mean sending someone a shell
+ * script and talking them through running it as root on production. Every number here was already
+ * being recorded — the loop-lag table gets a row a second and had never been read back — so this is
+ * mostly a matter of showing what the server already knows.
+ */
+async function loadDiagnostics() {
+  const el = document.getElementById('diagBody');
+  if (!el) return;
+  el.innerHTML = `<p style="color:var(--text-muted)">${t('common.loading')}</p>`;
+  let shape; let lag;
+  try {
+    [shape, lag] = await Promise.all([api.adminDiagShape(), api.adminDiagLag(14)]);
+  } catch (e) {
+    el.innerHTML = `<p style="color:var(--danger)">${esc(e.message || 'Failed to load diagnostics')}</p>`;
+    return;
+  }
+
+  const live = lag.live || {};
+  const bandColour = live.band === 'critical' ? 'var(--danger)' : live.band === 'elevated' ? 'var(--warning, #f59e0b)' : 'var(--success, #10b981)';
+
+  /*
+   * The daily trend first, because it answers the question that actually starts an investigation:
+   * did this step up on a date? That turns "why is the server slow" into "what changed on the 14th".
+   */
+  const daily = (lag.daily || []).map((d) => `
+    <tr><td>${esc(d.day)}</td><td>${num(d.samples)}</td><td>${num(d.avg_p50)}</td>
+        <td style="color:${d.avg_p99 >= 100 ? 'var(--danger)' : 'inherit'}">${num(d.avg_p99)}</td>
+        <td>${num(d.worst)}</td><td>${d.samples ? Math.round((100 * d.not_normal) / d.samples) : 0}%</td></tr>`).join('');
+
+  const tables = (shape.tables || []).filter((r) => r.rows > 0).slice(0, 12)
+    .map((r) => `<tr><td>${esc(r.table)}</td><td>${num(r.rows)}</td></tr>`).join('');
+
+  el.innerHTML = `
+    <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px">
+      <div><div style="font-size:11px;color:var(--text-muted)">${t('admin.diag.band')}</div>
+           <div style="font-size:20px;font-weight:700;color:${bandColour}">${esc(live.band || '—')}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted)">sustained p99</div>
+           <div style="font-size:20px;font-weight:700">${num(Math.round(live.sustained_p99_ms || 0))} ms</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted)">database</div>
+           <div style="font-size:20px;font-weight:700">${mb((shape.db || {}).path_bytes)}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted)">displays</div>
+           <div style="font-size:20px;font-weight:700">${num((shape.devices || {}).online)} / ${num((shape.devices || {}).total)}</div></div>
+    </div>
+
+    <h4 style="margin:12px 0 6px">${t('admin.diag.lag_daily')}</h4>
+    <div style="overflow-x:auto"><table class="data-table"><thead><tr>
+      <th>day</th><th>samples</th><th>avg p50</th><th>avg p99</th><th>worst</th><th>not normal</th>
+    </tr></thead><tbody>${daily || `<tr><td colspan="6">${t('admin.diag.no_history')}</td></tr>`}</tbody></table></div>
+
+    <h4 style="margin:16px 0 6px">${t('admin.diag.shape')}</h4>
+    <div style="display:flex;gap:24px;flex-wrap:wrap;font-size:13px;margin-bottom:8px">
+      <span>plays: <b>${num((shape.play_logs || {}).total)}</b> (${num((shape.play_logs || {}).still_open)} open)</span>
+      <span>largest playlist payload: <b>${mb((shape.assigned_playlists || {}).max_snapshot_bytes)}</b></span>
+      <span>largest widget config: <b>${mb((shape.widgets || {}).max_config_bytes)}</b></span>
+      <span>workspaces: <b>${num(shape.workspaces)}</b></span>
+    </div>
+    <div style="overflow-x:auto"><table class="data-table"><thead><tr><th>table</th><th>rows</th></tr></thead>
+      <tbody>${tables}</tbody></table></div>
+    <div id="diagProfileOut"></div>`;
+}
+
+let lastProfile = null;
+
+function wireDiagnostics() {
+  const refresh = document.getElementById('diagRefreshBtn');
+  if (refresh) refresh.addEventListener('click', loadDiagnostics);
+
+  const dl = document.getElementById('diagDownloadBtn');
+  if (dl) dl.addEventListener('click', () => {
+    if (!lastProfile) return;
+    /*
+     * A .cpuprofile is what DevTools opens directly (Performance -> Load profile), which is the
+     * whole reason to hand back the raw profile as well as the summary: the table says WHERE, the
+     * file lets somebody see the call tree around it.
+     */
+    const blob = new Blob([JSON.stringify(lastProfile)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `screentinker-${new Date().toISOString().replace(/[:.]/g, '-')}.cpuprofile`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  });
+
+  const btn = document.getElementById('diagProfileBtn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const secs = Number(document.getElementById('diagProfileSecs').value) || 30;
+    const out = document.getElementById('diagProfileOut');
+    btn.disabled = true;
+    const original = btn.textContent;
+    // It is supposed to take this long; say so, or it reads as a hung button.
+    btn.textContent = t('admin.diag.profiling', { seconds: secs });
+    if (out) out.innerHTML = `<p style="color:var(--text-muted);margin-top:12px">${t('admin.diag.profiling_note')}</p>`;
+    try {
+      const r = await api.adminDiagProfile(secs);
+      lastProfile = r.profile;
+      const rows = (r.top || []).map((x) => `
+        <tr><td style="text-align:right">${x.pct}%</td><td>${esc(x.fn)}</td><td style="color:var(--text-muted)">${esc(x.at)}</td></tr>`).join('');
+      if (out) out.innerHTML = `
+        <h4 style="margin:16px 0 6px">${t('admin.diag.top_self')}</h4>
+        <div style="overflow-x:auto"><table class="data-table"><thead><tr>
+          <th>self</th><th>function</th><th>where</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      const d = document.getElementById('diagDownloadBtn');
+      if (d) d.style.display = '';
+      showToast(t('admin.diag.profile_done'), 'success');
+    } catch (e) {
+      if (out) out.innerHTML = `<p style="color:var(--danger);margin-top:12px">${esc(e.message || 'Profile failed')}</p>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+}
