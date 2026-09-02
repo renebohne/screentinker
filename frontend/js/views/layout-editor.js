@@ -222,6 +222,19 @@ async function renderEditor(container, layoutId) {
         selectedZone = i;
         renderZones();
         updateProperties();
+        /*
+         * ⚠️ renderZones() JUST DESTROYED THE NODE THIS HANDLER CLOSED OVER (#316).
+         *
+         * It removes every .zone-el and builds them again to redraw the selection highlight, so
+         * from this line on `el` is detached. Dragging still updated z.x_percent — the data object
+         * survives — but painted the result onto an orphan, so nothing moved under the pointer and
+         * the zone only jumped to its new place at the NEXT render, i.e. the next time you clicked.
+         * Reported as "the squares can't be moved freely, their position updates after clicking
+         * again", in both Chrome and Firefox, which is what a DOM bug rather than a mouse bug looks
+         * like. Re-acquire the live node before anything reads or writes it. The resize handle
+         * below never had this because it does not re-render on mousedown.
+         */
+        const live = canvas.querySelector(`.zone-el[data-index="${i}"]`) || el;
         const rect = canvas.getBoundingClientRect();
         const startX = e.clientX;
         const startY = e.clientY;
@@ -233,8 +246,8 @@ async function renderEditor(container, layoutId) {
           const dy = (e2.clientY - startY) / rect.height * 100;
           z.x_percent = Math.max(0, Math.min(100 - z.width_percent, Math.round((origX + dx) * 10) / 10));
           z.y_percent = Math.max(0, Math.min(100 - z.height_percent, Math.round((origY + dy) * 10) / 10));
-          el.style.left = z.x_percent + '%';
-          el.style.top = z.y_percent + '%';
+          live.style.left = z.x_percent + '%';
+          live.style.top = z.y_percent + '%';
           updateProperties();
         };
         const onUp = () => {
