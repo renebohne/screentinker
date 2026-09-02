@@ -70,6 +70,26 @@ function logFailedLogin(email, ip, reason) {
   } catch {}
 }
 
+/*
+ * Stamp the moment this user was last handed a session.
+ *
+ * ⚠️ EVERY PATH THAT MINTS A SESSION MUST CALL THIS, not just /login. It was called from the two
+ * interactive login finishers only, so a user who signed up and was handed a session on the spot
+ * (POST /register, below) was never stamped and read as "never logged in" for ever. On the hosted
+ * instance that was 132 of 349 accounts, 43 of which were actively publishing playlists and
+ * uploading content at the time. The column is read by admin views and was about to be used to
+ * pick accounts for deletion, so an under-report here is not cosmetic.
+ *
+ * Kept separate from logSuccessfulLogin because a signup is NOT a login: it must not write an
+ * `auth:login_success` row that no interactive login produced. Workspace switching (which re-mints
+ * a token for an already-authenticated user) deliberately does not call either.
+ */
+function stampLastLogin(userId) {
+  try {
+    db.prepare("UPDATE users SET last_login = strftime('%s','now') WHERE id = ?").run(userId);
+  } catch {}
+}
+
 function logSuccessfulLogin(userId, email, ip) {
   try {
     // Phase 2.2 writer-leak fix: stamp the user's oldest workspace so this
@@ -81,8 +101,8 @@ function logSuccessfulLogin(userId, email, ip) {
     ).get(userId);
     db.prepare('INSERT INTO activity_log (user_id, action, details, ip_address, workspace_id) VALUES (?, ?, ?, ?, ?)')
       .run(userId, 'auth:login_success', email, ip, ws?.workspace_id || null);
-    db.prepare("UPDATE users SET last_login = strftime('%s','now') WHERE id = ?").run(userId);
   } catch {}
+  stampLastLogin(userId);
 }
 
 // ==================== Local Auth ====================
@@ -188,6 +208,10 @@ router.post('/register', (req, res) => {
     return res.status(201).json({ verification_required: true, email: user.email });
   }
 
+  // This signup is being handed a live session, so it counts as the user's most recent one. The
+  // early return above (hosted + verification required) issues NO session and is deliberately not
+  // stamped: those accounts really have never had one.
+  stampLastLogin(user.id);
   const token = generateToken(user, workspaceId);
   res.status(201).json({ token, user, current_workspace_id: workspaceId });
 });
