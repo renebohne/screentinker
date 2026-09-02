@@ -1144,6 +1144,7 @@ export default {
   'widget.field.format_12h': '12 Hour',
   'widget.field.format_24h': '24 Hour',
   'widget.field.timezone': 'Timezone',
+  'widget.field.timezone_hint': 'IANA name, e.g. Europe/Madrid. A country name or a GMT offset will not work.',
   'widget.field.font_size': 'Font Size',
   'widget.field.font_size_px': 'Font Size (px)',
   'widget.field.color': 'Color',

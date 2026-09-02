@@ -6,6 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
 const { devicesPlayingContent } = require('../lib/devices-playing');
 const upload = require('../middleware/upload');
+const multer = require('multer');   // for MulterError only — the configured instance is `upload` above
 const config = require('../config');
 const { checkStorageLimit, checkRemoteUrl } = require('../middleware/subscription');
 const { cleanUserText } = require('../middleware/sanitize');
@@ -162,13 +163,47 @@ router.get('/folders', (req, res) => {
 });
 
 // Upload content
-// #212: multi-file upload. Accept the new `files` field (up to 20) and keep the legacy
-// single `file` field so older clients / API callers / the replace flow are unaffected.
+// #212: multi-file upload. Accept the new `files` field and keep the legacy single `file` field so
+// older clients / API callers / the replace flow are unaffected.
+//
+// #317: the cap was 20 and nothing caught the refusal. Somebody uploading 160 photos from a party
+// got an error with no number in it and no way to know what to do differently; they ended up
+// dragging them in sixteen at a time. Two halves to that: the cap is higher now, and — the part
+// that actually mattered — going over it says so. Multer rejects a field with too many files by
+// throwing LIMIT_UNEXPECTED_FILE, which without a handler surfaces as a bare 500.
+//
+// The dashboard also splits a large selection into batches, so the cap is a backstop for direct API
+// callers rather than something a person is meant to feel. It is not removed altogether: one
+// request still has to fit in a proxy's body limit and finish inside its timeout.
+const MAX_FILES_PER_UPLOAD = 60;
 const uploadContentFiles = upload.fields([
-  { name: 'files', maxCount: 20 },
+  { name: 'files', maxCount: MAX_FILES_PER_UPLOAD },
   { name: 'file', maxCount: 1 },
 ]);
-router.post('/', checkStorageLimit, uploadContentFiles, async (req, res) => {
+
+// Turn multer's own refusals into something the person reading the toast can act on. Without this
+// every one of them was an unhandled error: not just the file count, but an oversized file too.
+function uploadContentFilesGuarded(req, res, next) {
+  uploadContentFiles(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_FILE_COUNT') {
+        return res.status(400).json({
+          error: `Too many files in one upload. The limit is ${MAX_FILES_PER_UPLOAD} per request — `
+               + 'the dashboard splits larger selections automatically, so send them in batches if you are calling the API directly.',
+        });
+      }
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({
+          error: `That file is larger than the ${Math.round(config.maxFileSize / (1024 * 1024))} MB limit for a single upload.`,
+        });
+      }
+      return res.status(400).json({ error: `Upload rejected: ${err.message}` });
+    }
+    return next(err);
+  });
+}
+router.post('/', checkStorageLimit, uploadContentFilesGuarded, async (req, res) => {
   try {
     if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before uploading.' });
     const files = [...((req.files && req.files.files) || []), ...((req.files && req.files.file) || [])];

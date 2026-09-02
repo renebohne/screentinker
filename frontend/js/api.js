@@ -394,19 +394,44 @@ export const api = {
     const routed = remoteRoute('/content', 'POST');
     if (routed && routed.refuse) throw new Error(routed.refuse);
 
-    const files = (file instanceof FileList || Array.isArray(file)) ? Array.from(file) : [file];
-    const formData = new FormData();
-    for (const f of files) formData.append('files', f);
-    if (folderId) formData.append('folder_id', folderId);
+    const wasBatch = (file instanceof FileList || Array.isArray(file));
+    const files = wasBatch ? Array.from(file) : [file];
 
-    return new Promise((resolve, reject) => {
+    /*
+     * #317: send them in batches rather than all in one request.
+     *
+     * Somebody tried to upload 160 photos from a company party, got an error with no number in it,
+     * and ended up dragging them in sixteen at a time. The server capped one request's file count,
+     * and the whole selection went up as a single multipart body — so the cap was also a wall the
+     * dashboard walked straight into. Chunking here means the person never meets it: the number
+     * below only has to stay under the server's own limit, and a batch that is small enough to
+     * report progress in more than one step is friendlier anyway. Sequential on purpose — parallel
+     * requests would race the storage-limit check and make progress meaningless.
+     */
+    const CHUNK = 20;
+    const chunks = [];
+    for (let i = 0; i < files.length; i += CHUNK) chunks.push(files.slice(i, i + CHUNK));
+
+    const totalBytes = files.reduce((n, f) => n + (f && f.size ? f.size : 0), 0) || 1;
+    let doneBytes = 0;
+
+    const sendChunk = (batch) => new Promise((resolve, reject) => {
+      const formData = new FormData();
+      for (const f of batch) formData.append('files', f);
+      if (folderId) formData.append('folder_id', folderId);
+
+      const batchBytes = batch.reduce((n, f) => n + (f && f.size ? f.size : 0), 0);
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${API_BASE}/content`);
       const token = localStorage.getItem('token');
       if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
       if (onProgress) {
+        // Progress spans the WHOLE selection, not the current request, or a 160-file upload would
+        // run 0->100% eight times over.
         xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+          if (!e.lengthComputable) return;
+          const sent = doneBytes + (e.loaded / e.total) * batchBytes;
+          onProgress(Math.min(99, Math.round((sent / totalBytes) * 100)));
         };
       }
       xhr.onload = () => {
@@ -430,6 +455,28 @@ export const api = {
       xhr.onerror = () => reject(new Error('Upload failed'));
       xhr.send(formData);
     });
+
+    const out = [];
+    for (let i = 0; i < chunks.length; i++) {
+      let res;
+      try {
+        res = await sendChunk(chunks[i]);
+      } catch (err) {
+        // Say what already landed. Silently discarding that is how someone re-uploads 140 photos
+        // they already have, or assumes none of them arrived.
+        if (out.length) {
+          throw new Error(`${err.message} (${out.length} of ${files.length} file${files.length === 1 ? '' : 's'} were uploaded before this failed)`);
+        }
+        throw err;
+      }
+      if (Array.isArray(res)) out.push(...res); else out.push(res);
+      doneBytes += chunks[i].reduce((n, f) => n + (f && f.size ? f.size : 0), 0);
+      if (onProgress) onProgress(Math.min(99, Math.round((doneBytes / totalBytes) * 100)));
+    }
+    if (onProgress) onProgress(100);
+
+    // Unchanged contract: one content object for a single file, an array for a batch.
+    return wasBatch ? out : out[0];
   },
 
   addRemoteContent: (url, name, mime_type) => request('/content/remote', {

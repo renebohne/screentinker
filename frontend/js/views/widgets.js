@@ -1,6 +1,17 @@
 import { api, assertLocalCallAllowed } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { t } from '../i18n.js';
+
+/*
+ * Real IANA zones for the clock widget's picker (#316). Intl.supportedValuesOf is the browser's own
+ * list; where it is missing (older WebViews) the field stays free text and the server still refuses
+ * an invalid value on save, so the worst case is the old behaviour minus the silent UTC fallback.
+ */
+function tzOptions() {
+  let zones = [];
+  try { zones = Intl.supportedValuesOf('timeZone') || []; } catch (_) { zones = []; }
+  return zones.map((z) => `<option value="${z}"></option>`).join('');
+}
 /*
  * ⚠️ esc IS AN IMPORT, NOT A GLOBAL — and it was missing for sixteen days.
  *
@@ -516,7 +527,7 @@ export async function render(container) {
       case 'clock':
         html += `
           <div class="form-group"><label>${t('widget.field.format')}</label><select id="wFormat" class="input" style="background:var(--bg-input)"><option value="12h" ${config.format === '12h' ? 'selected' : ''}>${t('widget.field.format_12h')}</option><option value="24h" ${config.format === '24h' ? 'selected' : ''}>${t('widget.field.format_24h')}</option></select></div>
-          <div class="form-group"><label>${t('widget.field.timezone')}</label><input type="text" id="wTimezone" class="input" value="${config.timezone || 'America/Chicago'}" placeholder="America/New_York"></div>
+          <div class="form-group"><label>${t('widget.field.timezone')}</label><input type="text" id="wTimezone" class="input" list="tzList" value="${config.timezone || 'America/Chicago'}" placeholder="America/New_York"><datalist id="tzList">${tzOptions()}</datalist><div class="form-hint" id="wTimezoneHint" style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('widget.field.timezone_hint')}</div></div>
           <div class="form-group"><label>${t('widget.field.font_size_px')}</label><input type="number" id="wFontSize" class="input" value="${config.font_size || 64}"></div>
           <div class="form-group"><label>${t('widget.field.color')}</label><input type="color" id="wColor" value="${config.color || '#FFFFFF'}" style="width:60px;height:32px;border:none"></div>
           <div class="form-group"><label>${t('widget.field.background')}</label><input type="color" id="wBg" value="${config.background || '#000000'}" style="width:60px;height:32px;border:none"></div>`;

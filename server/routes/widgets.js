@@ -51,10 +51,47 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-// Validate timezone format (e.g. America/New_York, UTC, Etc/GMT+5)
+/*
+ * Is this an actual IANA zone? (#316)
+ *
+ * ⚠️ CHARACTER-SHAPE IS NOT VALIDATION. This used to test the string against a character class,
+ * which passes anything spelled like a zone and rejects anything spelled unusually, neither of
+ * which is the question. A Spanish operator hit both halves of that in one sitting:
+ *
+ *   "España"  -> the 'ñ' fails a character class -> silently fell back to UTC -> clock two hours
+ *                behind, with nothing anywhere saying why.
+ *   "Spain"   -> passes a character class, is not a zone -> toLocaleTimeString throws RangeError
+ *   "GMT+2"   -> inside the generated widget script -> the clock renders NOTHING at all.
+ *
+ * Intl is the only thing that actually knows, so ask it. Kept as a fallback for configs already
+ * stored with a bad value (a blank clock is worse than a wrong one); new values are rejected at
+ * save time by validateTimezone below, so nobody silently gets UTC again.
+ */
+function isRealTimezone(tz) {
+  if (typeof tz !== 'string' || !tz) return false;
+  // Reject anything that could break out of the single-quoted string it is inlined into, before
+  // handing it to Intl — this value is interpolated into generated widget JS.
+  if (/['"\\\r\n]/.test(tz)) return false;
+  try { new Intl.DateTimeFormat(undefined, { timeZone: tz }); return true; }
+  catch { return false; }
+}
+
 function safeTimezone(tz) {
   if (!tz) return 'UTC';
-  return /^[A-Za-z_\-\/+0-9]+$/.test(tz) ? tz : 'UTC';
+  return isRealTimezone(tz) ? tz : 'UTC';
+}
+
+/*
+ * Save-time gate. Returns an error string, or null when the value is fine. A widget config is
+ * accepted or refused as a whole, so this is called before the insert/update rather than at render,
+ * where the only options left are "wrong time" or "no time".
+ */
+function validateTimezone(config) {
+  const tz = config && config.timezone;
+  if (tz === undefined || tz === null || tz === '') return null;   // absent is fine: safeTimezone -> UTC
+  if (isRealTimezone(tz)) return null;
+  return `"${String(tz).slice(0, 60)}" is not a time zone. Use an IANA name such as Europe/Madrid, `
+       + 'America/New_York or UTC — a country name or a GMT offset will not work.';
 }
 
 // Validate ISO date string format
@@ -104,6 +141,8 @@ router.post('/', (req, res) => {
   if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before creating widgets.' });
   const { widget_type, name, config } = req.body;
   if (!widget_type || !name) return res.status(400).json({ error: 'widget_type and name required' });
+  const tzErr = validateTimezone(config);
+  if (tzErr) return res.status(400).json({ error: tzErr });
 
   const id = uuidv4();
   db.prepare('INSERT INTO widgets (id, user_id, workspace_id, widget_type, name, config) VALUES (?, ?, ?, ?, ?, ?)')
@@ -168,6 +207,8 @@ router.put('/:id', (req, res) => {
   if (!widget) return;
 
   const { name, config } = req.body;
+  const tzErr = validateTimezone(config);
+  if (tzErr) return res.status(400).json({ error: tzErr });
   if (name) db.prepare('UPDATE widgets SET name = ?, updated_at = strftime(\'%s\',\'now\') WHERE id = ?').run(name, req.params.id);
   if (config) db.prepare('UPDATE widgets SET config = ?, updated_at = strftime(\'%s\',\'now\') WHERE id = ?').run(JSON.stringify(config), req.params.id);
 
