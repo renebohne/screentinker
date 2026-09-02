@@ -1886,11 +1886,20 @@ app.post('/api/devices/web-player', requireAuth, resolveTenancy, checkDeviceLimi
   console.log(`[enrol] created web-player display ${id} with an enrolment key (user ${req.user.id})`);
 
   const created = db.prepare('SELECT * FROM devices WHERE id = ?').get(id);
+  /*
+   * ⚠️ THE LIST SANITISER, NOT THE DETAIL ONE. This is a broadcast to the whole workspace room —
+   * every member with a dashboard open, whatever their role — so it must carry what a LIST carries.
+   * stripDeviceSecrets removes only device_token, so the raw row went out still holding the
+   * settings PIN, the trigger secret and (since 2.0.1) the enrolment key: a credential that lets its
+   * holder become that screen, pushed unasked to every viewer-seat member the moment a web player
+   * display is created. The detail page fetches the device when it needs those.
+   */
+  const createdForBroadcast = require('./lib/device-sanitize').stripDeviceSecretsForList({ ...created });
   require('./lib/device-sanitize').stripDeviceSecrets(created);
   try {
     // Required here rather than at module scope, the same way the pairing route below does it.
     const { workspaceRoom: wsRoom, emitToWorkspace: emitWs } = require('./lib/socket-rooms');
-    emitWs(io.of('/dashboard'), wsRoom(req.workspaceId), 'dashboard:device-added', created);
+    emitWs(io.of('/dashboard'), wsRoom(req.workspaceId), 'dashboard:device-added', createdForBroadcast);
   } catch (e) { /* the dashboard refreshes anyway; never fail the create over a notification */ }
 
   res.status(201).json({

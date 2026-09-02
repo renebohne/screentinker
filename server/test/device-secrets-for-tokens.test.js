@@ -83,3 +83,42 @@ test('every device-row response in devices.js passes through the token filter', 
   assert.ok(!/stripTriggerSecretForTokens\s*\(/.test(src),
     'devices.js should call stripSecretsForTokens — the old name covered only one credential');
 });
+
+/*
+ * ⚠️ READING THE KEY WAS ONLY HALF THE DOOR. 2.0.3 stopped an API token reading an enrolment key
+ * off a device. Minting one was left on the default method-based gate, where anything that is not a
+ * GET needs only `write` — so a write-scoped integration could roll a key for any display in reach
+ * and then adopt that display's identity with it, which is the exact power the read was closed to
+ * deny. Revoke matters for the mirror reason: it is a vMix display's only way back.
+ */
+test('minting or revoking an enrolment key needs FULL scope, like the trigger secret', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'devices.js'), 'utf8');
+
+  for (const verb of ['post', 'delete']) {
+    const re = new RegExp(`router\\.${verb}\\('/:id/enrol-key',\\s*requireScope\\('full'\\)`);
+    assert.match(src, re,
+      `${verb.toUpperCase()} /:id/enrol-key is not gated to full scope — a write token can mint an ` +
+      'impersonation credential, which is what the 2.0.3 read fix exists to prevent');
+  }
+
+  // The trigger secret is the precedent this follows; if that regresses, so does the reasoning.
+  assert.match(src, /router\.post\('\/:id\/trigger-secret', requireScope\('full'\)/,
+    'the precedent for this rule has moved — re-check both');
+});
+
+/*
+ * ⚠️ AND A BROADCAST IS A LIST, NOT A DETAIL VIEW. dashboard:device-added goes to the whole
+ * workspace room — every member with a tab open, whatever their role — so it has to be sanitised
+ * like a list. It was sent as a raw row with only device_token removed, which meant the settings
+ * PIN, the trigger secret and the enrolment key were pushed unasked to every viewer-seat member the
+ * moment a web-player display was created.
+ */
+test('the device-added broadcast is sanitised like a list, not like a detail row', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const call = src.match(/'dashboard:device-added',\s*(\w+)\)/);
+  assert.ok(call, 'could not find the device-added broadcast');
+  assert.notEqual(call[1], 'created',
+    'the raw row is broadcast to the whole workspace — it still carries the enrolment key');
+  assert.match(src, /stripDeviceSecretsForList\(\{ \.\.\.created \}\)/,
+    'the broadcast payload must go through the LIST sanitiser');
+});

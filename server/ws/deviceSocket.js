@@ -756,31 +756,6 @@ module.exports = function setupDeviceSocket(io) {
   _dashboardNsRef = io.of('/dashboard');   // so ingestScreenshot() can relay from an HTTP route too
   const dashboardNs = io.of('/dashboard');
 
-  /*
-   * 2.0.1 — REFUSE PLAYERS WHILE FIRST-BOOT MAINTENANCE IS DRAINING. See lib/boot-defer.js for the
-   * 73-device Synology report this is: HTTP unreachable for ~20 minutes after a 2.0.0 upgrade
-   * because the whole fleet reconnected into a server still working through a 494,000-row stranded
-   * backlog. #142's per-device shed was doing its job and could not help — nothing was misbehaving,
-   * there were simply 73 well-behaved players all arriving at once.
-   *
-   * ⚠️ FIRST, AND ON THE NAMESPACE. Before the flap limiter, before the throttle, before any DB
-   * work: the entire point is to spend nothing on a connection we are about to refuse.
-   *
-   * ⚠️ REFUSE, NEVER ACCEPT-AND-STALL. `next(err)` closes the connection and the client gets a
-   * connect_error carrying the reason, so it backs off on its own reconnect schedule. Accepting the
-   * socket and quietly not answering would hold the connection open, tell the player nothing, and
-   * be a slower version of the failure this prevents.
-   *
-   * ⚠️ /device ONLY. The dashboard namespace is not gated and neither is any HTTP route: an
-   * operator must be able to log in and watch the drain. Locking them out with the fleet would turn
-   * a slow boot into a blind one.
-   */
-  deviceNs.use((socket, next) => {
-    if (!bootDefer.isDeferred()) return next();
-    const err = new Error('maintenance');
-    err.data = bootDefer.rejection();
-    return next(err);
-  });
 
   // Disconnect any existing socket that is currently registered for this device_id.
   // Called when a fresh registration comes in for the same device so the old (likely
@@ -799,9 +774,48 @@ module.exports = function setupDeviceSocket(io) {
   }
 
   deviceNs.on('connection', (socket) => {
+    /*
+     * ⚠️ BOOT DEFER REFUSES *AFTER* ACCEPTING, AND THAT DISTINCTION IS THE WHOLE FIX.
+     *
+     * This used to reject in namespace middleware — `next(err)` — on the reasoning that the client
+     * "gets a connect_error carrying the reason, so it backs off on its own reconnect schedule".
+     * That is not what a Socket.IO v4 client does with a middleware error. A CONNECT_ERROR is a
+     * DENIAL, not a transient fault: the manager calls _destroy -> _close, which sets
+     * skipReconnect = true. No `disconnect` event fires, `socket.active` goes false, and
+     * `reconnectionAttempts: Infinity` counts for nothing. The web player's reconnect supervisor is
+     * only ever armed from its disconnect handler, and Tizen's watchdog gates on socket.connected —
+     * so both sit on "Connection failed: maintenance" until somebody physically reloads the panel.
+     * Android happened to survive on an unrelated silence backstop.
+     *
+     * Which made the feature strictly worse than the stampede it prevents, on precisely the large
+     * install it was written for: the drain finishes in a minute and the browser/Tizen fleet never
+     * comes back. The unit test could not see it because it connects with `reconnection: false`.
+     *
+     * So the socket is accepted and then refused, in the language the players already speak: the
+     * same `device:throttled` the burst throttle, the flap limiter and the session-settle hold use,
+     * carrying how long to wait. A client that honours it waits and returns; a client that ignores
+     * it still gets an ordinary `disconnect`, which every player's supervisor already handles. The
+     * dashboard namespace stays ungated — an operator must be able to watch the drain.
+     */
+    if (bootDefer.isDeferred()) {
+      const r = bootDefer.rejection();
+      const waitMs = Math.max(1, Number(r.retry_after_sec) || 30) * 1000;
+      try {
+        socket.emit('device:throttled', { retry_after_ms: waitMs, reason: 'maintenance', detail: r.reason });
+      } catch (_) { /* the disconnect below is what matters */ }
+      logCoalescer.record('boot-defer-refused', `[defer] refusing players while ${r.reason}; told to retry in ${waitMs}ms`);
+      process.nextTick(() => { try { socket.disconnect(true); } catch (_) { /* */ } });
+      return;
+    }
+
     console.log(`Device socket connected: ${socket.id}`);
     let currentDeviceId = null;
     let authenticated = false; // Track whether this socket has been authenticated
+    /*
+     * #299 stranded-play repair runs ONCE per connection, on the first play of the session.
+     * See the call site for why the every-play version was the most expensive thing on the server.
+     */
+    let strandedSweepDone = false;
 
     // #146: wrap every handler on THIS socket so a throw disconnects only this device
     // (logged with its id) instead of crashing the whole server. Backstop to the
@@ -1759,8 +1773,33 @@ module.exports = function setupDeviceSocket(io) {
            * reboot left open — the row before this one, in this zone, ran until now. Normally
            * play_end has already closed it and this is a no-op; it only bites when that end was
            * lost, which is exactly the case nothing repaired before.
+           *
+           * ⚠️ ONCE PER CONNECTION, NOT ONCE PER PLAY — and the difference is the single most
+           * expensive thing this server was doing.
+           *
+           * The repair is a correlated self-join of play_logs against play_logs plus a join to
+           * content, grouped per row, across the device's whole history. Measured against a copy of
+           * a real fleet database (3.1M rows, 2.7M of them on the busiest device): **362ms**, and
+           * **355ms when there was nothing to close** — the cost is paid in full whether or not it
+           * finds anything. At roughly one play per second across a 78-panel site that is a ~150ms
+           * synchronous block about once a second, for ever, which is exactly the "p50 at the
+           * measurement floor with a single fat outlier per window" signature the customer's
+           * profile showed: 27.1% of sixty seconds of wall time inside this one call.
+           *
+           * A lost play_end happens when a session ends abruptly — a reboot, a network drop, a
+           * crash. The evidence for it is therefore the FIRST play of a NEW connection, not the
+           * four hundredth play of a healthy one: inside a live session every end arrives normally
+           * and there is nothing to repair. So the sweep is armed per socket and disarmed after it
+           * runs, which keeps the repair exactly where it was designed to help and removes it from
+           * the steady state entirely.
+           *
+           * The deeper leak this cannot reach — rows open so long no later play can bound them —
+           * was never this call's job and is still handled by the boot sweep in services/heartbeat.
            */
-          try { closeStrandedPlays(db, device_id); } catch (e) { /* never block a live play */ }
+          if (!strandedSweepDone) {
+            strandedSweepDone = true;
+            try { closeStrandedPlays(db, device_id); } catch (e) { /* never block a live play */ }
+          }
 
           // Forward to dashboard so it can render a per-device progress bar.
           // Server-side timestamp avoids clock-skew between player and dashboard.

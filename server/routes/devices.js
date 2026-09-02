@@ -648,7 +648,18 @@ router.post('/:id/settings-pin', (req, res) => {
  * operator reaching for it is not in the mood to hunt for a second button. The old URL stops
  * working at the display's next connect.
  */
-router.post('/:id/enrol-key', (req, res) => {
+/*
+ * ⚠️ FULL SCOPE TO MINT, for the same reason the trigger secret needs it — and more so.
+ *
+ * The default gate is method-based: anything that is not a GET needs only `write`. 2.0.3 stopped an
+ * API token from READING an enrolment key off a device, on the grounds that the key lets its holder
+ * BE that screen — register as it, take its playlist and its commands, report as it. Leaving the
+ * MINT ungated handed the same power back through a different door: a write-scoped integration
+ * could roll a key for any display in reach and then adopt that display's identity with it. Revoke
+ * is gated for the mirror reason — it is the vMix display's only way back, and taking it away is a
+ * denial of service on a screen the token was never given control of.
+ */
+router.post('/:id/enrol-key', requireScope('full'), (req, res) => {
   const device = checkDeviceOwnership(req, res);
   if (!device) return;
   const key = enrolKey.setEnrolKey(db, req.params.id);
@@ -667,7 +678,7 @@ router.post('/:id/enrol-key', (req, res) => {
 
 /* Withdraw it. The display keeps working — it still holds its own token — but the URL stops
  * enrolling anything, which is what you want when a link has gone somewhere it should not. */
-router.delete('/:id/enrol-key', (req, res) => {
+router.delete('/:id/enrol-key', requireScope('full'), (req, res) => {
   const device = checkDeviceOwnership(req, res);
   if (!device) return;
   enrolKey.clearEnrolKey(db, req.params.id);

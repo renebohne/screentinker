@@ -107,17 +107,32 @@ const status = async () => {
   return { code: res.status, body: await res.json() };
 };
 
-test('DEFERRED: the player socket is refused with 503, and refused outright', async () => {
+test('DEFERRED: the player is told to go away, and told when to come back', async () => {
+  /*
+   * ⚠️ THIS ASSERTION WAS REWRITTEN, AND THE OLD ONE DESCRIBED THE BUG.
+   *
+   * It required the connection to be REFUSED outright, carrying a 503 in `connect_error.data` — i.e.
+   * a namespace-middleware rejection. That is exactly what stranded the fleet: a Socket.IO v4 client
+   * treats a middleware CONNECT_ERROR as a denial, sets skipReconnect, fires no `disconnect`, and
+   * never returns. The web and Tizen players sat on "Connection failed: maintenance" until each panel
+   * was reloaded by hand — worse than the stampede the feature prevents, on the very install it was
+   * written for.
+   *
+   * The intent survives unchanged and is still asserted below: the player must be TOLD to go away
+   * rather than accepted and left hanging. What changed is the mechanism — it is now told in the
+   * language the other three refusal gates already use, with the wait attached, from a socket that
+   * was accepted first so its own disconnect handling runs.
+   */
   bootDefer.__reset();
   bootDefer.begin({ openPlays: 494000 });
 
-  const r = await connectPlayer();
-  assert.equal(r.connected, false, 'a player must not be accepted while maintenance is draining');
-  assert.ok(!r.timedOut,
-    'the connection was accepted and then went quiet — that is the accept-and-stall failure this ' +
-    'exists to prevent; a player must be TOLD to go away so it can back off');
-  assert.equal(r.data?.status, 503, 'the refusal must carry 503');
-  assert.ok(r.data?.reason, 'the refusal must say why');
+  const seen = await connectLikeAPlayer();
+
+  assert.ok(seen.throttled, 'the player must be TOLD to go away, not accepted and left in silence');
+  assert.equal(seen.throttled.reason, 'maintenance', 'and told what kind of refusal this is');
+  assert.ok(seen.throttled.detail, 'and why');
+  assert.ok(Number(seen.throttled.retry_after_ms) >= 1000, 'and when to come back');
+  assert.ok(seen.disconnects > 0, 'and then actually let go of the socket');
 });
 
 test('DEFERRED: /api/status still answers 200 so the healthcheck does not restart the boot', async () => {
@@ -195,3 +210,117 @@ test('the boot drain defers, closes the backlog, and lifts when the sweep is idl
 });
 
 after(() => { try { io.close(); } catch { /* */ } try { server.close(); } catch { /* */ } });
+
+
+/*
+ * ⚠️ THE ASSERTION THIS FILE WAS MISSING, AND WHY IT MISSED IT.
+ *
+ * Every test above connects with `reconnection: false`, which is exactly the property under test.
+ * The original implementation refused in namespace middleware, and a Socket.IO v4 client treats a
+ * middleware CONNECT_ERROR as a DENIAL rather than a fault: the manager runs _destroy -> _close and
+ * sets skipReconnect = true, no `disconnect` event fires, and `reconnectionAttempts: Infinity` is
+ * ignored. So the refusal looked correct here — the client was told no, which is all these tests
+ * checked — while in the field the web and Tizen players never tried again and had to be reloaded
+ * by hand. A refusal is only safe if the client comes back.
+ *
+ * These tests therefore leave reconnection ON and assert the two things that actually matter:
+ * the client is still willing to retry, and the refusal says how long to wait in the language the
+ * other refusal gates already use.
+ */
+
+const CLIENT_OPTS = {
+  transports: ['websocket'],
+  forceNew: true,
+  reconnection: true,
+  reconnectionDelay: 50,
+  reconnectionDelayMax: 100,
+};
+
+/** Connect the way a real player does, and report what the refusal left behind. */
+function connectLikeAPlayer(waitMs = 1200) {
+  return new Promise((resolve) => {
+    const sock = ioClient(`${BASE()}/device`, CLIENT_OPTS);
+    const seen = { throttled: null, disconnects: 0, connects: 0, connectErrors: 0 };
+    sock.on('connect', () => { seen.connects += 1; });
+    sock.on('disconnect', () => { seen.disconnects += 1; });
+    sock.on('connect_error', () => { seen.connectErrors += 1; });
+    sock.on('device:throttled', (d) => { seen.throttled = d; });
+    setTimeout(() => {
+      // `active` is the client's own answer to "will I try again?" — false means skipReconnect.
+      seen.stillTrying = sock.active;
+      seen.connectedAtEnd = sock.connected;
+      try { sock.close(); } catch { /* */ }
+      resolve(seen);
+    }, waitMs);
+  });
+}
+
+test('⚠️ a deferred player is refused in a way its own handlers can see', () => {
+  /*
+   * ⚠️ THE DISCRIMINATOR IS WHICH CLIENT EVENTS FIRE, not `socket.active`.
+   *
+   * A server-initiated disconnect always clears `active` — that is normal and is not the bug. The
+   * bug was the SHAPE of the refusal. A middleware CONNECT_ERROR fires neither `connect` nor
+   * `disconnect`: the manager quietly sets skipReconnect and the player's supervisor, which is armed
+   * from its disconnect handler, never runs at all. Nothing in the client is left to act on, which is
+   * why panels had to be reloaded by hand.
+   *
+   * Accepting and then refusing fires `connect`, delivers an actionable `device:throttled`, and then
+   * fires `disconnect` — three events the players already handle. That is what this asserts.
+   */
+  return (async () => {
+    bootDefer.__reset();
+    bootDefer.begin({ openPlays: 5, reason: 'stranded-sweep' });
+
+    const seen = await connectLikeAPlayer();
+
+    assert.ok(seen.connects > 0,
+      'the socket must be ACCEPTED and then refused — a middleware rejection fires no client event at all');
+    assert.equal(seen.connectErrors, 0,
+      'a CONNECT_ERROR is the failure mode: it sets skipReconnect and strands the panel');
+    assert.ok(seen.disconnects > 0,
+      'the player supervisor is armed from its disconnect handler, so that event has to fire');
+  })();
+});
+
+test('the refusal tells the player how long to wait, in the language the other gates use', async () => {
+  bootDefer.__reset();
+  bootDefer.begin({ openPlays: 5, reason: 'stranded-sweep' });
+
+  const seen = await connectLikeAPlayer();
+
+  assert.ok(seen.throttled, 'the player was refused with no explanation and no retry hint');
+  assert.equal(seen.throttled.reason, 'maintenance');
+  assert.ok(Number(seen.throttled.retry_after_ms) >= 1000,
+    `retry_after_ms must be a usable wait, got ${seen.throttled && seen.throttled.retry_after_ms}`);
+});
+
+test('once the defer lifts, the same client connects and stays', async () => {
+  bootDefer.__reset();
+  bootDefer.begin({ openPlays: 5, reason: 'stranded-sweep' });
+  bootDefer.lift({ closed: 5, remaining: 0 });
+
+  const seen = await connectLikeAPlayer(600);
+  assert.ok(seen.connects > 0, 'a lifted defer must let players in');
+  assert.equal(seen.throttled, null, 'and must not still be telling them to wait');
+});
+
+/*
+ * ...and the end of the story: a client that does what it was told gets back in. This is the
+ * behaviour the whole fix exists to produce, so it is asserted rather than assumed.
+ */
+test('a player that honours the wait is playing again once the drain finishes', async () => {
+  bootDefer.__reset();
+  bootDefer.begin({ openPlays: 5, reason: 'stranded-sweep' });
+
+  const refused = await connectLikeAPlayer();
+  assert.ok(refused.throttled, 'precondition: it was told to wait');
+
+  // The drain completes while the player is holding off, which is the normal case.
+  bootDefer.lift({ closed: 5, remaining: 0 });
+
+  const retry = await connectLikeAPlayer(600);
+  assert.ok(retry.connects > 0, 'the player must be accepted once the defer lifts');
+  assert.equal(retry.throttled, null, 'and must not still be told to wait');
+  assert.equal(retry.connectedAtEnd, true, 'and must be allowed to STAY connected, not refused again');
+});
