@@ -3,22 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Digital Signage on a Samsung TV — No App, No MagicINFO (2026) | ScreenTinker</title>
-  <meta name="description" content="Turn a Samsung TV or SSSP signage display into a managed digital sign using only the built-in URL Launcher. No box, no app to install, no MagicINFO licence, no per-screen fees.">
+  <title>Samsung TV Digital Signage Without MagicINFO | ScreenTinker</title>
+  <meta name="description" content="Turn a Samsung TV or SSSP signage display into a managed digital sign using only the built-in URL Launcher. No box, no app to install.">
   <meta name="keywords" content="samsung tv digital signage, samsung signage without magicinfo, sssp url launcher signage, tizen digital signage, samsung business tv signage, free samsung digital signage">
   <meta name="robots" content="index, follow">
   <link rel="canonical" href="https://screentinker.com/guides/samsung-tv-digital-signage.html">
 
   <meta property="og:type" content="article">
   <meta property="og:url" content="https://screentinker.com/guides/samsung-tv-digital-signage.html">
-  <meta property="og:title" content="Digital Signage on a Samsung TV — No App, No MagicINFO (2026)">
-  <meta property="og:description" content="Point a Samsung display's URL Launcher at one web address and it boots straight into a live, managed sign. No extra hardware, no licence.">
+  <meta property="og:title" content="Samsung TV Digital Signage Without MagicINFO">
+  <meta property="og:description" content="Turn a Samsung TV or SSSP signage display into a managed digital sign using only the built-in URL Launcher. No box, no app to install.">
   <meta property="og:image" content="https://screentinker.com/assets/dashboard-preview.png">
   <meta property="og:site_name" content="ScreenTinker">
 
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Digital Signage on a Samsung TV — No App, No MagicINFO (2026)">
-  <meta name="twitter:description" content="Point a Samsung display's URL Launcher at one web address and it boots straight into a live, managed sign.">
+  <meta name="twitter:title" content="Samsung TV Digital Signage Without MagicINFO">
+  <meta name="twitter:description" content="Turn a Samsung TV or SSSP signage display into a managed digital sign using only the built-in URL Launcher. No box, no app to install.">
   <meta name="twitter:image" content="https://screentinker.com/assets/dashboard-preview.png">
 
   <meta name="theme-color" content="#111827">
@@ -69,10 +69,25 @@
     <h2>What works</h2>
     <ul>
       <li><strong>Samsung signage displays (SSSP / Tizen)</strong> — the QM, QB, BE and OM series and similar, using the built-in <strong>URL Launcher</strong></li>
-      <li><strong>Samsung smart TVs</strong> with a built-in web browser</li>
+      <li><strong>Samsung smart TVs</strong> from roughly the 2022 model year onward, using the built-in web browser (see <a href="#which-tvs">which Samsung TVs work</a> below)</li>
       <li><strong>Any Samsung panel already wired to a small PC or Pi</strong> — but the whole point of this guide is that you usually don't need one</li>
     </ul>
     <p>You do not need MagicINFO, a MagicINFO server licence, or a Samsung partner agreement for any of this.</p>
+
+    <h2 id="which-tvs">Which Samsung TVs work</h2>
+    <p>This is worth checking before you spend an evening on it, because the answer is not "any Samsung with a browser".</p>
+    <ul>
+      <li><strong>2022 model year and newer: yes.</strong> The built-in browser on these sets is current enough to run the player, and the URL Launcher path below works as written.</li>
+      <li><strong>Samsung signage displays (SSSP / Tizen)</strong> in the QM, QB, BE and OM series: yes, via the URL Launcher.</li>
+      <li><strong>Older consumer sets: usually not.</strong> The browser shipped on pre-2022 TVs is too old to run a modern web app — below roughly Chromium 80, several things the player relies on are simply missing.</li>
+    </ul>
+    <p><strong>The symptom to look for.</strong> On a set that is too old, the page often loads and looks correct, and then the <strong>Connect</strong> button does nothing at all when you press it. No error, no message. If that is what you are seeing, the TV's browser is the problem and no amount of retrying the URL will change it.</p>
+    <p>To check what you have, open <strong>Menu &rarr; Support &rarr; About This TV</strong> and look at the model year. If you are on the edge, the fastest test is simply to try it: it either pairs within a few seconds or the button is dead.</p>
+    <p><strong>If your TV is too old, you have not wasted the screen.</strong> Plug any cheap Android TV box, Fire TV Stick or Raspberry Pi into an HDMI port and drive the panel from that instead. The TV becomes a monitor and the box runs the player, which also gets you sound, since the browser path is muted either way:</p>
+    <ul>
+      <li><a href="/guides/digital-signage-android-tv.html">Free digital signage for Android TV and Fire TV</a></li>
+      <li><a href="/guides/raspberry-pi-digital-signage.html">How to set up digital signage on a Raspberry Pi</a></li>
+    </ul>
 
     <h2>Why there's no app to install</h2>
     <p>The ScreenTinker player is a web page. Your server hosts it at <code>/player</code>, so a display that can open a URL can run it. That is the entire trick — the TV opens a web address, the page pairs itself, and from then on it behaves like any other display in your dashboard.</p>
