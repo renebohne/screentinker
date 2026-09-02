@@ -1045,6 +1045,108 @@ router.post('/:id/items/:itemId/duplicate', requirePlaylistWrite, (req, res) => 
 });
 
 // Reorder items
+/*
+ * Add many content items at once (#318).
+ *
+ * Somebody uploaded ~160 photos from a company party and then had to add them to a playlist ONE AT
+ * A TIME, because POST /:id/items takes a single item. That is the same wall as the upload cap in
+ * #317, one screen further along.
+ *
+ * Content only, deliberately. Widgets and child playlists are singular things an operator places
+ * deliberately — nobody adds ninety widgets — and the nesting rules on the single-item route exist
+ * to be reasoned about one at a time. Keeping this to content leaves that logic untouched.
+ *
+ * PARTIAL SUCCESS IS THE POINT. Refusing 160 photos because one of them expired last week is not a
+ * safety property, it is an obstacle. Valid rows go in and the refused ones come back itemised, so
+ * the operator can see exactly which and why rather than rediscovering it by bisection.
+ */
+const MAX_BULK_ITEMS = 500;
+
+router.post('/:id/items/bulk', requirePlaylistWrite, async (req, res) => {
+  try {
+    const { content_ids, zone_id } = req.body;
+    if (!Array.isArray(content_ids) || content_ids.length === 0) {
+      return res.status(400).json({ error: 'content_ids must be a non-empty array of content IDs' });
+    }
+    if (content_ids.length > MAX_BULK_ITEMS) {
+      return res.status(400).json({ error: `Too many items in one request. The limit is ${MAX_BULK_ITEMS}; send them in batches.` });
+    }
+
+    if (zone_id) {
+      const zone = db.prepare('SELECT lz.id FROM layout_zones lz JOIN layouts l ON l.id = lz.layout_id WHERE lz.id = ? AND (l.is_template = 1 OR l.workspace_id = ?)').get(zone_id, req.playlist.workspace_id);
+      if (!zone) return res.status(400).json({ error: 'zone_id not found in this workspace' });
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const ready = [];      // { content_id, duration_sec }
+    const skipped = [];    // { content_id, reason }
+
+    // Validate and probe BEFORE opening the transaction: probing is async and a better-sqlite3
+    // transaction is synchronous, so an await inside one would run outside it.
+    for (const cid of content_ids) {
+      const content = db.prepare(`SELECT id, workspace_id, duration_sec, mime_type, filepath, remote_url,
+                                         is_active, expires_at
+                                    FROM content WHERE id = ?`).get(cid);
+      if (!content) { skipped.push({ content_id: cid, reason: 'not found' }); continue; }
+      if (content.workspace_id && content.workspace_id !== req.playlist.workspace_id) {
+        skipped.push({ content_id: cid, reason: 'not in this playlist\'s workspace' });
+        continue;
+      }
+      // Same refusal as the single-item route: the published snapshot drops these, so accepting
+      // them here would report success and quietly publish a shorter playlist.
+      const expired = content.expires_at !== null && content.expires_at !== undefined
+        && Number(content.expires_at) <= now;
+      if (content.is_active === 0 || expired) {
+        skipped.push({ content_id: cid, reason: expired ? 'expired' : 'deactivated' });
+        continue;
+      }
+      if (content.duration_sec === undefined || content.duration_sec === null) {
+        content.duration_sec = await probeAndUpdateDuration(content);
+      }
+      ready.push({ content_id: cid, duration_sec: resolveItemDuration(undefined, content) });
+    }
+
+    let inserted = [];
+    if (ready.length) {
+      const max = db.prepare('SELECT MAX(sort_order) as max_order FROM playlist_items WHERE playlist_id = ?')
+        .get(req.params.id);
+      let order = (max.max_order || 0) + 1;
+      const ins = db.prepare(`
+        INSERT INTO playlist_items (playlist_id, content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec)
+        VALUES (?, ?, NULL, NULL, ?, ?, ?)
+      `);
+      const ids = [];
+      // One transaction: 160 photos are one operation to the person who asked for them, so a
+      // failure halfway must not leave half a party in the playlist.
+      db.transaction(() => {
+        for (const r of ready) {
+          ids.push(ins.run(req.params.id, r.content_id, zone_id || null, order++, r.duration_sec).lastInsertRowid);
+        }
+      })();
+
+      const sel = db.prepare(`
+        SELECT pi.*,
+               COALESCE(c.filename, w.name) as filename, cp.name as child_playlist_name,
+               c.mime_type, c.filepath, c.thumbnail_path,
+               c.duration_sec as content_duration, c.file_size, c.remote_url,
+               w.name as widget_name, w.widget_type, w.config as widget_config, w.updated_at as widget_rev
+        FROM playlist_items pi
+        LEFT JOIN content c ON pi.content_id = c.id
+        LEFT JOIN widgets w ON pi.widget_id = w.id
+        LEFT JOIN playlists cp ON pi.child_playlist_id = cp.id
+        WHERE pi.id = ?
+      `);
+      inserted = ids.map((id) => sel.get(id));
+      markDraft(req.params.id);
+    }
+
+    res.status(inserted.length ? 201 : 400).json({ added: inserted, skipped });
+  } catch (err) {
+    console.error('Failed to bulk-add playlist items:', err);
+    res.status(500).json({ error: 'Failed to add items' });
+  }
+});
+
 router.post('/:id/items/reorder', requirePlaylistWrite, (req, res) => {
   const { order } = req.body;
   if (!Array.isArray(order)) return res.status(400).json({ error: 'order must be an array of item IDs' });

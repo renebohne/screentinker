@@ -50,6 +50,9 @@ function validateScheduleBlocks(blocks) {
 }
 
 let currentPlaylistId = null;
+// #319: the items exactly as last rendered. Sorting needs the list the operator is looking at, and
+// every path that changes it already funnels through renderItems, so that is where it is kept.
+let currentPlaylistItems = [];
 
 export function render(container) {
   const hash = window.location.hash;
@@ -446,6 +449,21 @@ function renderDetailContent(container, playlist) {
 
     ${layoutMockup(playlist)}
     
+    <!-- #319: reordering was one-step-at-a-time only. A playlist of 160 photos spanning several
+         screens made "put these in filename order" a manual, error-prone job. -->
+    <div id="playlistSortBar" style="display:none;align-items:center;gap:8px;margin-bottom:10px">
+      <span style="font-size:13px;color:var(--text-muted)">${t('playlist.sort_label')}</span>
+      <select id="playlistSort" class="input" style="width:auto;background:var(--bg-input)">
+        <option value="">${t('playlist.sort.manual')}</option>
+        <option value="name_asc">${t('playlist.sort.name_asc')}</option>
+        <option value="name_desc">${t('playlist.sort.name_desc')}</option>
+        <option value="date_desc">${t('playlist.sort.date_desc')}</option>
+        <option value="date_asc">${t('playlist.sort.date_asc')}</option>
+        <option value="duration_asc">${t('playlist.sort.duration_asc')}</option>
+        <option value="duration_desc">${t('playlist.sort.duration_desc')}</option>
+      </select>
+      <button class="btn btn-secondary btn-sm" id="playlistSortApply">${t('playlist.sort_apply')}</button>
+    </div>
     <div id="playlistItems" style="display:flex;flex-direction:column;gap:8px">
     </div>
   `;
@@ -491,6 +509,55 @@ function renderDetailContent(container, playlist) {
   document.getElementById('addItemBtn').addEventListener('click', () => showAddItemModal(playlist.id));
 
   /*
+   * #319: sort the whole playlist in one go.
+   *
+   * Computed here and sent to the existing reorder route, which takes the finished order — the
+   * server does not need to learn about sort modes, and the operator can still drag afterwards,
+   * because the result is ordinary sort_order values rather than a stored sort rule. Widgets and
+   * nested playlists have no filename or duration of their own, so they keep their relative order
+   * and settle after the content rather than being scattered by a comparator that cannot see them.
+   */
+  document.getElementById('playlistSortApply')?.addEventListener('click', async () => {
+    const mode = document.getElementById('playlistSort')?.value;
+    if (!mode) return;
+    const btn = document.getElementById('playlistSortApply');
+    const items = (currentPlaylistItems || []).slice();
+    if (items.length < 2) return;
+
+    const key = (i) => ({
+      name: (i.filename || i.widget_name || i.child_playlist_name || '').toLowerCase(),
+      when: Number(i.created_at) || 0,
+      dur: Number(i.duration_sec) || Number(i.content_duration) || 0,
+    });
+    const sortable = (i) => !!i.content_id;
+    const content = items.filter(sortable);
+    const rest = items.filter((i) => !sortable(i));
+    const cmp = {
+      name_asc:      (a, b) => key(a).name.localeCompare(key(b).name, undefined, { numeric: true }),
+      name_desc:     (a, b) => key(b).name.localeCompare(key(a).name, undefined, { numeric: true }),
+      date_asc:      (a, b) => key(a).when - key(b).when,
+      date_desc:     (a, b) => key(b).when - key(a).when,
+      duration_asc:  (a, b) => key(a).dur - key(b).dur,
+      duration_desc: (a, b) => key(b).dur - key(a).dur,
+    }[mode];
+    if (!cmp) return;
+    content.sort(cmp);
+    const order = content.concat(rest).map((i) => i.id);
+
+    try {
+      btn.disabled = true;
+      const updated = await api.reorderPlaylistItems(currentPlaylistId, order);
+      renderItems(updated);
+      refreshAfterMutation();
+      showToast(t('playlist.toast.sorted'), 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  /*
    * The checklist follows the user into the playlist they just made.
    *
    * ⚠️ THE STEP MEANS SOMETHING DIFFERENT HERE. On the list page step 3 is "create a playlist";
@@ -531,6 +598,10 @@ async function refreshAfterMutation() {
 function renderItems(items) {
   const itemsEl = document.getElementById('playlistItems');
   if (!itemsEl) return;
+  currentPlaylistItems = items || [];
+  // #319: only worth showing once manual reordering has become a chore.
+  const sortBar = document.getElementById('playlistSortBar');
+  if (sortBar) sortBar.style.display = items.length > 1 ? 'flex' : 'none';
 
   if (!items.length) {
     itemsEl.innerHTML = `
@@ -816,9 +887,25 @@ async function showAddItemModal(playlistId, opts = {}) {
         <button class="btn btn-secondary btn-sm tab-btn" data-tab="widgets">${t('playlist.tab_widgets')}</button>
         ${replaceItemId ? '' : `<button class="btn btn-secondary btn-sm tab-btn" data-tab="playlists">${t('playlist.tab_playlists')}</button>`}
       </div>
-      <input type="text" id="addItemSearch" class="input" placeholder="${t('playlist.search_placeholder')}" style="width:100%;margin-bottom:12px">
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <input type="text" id="addItemSearch" class="input" placeholder="${t('playlist.search_placeholder')}" style="flex:1">
+        <select id="addItemSort" class="input" style="width:auto;background:var(--bg-input)" title="${t('playlist.sort_label')}">
+          <option value="name_asc">${t('playlist.sort.name_asc')}</option>
+          <option value="name_desc">${t('playlist.sort.name_desc')}</option>
+          <option value="date_desc">${t('playlist.sort.date_desc')}</option>
+          <option value="date_asc">${t('playlist.sort.date_asc')}</option>
+          <option value="duration_asc">${t('playlist.sort.duration_asc')}</option>
+          <option value="duration_desc">${t('playlist.sort.duration_desc')}</option>
+        </select>
+      </div>
       <div id="addItemList" style="flex:1;overflow-y:auto;min-height:200px;max-height:400px"></div>
-      <div style="display:flex;justify-content:flex-end;margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:16px">
+        <div id="addBulkBar" style="display:none;align-items:center;gap:10px;flex:1">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);cursor:pointer">
+            <input type="checkbox" id="addSelectAll"> ${t('playlist.select_all_shown')}
+          </label>
+          <button class="btn btn-primary btn-sm" id="addSelectedBtn"></button>
+        </div>
         <button class="btn btn-secondary" id="closeAddModal">${t('playlist.close')}</button>
       </div>
     </div>
@@ -826,6 +913,9 @@ async function showAddItemModal(playlistId, opts = {}) {
   document.body.appendChild(modal);
 
   let activeTab = 'content';
+  // #318: ids ticked in the content tab. A Set rather than reading the DOM, so a tick survives
+  // re-rendering the list when the search or the sort changes.
+  const selected = new Set();
   let allContent = [];
   let allWidgets = [];
   let allPlaylists = [];
@@ -902,6 +992,40 @@ async function showAddItemModal(playlistId, opts = {}) {
     });
   }
 
+  /*
+   * #318/#319: the picker list could not be sorted at all, so finding "the next twenty photos by
+   * filename" meant scrolling a list in whatever order the library happened to return. Filenames
+   * that carry a timestamp are the common case for a batch of photos, so name order is the default.
+   */
+  function sortItems(list, mode) {
+    const name = (i) => (i.filename || i.name || '').toLowerCase();
+    const when = (i) => Number(i.created_at) || 0;
+    const dur  = (i) => Number(i.duration_sec) || 0;
+    const by = {
+      name_asc:      (a, b) => name(a).localeCompare(name(b), undefined, { numeric: true }),
+      name_desc:     (a, b) => name(b).localeCompare(name(a), undefined, { numeric: true }),
+      date_asc:      (a, b) => when(a) - when(b),
+      date_desc:     (a, b) => when(b) - when(a),
+      duration_asc:  (a, b) => dur(a) - dur(b),
+      duration_desc: (a, b) => dur(b) - dur(a),
+    };
+    return list.slice().sort(by[mode] || by.name_asc);
+  }
+
+  function updateBulkBar() {
+    const bar = document.getElementById('addBulkBar');
+    const btn = document.getElementById('addSelectedBtn');
+    const all = document.getElementById('addSelectAll');
+    if (!bar || !btn) return;
+    const n = selected.size;
+    bar.style.display = n ? 'flex' : 'none';
+    btn.textContent = tn('playlist.add_n_selected', n);
+    if (all) {
+      const shown = Array.from(document.querySelectorAll('.add-item-check'));
+      all.checked = shown.length > 0 && shown.every((cb) => cb.checked);
+    }
+  }
+
   function renderTab() {
     const list = document.getElementById('addItemList');
     const search = (document.getElementById('addItemSearch')?.value || '').toLowerCase();
@@ -909,10 +1033,13 @@ async function showAddItemModal(playlistId, opts = {}) {
     if (activeTab === 'playlists') return renderPlaylistsTab(list, search);
 
     const items = activeTab === 'content' ? allContent : allWidgets;
-    const filtered = items.filter(item => {
+    const sortMode = document.getElementById('addItemSort')?.value || 'name_asc';
+    const filtered = sortItems(items.filter(item => {
       const name = (item.filename || item.name || '').toLowerCase();
       return name.includes(search);
-    });
+    }), sortMode);
+    // #318: bulk add is content-only (the server route is), and meaningless when replacing one item.
+    const selectable = activeTab === 'content' && !replaceItemId;
 
     if (!filtered.length) {
       list.innerHTML = `<div style="color:var(--text-muted);padding:20px;text-align:center">${activeTab === 'content' ? t('playlist.no_content_found') : t('playlist.no_widgets_found')}</div>`;
@@ -931,6 +1058,7 @@ async function showAddItemModal(playlistId, opts = {}) {
       const thumb = item.thumbnail_path ? `/api/content/${esc(item.id)}/thumbnail` : null;
       return `
         <div class="add-item-row" data-id="${esc(item.id)}" data-type="${isWidget ? 'widget' : 'content'}" style="display:flex;align-items:center;gap:12px;padding:10px;border-radius:var(--radius);cursor:pointer;transition:background 0.1s">
+          ${selectable ? `<input type="checkbox" class="add-item-check" data-id="${esc(item.id)}" ${selected.has(item.id) ? 'checked' : ''} style="flex-shrink:0;cursor:pointer">` : ''}
           <div style="width:40px;height:30px;border-radius:4px;overflow:hidden;background:var(--bg-input);flex-shrink:0;display:flex;align-items:center;justify-content:center">
             ${thumb ? `<img data-auth-src="${thumb}" style="width:100%;height:100%;object-fit:cover">` : '<div style="color:var(--text-muted);opacity:0.4"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg></div>'}
           </div>
@@ -943,6 +1071,16 @@ async function showAddItemModal(playlistId, opts = {}) {
       `;
     }).join('');
     hydrateAuthImages(list, { eager: true });
+
+    // #318: ticking a row only records the id; nothing is added until "Add N selected" is pressed.
+    list.querySelectorAll('.add-item-check').forEach((cb) => {
+      cb.addEventListener('click', (e) => e.stopPropagation());   // ticking must not trigger the row
+      cb.addEventListener('change', () => {
+        if (cb.checked) selected.add(cb.dataset.id); else selected.delete(cb.dataset.id);
+        updateBulkBar();
+      });
+    });
+    updateBulkBar();
 
     list.querySelectorAll('.add-item-btn').forEach(btn => {
       btn.addEventListener('click', async (e) => {
@@ -992,6 +1130,51 @@ async function showAddItemModal(playlistId, opts = {}) {
   });
 
   document.getElementById('addItemSearch').addEventListener('input', renderTab);
+  document.getElementById('addItemSort')?.addEventListener('change', renderTab);
+
+  document.getElementById('addSelectAll')?.addEventListener('change', (e) => {
+    // "Select all" means all rows CURRENTLY SHOWN — i.e. what the search and sort have narrowed to,
+    // not the whole library. Anything else would be a surprise on a filtered list.
+    document.querySelectorAll('.add-item-check').forEach((cb) => {
+      cb.checked = e.target.checked;
+      if (cb.checked) selected.add(cb.dataset.id); else selected.delete(cb.dataset.id);
+    });
+    updateBulkBar();
+  });
+
+  document.getElementById('addSelectedBtn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('addSelectedBtn');
+    /*
+     * #318: send them in the ORDER THE LIST IS SHOWING, not in Set insertion order. Somebody
+     * sorting by filename and ticking everything means "add them like this" — arriving in the
+     * order they happened to be clicked would make the sort pointless.
+     */
+    const shown = Array.from(document.querySelectorAll('.add-item-check')).map((cb) => cb.dataset.id);
+    const ids = shown.filter((id) => selected.has(id));
+    for (const id of selected) if (!ids.includes(id)) ids.push(id);   // ticked, then filtered out of view
+    if (!ids.length) return;
+    try {
+      btn.disabled = true;
+      btn.textContent = t('playlist.adding');
+      const res = await api.addPlaylistItemsBulk(playlistId, ids);
+      const added = (res && res.added ? res.added.length : 0);
+      const skipped = (res && res.skipped) || [];
+      selected.clear();
+      renderTab();
+      refreshAfterMutation();
+      if (skipped.length) {
+        // Name what did not go in. A quietly shorter playlist is the failure mode worth avoiding.
+        showToast(t('playlist.toast.bulk_added_partial', { added, skipped: skipped.length }), 'warning');
+      } else {
+        showToast(tn('playlist.toast.bulk_added', added), 'success');
+      }
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      btn.disabled = false;
+      updateBulkBar();
+    }
+  });
 
   document.getElementById('closeAddModal').addEventListener('click', () => modal.remove());
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });

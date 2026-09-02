@@ -546,6 +546,11 @@ export const api = {
   updatePlaylistItem: (id, itemId, data) => request(`/playlists/${id}/items/${itemId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deletePlaylistItem: (id, itemId) => request(`/playlists/${id}/items/${itemId}`, { method: 'DELETE' }),
   duplicatePlaylistItem: (id, itemId) => request(`/playlists/${id}/items/${itemId}/duplicate`, { method: 'POST' }),
+  // #318: many content items in one request. Returns { added: [...], skipped: [{content_id, reason}] } —
+  // a batch can partially succeed, and the caller is expected to say so.
+  addPlaylistItemsBulk: (id, content_ids, zone_id) => request(`/playlists/${id}/items/bulk`, {
+    method: 'POST', body: JSON.stringify(zone_id ? { content_ids, zone_id } : { content_ids }),
+  }),
   reorderPlaylistItems: (id, order) => request(`/playlists/${id}/items/reorder`, { method: 'POST', body: JSON.stringify({ order }) }),
   // #74/#75 per-item schedule blocks
   getItemSchedules: (id, itemId) => request(`/playlists/${id}/items/${itemId}/schedules`),

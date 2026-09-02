@@ -829,6 +829,48 @@ paths:
                     length (rounded up to a whole second), anything else to 10s.
       responses:
         '201': { description: Created playlist item. }
+  /playlists/{id}/items/bulk:
+    post:
+      tags: [playlists]
+      summary: Add many content items to a playlist in one request
+      description: >-
+        Content only; widgets and child playlists are added one at a time via
+        /playlists/{id}/items. Items that cannot be added (missing, expired,
+        deactivated, or in another workspace) are reported in `skipped` rather
+        than failing the whole batch. Requires scope: write.
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content_ids]
+              properties:
+                content_ids:
+                  type: array
+                  maxItems: 500
+                  items: { type: string }
+                zone_id: { type: string, description: Optional zone placement for every item in the batch. }
+      responses:
+        '201':
+          description: At least one item was added.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added: { type: array, items: { type: object } }
+                  skipped:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        content_id: { type: string }
+                        reason: { type: string }
+        '400': { description: Nothing could be added; `skipped` says why for each id. }
   /playlists/{id}/items/reorder:
     post:
       tags: [playlists]
