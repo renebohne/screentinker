@@ -201,6 +201,68 @@ function resolveCurrentItem(deviceId, forceIndex) {
   };
 }
 
+// ─── POST /api/embedded/pair/register ───────────────────────────────────────────
+// An embedded device (e.g. ESP32) registers a 6-digit pairing code to show on screen.
+router.post('/pair/register', (req, res) => {
+  const { pairing_code, screen_profile, screen_width, screen_height } = req.body || {};
+  if (!pairing_code || String(pairing_code).trim().length !== 6) {
+    return res.status(400).json({ error: 'Valid 6-digit pairing_code required' });
+  }
+
+  const code = String(pairing_code).trim();
+  const id = crypto.randomUUID();
+  const newToken = crypto.randomBytes(32).toString('hex');
+  const width = parseInt(screen_width) || 800;
+  const height = parseInt(screen_height) || 480;
+  const profile = screen_profile || 'sticky_800x480';
+
+  try {
+    db.prepare(`
+      INSERT INTO devices (id, pairing_code, device_token, status, client_type, screen_profile, screen_width, screen_height, render_width, render_height, last_heartbeat)
+      VALUES (?, ?, ?, 'provisioning', 'embedded', ?, ?, ?, ?, ?, strftime('%s','now'))
+    `).run(id, code, newToken, profile, width, height, width, height);
+  } catch (e) {
+    return res.status(409).json({ error: 'Pairing code collision. Retry with a new code.' });
+  }
+
+  res.json({
+    status: 'ok',
+    device_id: id,
+    pairing_code: code,
+    message: 'Display registered for pairing. Show code on screen.',
+  });
+});
+
+// ─── GET /api/embedded/pair/status ──────────────────────────────────────────────
+// Embedded device polls to check if the user entered the pairing code in the dashboard.
+router.get('/pair/status', (req, res) => {
+  const { device_id } = req.query;
+  if (!device_id) {
+    return res.status(400).json({ error: 'device_id required' });
+  }
+
+  const device = db.prepare('SELECT id, status, workspace_id, device_token, pairing_code FROM devices WHERE id = ?').get(device_id);
+  if (!device) {
+    return res.status(404).json({ error: 'Device not found' });
+  }
+
+  if (device.workspace_id && device.status !== 'provisioning') {
+    return res.json({
+      paired: true,
+      status: 'online',
+      device_id: device.id,
+      device_token: device.device_token,
+    });
+  }
+
+  db.prepare("UPDATE devices SET last_heartbeat = strftime('%s','now') WHERE id = ?").run(device_id);
+  res.json({
+    paired: false,
+    status: 'provisioning',
+    pairing_code: device.pairing_code,
+  });
+});
+
 // ─── GET /api/embedded/info ─────────────────────────────────────────────────────
 
 router.get('/info', resolveAuth, (req, res) => {

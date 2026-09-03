@@ -45,26 +45,37 @@ The token remains valid indefinitely unless an administrator explicitly deletes 
 
 There are two supported onboarding methods for embedded firmware:
 
-#### Method A: Interactive Pairing Flow (Zero Hardcoding / Recommended for End Users)
+#### Method A: 6-Digit REST Pairing Flow (Zero Hardcoding / Recommended for End Users)
 1. **First Boot (Factory Unpaired State):**
-   - The MCU checks NVS/Flash. If `device_id` and `device_token` are not found, it enters **Provisioning Mode**.
-   - The MCU connects to the ScreenTinker WebSocket endpoint (`ws://<server>:3001/socket.io/?EIO=4&transport=websocket`).
-   - The MCU generates a random 6-character/digit code (e.g. `947453`) and emits `device:register` with `{ pairing_code: "947453", device_info: { screen_width: 800, screen_height: 480 } }`.
-   - The MCU renders the pairing code on its E-Paper display.
+   - The MCU connects to Wi-Fi.
+   - The MCU generates a random 6-digit code (e.g. `545658`) and calls `POST /api/embedded/pair/register`:
+     ```json
+     {
+       "pairing_code": "545658",
+       "screen_profile": "sticky_800x480",
+       "screen_width": 800,
+       "screen_height": 480
+     }
+     ```
+   - The server registers the device in `provisioning` status and returns `{ "status": "ok", "device_id": "<UUID>", "pairing_code": "545658" }`.
+   - The MCU renders the 6-digit code clearly on its E-Paper display.
 2. **Dashboard Claim:**
-   - The user opens the ScreenTinker Web UI, goes to **Displays → Add Display**, and enters the code shown on the screen.
+   - The user opens the ScreenTinker Web UI, goes to **Displays → Add Display**, and enters the 6-digit code shown on the screen.
 3. **Credential Stamping:**
-   - The server acknowledges the claim by sending the `device:registered` event over the WebSocket: `{ device_id: "<UUID>", device_token: "<SECRET_TOKEN>", status: "online" }`.
+   - The MCU periodically checks `GET /api/embedded/pair/status?device_id=<UUID>`.
+   - As soon as the user claims the display, the server responds with:
+     ```json
+     { "paired": true, "status": "online", "device_id": "<UUID>", "device_token": "<SECRET_TOKEN>" }
+     ```
    - The MCU writes `device_id` and `device_token` permanently to Flash/NVS.
-   - The MCU disconnects the WebSocket permanently.
 4. **Regular Operation:**
-   - The MCU enters the low-power sleep/wake loop, using standard HTTP `GET /api/embedded/render` with its stored `device_token`.
+   - The MCU enters the ultra-low-power sleep/wake loop, using standard HTTP `GET /api/embedded/render` with its stored `device_token`.
 
 #### Method B: Pre-Provisioned Deployment (Batch Flashing / Fleet Setup)
 If flashing devices in bulk:
 1. Create or register the display row in ScreenTinker (via dashboard or REST API).
 2. Burn the assigned `device_id` and `device_token` directly into the firmware's NVS partition or config header.
-3. The MCU starts directly in **Regular Operation** without ever needing the WebSocket pairing step.
+3. The MCU starts directly in **Regular Operation** without ever needing the pairing step.
 
 ---
 
@@ -161,11 +172,48 @@ Returns JSON metadata describing device status, screen profile, timing, and play
 
 ---
 
-### 2.3 `GET /api/embedded/presets`
+### 3.3 `GET /api/embedded/presets`
 
 Returns the list of built-in hardware presets.
 
 ---
+
+### 3.4 `POST /api/embedded/pair/register`
+
+Registers a new unassigned embedded device with a 6-digit pairing code to be claimed in the dashboard.
+
+#### Request Body
+```json
+{
+  "pairing_code": "545658",
+  "screen_profile": "sticky_800x480",
+  "screen_width": 800,
+  "screen_height": 480
+}
+```
+
+#### Response (`200 OK`)
+```json
+{
+  "status": "ok",
+  "device_id": "136ee9f6-020a-42fe-8e0c-b7763ee84389",
+  "pairing_code": "545658",
+  "message": "Display registered for pairing. Show code on screen."
+}
+```
+
+---
+
+### 3.5 `GET /api/embedded/pair/status`
+
+Polled by the MCU during setup to detect when the user claims the display in the web dashboard via `POST /api/provision/pair`.
+
+#### Query Parameters
+- **`device_id`** *(required)*: The UUID returned by `/pair/register`.
+
+#### Response (`200 OK`)
+- **Unclaimed:** `{"paired": false, "status": "provisioning", "pairing_code": "545658"}`
+- **Claimed / Paired:** `{"paired": true, "status": "online", "device_id": "<UUID>", "device_token": "<SECRET_TOKEN>"}`
 
 ## 3. Screen Profiles & Output Formats
 
