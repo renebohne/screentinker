@@ -45,6 +45,7 @@ const { cacheKey, toETag, isNotModified, get: cacheGet, set: cacheSet } = requir
 const { render }            = require('../lib/embedded-render');
 const { postprocess }       = require('../lib/embedded-postprocess');
 const pairLockout           = require('../lib/pair-lockout');
+const { sixDigitCode }      = require('../lib/numeric-code');
 
 // ─── Auth helper ───────────────────────────────────────────────────────────────
 
@@ -203,20 +204,15 @@ function resolveCurrentItem(deviceId, forceIndex) {
 }
 
 // ─── POST /api/embedded/pair/register ───────────────────────────────────────────
-// An embedded device (e.g. ESP32) registers a 6-digit pairing code to show on screen.
-// Returns a cryptographically random claim_secret that the device must use to poll status.
+// An embedded device requests a server-generated 6-digit pairing code to show on screen.
+// Returns the CSPRNG pairing_code and a cryptographic claim_secret.
 router.post('/pair/register', (req, res) => {
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
   if (pairLockout.isLocked(ip)) {
     return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
   }
 
-  const { pairing_code, screen_profile, screen_width, screen_height } = req.body || {};
-  if (!pairing_code || String(pairing_code).trim().length !== 6) {
-    return res.status(400).json({ error: 'Valid 6-digit pairing_code required' });
-  }
-
-  const code = String(pairing_code).trim();
+  const { screen_profile, screen_width, screen_height } = req.body || {};
   const id = crypto.randomUUID();
   const newToken = crypto.randomBytes(32).toString('hex');
   const claimSecret = crypto.randomBytes(32).toString('hex');
@@ -224,13 +220,25 @@ router.post('/pair/register', (req, res) => {
   const height = parseInt(screen_height) || 480;
   const profile = typeof screen_profile === 'object' ? JSON.stringify(screen_profile) : (screen_profile || 'seeed-reterminal-sticky');
 
-  try {
-    db.prepare(`
-      INSERT INTO devices (id, pairing_code, device_token, claim_secret, status, client_type, screen_profile, screen_width, screen_height, render_width, render_height, last_heartbeat)
-      VALUES (?, ?, ?, ?, 'provisioning', 'embedded', ?, ?, ?, ?, ?, strftime('%s','now'))
-    `).run(id, code, newToken, claimSecret, profile, width, height, width, height);
-  } catch (e) {
-    return res.status(409).json({ error: 'Pairing code collision. Retry with a new code.' });
+  let code;
+  let inserted = false;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    code = sixDigitCode(); // CSPRNG (lib/numeric-code): server generates code, caller cannot choose
+    try {
+      db.prepare(`
+        INSERT INTO devices (id, pairing_code, device_token, claim_secret, status, client_type, screen_profile, screen_width, screen_height, render_width, render_height, last_heartbeat)
+        VALUES (?, ?, ?, ?, 'provisioning', 'embedded', ?, ?, ?, ?, ?, strftime('%s','now'))
+      `).run(id, code, newToken, claimSecret, profile, width, height, width, height);
+      inserted = true;
+      break;
+    } catch (e) {
+      // Collision on pairing_code UNIQUE; retry with a fresh code
+    }
+  }
+
+  if (!inserted) {
+    pairLockout.recordFailure(ip);
+    return res.status(500).json({ error: 'Failed to allocate unique pairing code. Please retry.' });
   }
 
   res.json({

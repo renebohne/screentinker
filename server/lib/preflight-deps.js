@@ -243,10 +243,7 @@ function preflight() {
    * still repaired, because it is faster and it is what production runs.
    */
   const nativeProblem = nativeModuleBroken();
-  let hasBuiltinDriver = false;
-  try { require('node:sqlite'); hasBuiltinDriver = true; } catch (_) {}
-
-  if (nativeProblem && hasBuiltinDriver && (/Cannot find module/i.test(nativeProblem) || !canRebuildNative())) {
+  if (nativeProblem && !canRebuildNative()) {
     console.log('[preflight] better-sqlite3 is unavailable; using the built-in node:sqlite driver.');
     console.log(`[preflight]   ${String(nativeProblem).split('\n')[0]}`);
     return;

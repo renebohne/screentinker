@@ -48,16 +48,15 @@ There are two supported onboarding methods for embedded firmware:
 #### Method A: 6-Digit REST Pairing Flow (Zero Hardcoding / Recommended for End Users)
 1. **First Boot (Factory Unpaired State):**
    - The MCU connects to Wi-Fi.
-   - The MCU generates a random 6-digit code (e.g. `545658`) and calls `POST /api/embedded/pair/register`:
+   - The MCU calls `POST /api/embedded/pair/register` (sending only its screen profile and dimensions):
      ```json
      {
-       "pairing_code": "545658",
        "screen_profile": "seeed-reterminal-sticky",
        "screen_width": 800,
        "screen_height": 480
      }
      ```
-   - The server registers the device in `provisioning` status, creates a cryptographic 32-byte `claim_secret`, and returns:
+   - The server mints a secure CSPRNG 6-digit code (`lib/numeric-code.js`), registers the device in `provisioning` status, creates a cryptographic 32-byte `claim_secret`, and returns:
      ```json
      {
        "status": "ok",
@@ -66,7 +65,7 @@ There are two supported onboarding methods for embedded firmware:
        "claim_secret": "<32_BYTE_HEX>"
      }
      ```
-   - The MCU renders the 6-digit code clearly on its E-Paper display and keeps `claim_secret` in RAM.
+   - The MCU renders the server-assigned 6-digit code on its E-Paper display and keeps `claim_secret` in RAM.
 2. **Dashboard Claim:**
    - The user opens the ScreenTinker Web UI, goes to **Displays → Add Display**, and enters the 6-digit code shown on the screen.
 3. **Credential Stamping:**
@@ -188,13 +187,12 @@ Returns the list of built-in hardware presets.
 
 ### 3.4 `POST /api/embedded/pair/register`
 
-Registers a new unassigned embedded device with a 6-digit pairing code to be claimed in the dashboard.
+Requests a new unassigned embedded device registration. The server assigns a secure CSPRNG 6-digit pairing code and a 32-byte `claim_secret`.
 Rate-limited and protected by `pairLockout`.
 
 #### Request Body
 ```json
 {
-  "pairing_code": "545658",
   "screen_profile": "seeed-reterminal-sticky",
   "screen_width": 800,
   "screen_height": 480
@@ -211,6 +209,11 @@ Rate-limited and protected by `pairLockout`.
   "message": "Display registered for pairing. Show code on screen."
 }
 ```
+
+> [!NOTE]
+> **Optional Browser Requirement for Widgets & HTML:**
+> Standard image content (PNG, JPEG, WebP, GIF, BMP) is rendered natively using `jimp` with zero external dependencies.
+> Rendering HTML widgets (Clock, Weather, RSS, Slides) or remote web pages requires installing `puppeteer-core` (`npm i puppeteer-core`) and having a local Chrome/Chromium browser installed (`CHROME_PATH`). If absent, the server returns an informative `BROWSER_NOT_FOUND` / `unsupported` response while image playback continues unaffected.
 
 ---
 
