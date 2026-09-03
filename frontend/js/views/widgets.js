@@ -528,6 +528,8 @@ export async function render(container) {
         html += `
           <div class="form-group"><label>${t('widget.field.format')}</label><select id="wFormat" class="input" style="background:var(--bg-input)"><option value="12h" ${config.format === '12h' ? 'selected' : ''}>${t('widget.field.format_12h')}</option><option value="24h" ${config.format === '24h' ? 'selected' : ''}>${t('widget.field.format_24h')}</option></select></div>
           <div class="form-group"><label>${t('widget.field.timezone')}</label><input type="text" id="wTimezone" class="input" list="tzList" value="${config.timezone || 'America/Chicago'}" placeholder="America/New_York"><datalist id="tzList">${tzOptions()}</datalist><div class="form-hint" id="wTimezoneHint" style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('widget.field.timezone_hint')}</div></div>
+          <div class="form-group"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="wShowSeconds" ${config.show_seconds === false ? '' : 'checked'}> ${t('widget.field.show_seconds')}</label></div>
+          <div class="form-group"><label>${t('widget.field.locale')}</label><input type="text" id="wLocale" class="input" value="${config.locale || ''}" placeholder="es-ES"><div class="form-hint" style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('widget.field.locale_hint')}</div></div>
           <div class="form-group"><label>${t('widget.field.font_size_px')}</label><input type="number" id="wFontSize" class="input" value="${config.font_size || 64}"></div>
           <div class="form-group"><label>${t('widget.field.color')}</label><input type="color" id="wColor" value="${config.color || '#FFFFFF'}" style="width:60px;height:32px;border:none"></div>
           <div class="form-group"><label>${t('widget.field.background')}</label><input type="color" id="wBg" value="${config.background || '#000000'}" style="width:60px;height:32px;border:none"></div>`;
@@ -1062,7 +1064,11 @@ export async function render(container) {
     const config = {};
     const val = id => document.getElementById(id)?.value;
     switch (type) {
-      case 'clock': Object.assign(config, { format: val('wFormat'), timezone: val('wTimezone'), font_size: parseInt(val('wFontSize')) || 64, color: val('wColor'), background: val('wBg'), show_date: true }); break;
+      case 'clock': Object.assign(config, { format: val('wFormat'), timezone: val('wTimezone'), font_size: parseInt(val('wFontSize')) || 64, color: val('wColor'), background: val('wBg'), show_date: true,
+        // #323: seconds were always on with no way to turn them off, and the clock was formatted
+        // in en-US regardless of the operator's language. Both are settings now.
+        show_seconds: document.getElementById('wShowSeconds') ? document.getElementById('wShowSeconds').checked : true,
+        locale: (val('wLocale') || '').trim() }); break;
       case 'weather': Object.assign(config, { location: val('wLocation'), units: val('wUnits'), font_size: parseInt(val('wFontSize')) || 48, color: val('wColor') }); break;
       case 'rss': Object.assign(config, { feed_url: val('wFeedUrl'), scroll_speed: parseInt(val('wScrollSpeed')) || 30, max_items: parseInt(val('wMaxItems')) || 10, font_size: parseInt(val('wFontSize')) || 24, color: val('wColor'), background: val('wBg') }); break;
       case 'text': Object.assign(config, { html: val('wHtml'), css: val('wCss'), background: val('wBg') }); break;

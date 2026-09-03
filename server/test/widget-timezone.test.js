@@ -99,3 +99,45 @@ test('the rendered clock carries the zone that was saved', async () => {
   assert.match(html, /timeZone: 'Europe\/Madrid'/, 'the saved zone reaches the generated script');
   assert.doesNotMatch(html, /timeZone: 'UTC'/, 'not quietly replaced');
 });
+
+// ---------------------------------------------------------------------------
+// #323: seconds are optional, and the clock is not hardcoded to English.
+// ---------------------------------------------------------------------------
+
+const mkClock = (cfg) => post(jwt, { widget_type: 'clock', name: 'c' + crypto.randomBytes(3).toString('hex'), config: cfg });
+const renderOf = async (cfg) => {
+  const w = await (await fetch(BASE + '/api/widgets', mkClock(cfg))).json();
+  return (await fetch(BASE + '/api/widgets/' + w.id + '/render')).text();
+};
+
+test('#323: seconds can be turned off', async () => {
+  const html = await renderOf({ timezone: 'Europe/Madrid', format: '24h', show_seconds: false });
+  assert.doesNotMatch(html, /second:\s*'2-digit'/, 'no seconds requested when show_seconds is false');
+  assert.match(html, /minute:\s*'2-digit'/, 'hours and minutes are still shown');
+});
+
+test('#323: seconds stay on by default, so existing widgets do not change', async () => {
+  for (const cfg of [{ timezone: 'UTC', format: '24h' }, { timezone: 'UTC', format: '24h', show_seconds: true }]) {
+    const html = await renderOf(cfg);
+    assert.match(html, /second:\s*'2-digit'/, 'seconds present when unset or true');
+  }
+});
+
+test('#323: the clock is no longer hardcoded to en-US', async () => {
+  const html = await renderOf({ timezone: 'Europe/Madrid', format: '24h', locale: 'es-ES' });
+  assert.match(html, /toLocaleTimeString\('es-ES'/, 'the configured locale reaches the time');
+  assert.match(html, /toLocaleDateString\('es-ES'/, 'and the date');
+  assert.doesNotMatch(html, /'en-US'/, 'no English fallback left behind');
+});
+
+test('#323: a blank locale means the screen decides, not English', async () => {
+  const html = await renderOf({ timezone: 'Europe/Madrid', format: '24h' });
+  assert.match(html, /toLocaleTimeString\(undefined/, 'undefined = the runtime locale');
+  assert.doesNotMatch(html, /'en-US'/);
+});
+
+test('#323: a junk locale cannot be injected into the emitted script', async () => {
+  const html = await renderOf({ timezone: 'UTC', format: '24h', locale: "es'); alert(1);//" });
+  assert.doesNotMatch(html, /alert\(1\)/, 'not interpolated');
+  assert.match(html, /toLocaleTimeString\(undefined/, 'falls back to the runtime locale');
+});

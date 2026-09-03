@@ -82,6 +82,21 @@ function safeTimezone(tz) {
 }
 
 /*
+ * A BCP-47 tag, structurally — same approach and same expression as slide-render.js's LOCALE_RE.
+ *
+ * ⚠️ EMPTY MEANS "THE PLAYER'S OWN LOCALE", NOT ENGLISH (#323). The clock and date were formatted
+ * with a hardcoded 'en-US', so a Spanish operator got "Wednesday, September 3" on a screen whose
+ * dashboard, timezone and audience were all Spanish, with no setting anywhere to change it. An
+ * empty locale now yields `undefined`, which is how toLocaleTimeString is told to use the runtime's
+ * own locale — the right default for a screen standing in a particular country.
+ */
+const LOCALE_RE = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,2}$/;
+function safeLocale(l) {
+  if (!l || typeof l !== 'string') return 'undefined';      // literal `undefined` in the emitted JS
+  return LOCALE_RE.test(l) ? `'${l}'` : 'undefined';
+}
+
+/*
  * Save-time gate. Returns an error string, or null when the value is fine. A widget config is
  * accepted or refused as a whole, so this is called before the insert/update rather than at render,
  * where the only options left are "wrong time" or "no time".
@@ -495,9 +510,10 @@ function renderClock(c) {
 ${c.show_date !== false ? '<div id="date"></div>' : ''}
 <script>
 function update() {
-  const opts = { hour12: ${c.format !== '24h'}, timeZone: '${safeTimezone(c.timezone)}', hour:'2-digit', minute:'2-digit', second:'2-digit' };
-  document.getElementById('time').textContent = new Date().toLocaleTimeString('en-US', opts);
-  ${c.show_date !== false ? `document.getElementById('date').textContent = new Date().toLocaleDateString('en-US', { timeZone: '${safeTimezone(c.timezone)}', weekday:'long', year:'numeric', month:'long', day:'numeric' });` : ''}
+  // show_seconds defaults TRUE so existing widgets keep the clock they already had (#323).
+  const opts = { hour12: ${c.format !== '24h'}, timeZone: '${safeTimezone(c.timezone)}', hour:'2-digit', minute:'2-digit'${c.show_seconds === false ? '' : ", second:'2-digit'"} };
+  document.getElementById('time').textContent = new Date().toLocaleTimeString(${safeLocale(c.locale)}, opts);
+  ${c.show_date !== false ? `document.getElementById('date').textContent = new Date().toLocaleDateString(${safeLocale(c.locale)}, { timeZone: '${safeTimezone(c.timezone)}', weekday:'long', year:'numeric', month:'long', day:'numeric' });` : ''}
 }
 setInterval(update, 1000); update();
 </script></body></html>`;
