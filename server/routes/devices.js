@@ -319,17 +319,26 @@ router.put('/:id', (req, res) => {
   const device = checkDeviceOwnership(req, res);
   if (!device) return;
 
-  const { name, notes, timezone, orientation, default_content_id, layout_id, ota_enabled, ota_beta, reboot_schedule } = req.body;
+  const { name, notes, timezone, orientation, background_color, default_content_id, layout_id, ota_enabled, ota_beta, reboot_schedule } = req.body;
   // #150: validate orientation against the known enum (previously accepted any string, which
   // let a bad value reach the player -> unknown rotation falls back to landscape silently).
+  // #325: a CSS colour that reaches the player's inline style, so it is constrained to a hex
+  // literal rather than trusted. Empty string clears it back to the player default.
+  if (background_color !== undefined && background_color !== null && background_color !== ''
+      && !/^#[0-9a-fA-F]{3,8}$/.test(String(background_color))) {
+    return res.status(400).json({ error: 'background_color must be a hex colour such as #202020' });
+  }
   if (orientation !== undefined && !deviceSettings.ORIENTATIONS.has(orientation)) {
     return res.status(400).json({ error: `Invalid orientation. Allowed: ${[...deviceSettings.ORIENTATIONS].join(', ')}` });
   }
   // Whitelist allowed fields to prevent SQL injection via field names
-  const ALLOWED_FIELDS = ['name', 'notes', 'timezone', 'orientation', 'default_content_id'];
+  const ALLOWED_FIELDS = ['name', 'notes', 'timezone', 'orientation', 'background_color', 'default_content_id'];
   const updates = [];
   const values = [];
-  Object.entries({ name, notes, timezone, orientation, default_content_id }).forEach(([key, val]) => {
+  // #325: an empty colour means "back to the player default", which is NULL in the column rather
+  // than an empty string the player would try to apply as a CSS value.
+  const bg = background_color === '' ? null : background_color;
+  Object.entries({ name, notes, timezone, orientation, background_color: bg, default_content_id }).forEach(([key, val]) => {
     if (val !== undefined && ALLOWED_FIELDS.includes(key)) {
       updates.push(`${key} = ?`);
       values.push(val);

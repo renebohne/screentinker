@@ -134,6 +134,10 @@ const migrations = [
   'ALTER TABLE content ADD COLUMN folder TEXT',
   // Device orientation and default content
   "ALTER TABLE devices ADD COLUMN orientation TEXT DEFAULT 'landscape'",
+  // #325: the letterbox behind content that does not fill the screen. It was hardcoded black in the
+  // player's stylesheet, which looks like a fault rather than a choice behind a white-background
+  // image. NULL means "use the player default", so existing screens are untouched.
+  "ALTER TABLE devices ADD COLUMN background_color TEXT",
   'ALTER TABLE devices ADD COLUMN default_content_id TEXT',
   // Audio control per assignment
   "ALTER TABLE assignments ADD COLUMN muted INTEGER DEFAULT 0",

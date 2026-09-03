@@ -619,7 +619,7 @@ function buildPlaylistPayload(deviceId) {
   const group_sync = wall_config ? null : resolveGroupSync(device, deviceId);
   // #104: shared shape + zone-reset tail so the device payload and the dashboard
   // preview payload (GET /api/playlists/:id/preview-payload) can never drift.
-  return assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', wall_config, group_sync, timezone, triggers, trigger_config });
+  return assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', background_color: device?.background_color || null, wall_config, group_sync, timezone, triggers, trigger_config });
 }
 
 // #104: the canonical player payload shape, shared by the device path
@@ -627,7 +627,7 @@ function buildPlaylistPayload(deviceId) {
 // Zone reset: if this isn't a real multi-zone layout (single zone or no layout),
 // strip any leftover zone_id so content falls back to the fullscreen renderer
 // instead of binding to a now-gone left/right zone and never playing.
-function assemblePayload({ assignments, layout, orientation, wall_config, group_sync, timezone, triggers, trigger_config }) {
+function assemblePayload({ assignments, layout, orientation, background_color, wall_config, group_sync, timezone, triggers, trigger_config }) {
   let a = Array.isArray(assignments) ? assignments : [];
   // Transition widgets are normalized OUT here (the single device+preview chokepoint): each is dropped
   // from the visible list and its config attached as an opaque `transition` on the item it plays into.
@@ -639,6 +639,9 @@ function assemblePayload({ assignments, layout, orientation, wall_config, group_
     assignments: a,
     layout: layout || null,
     orientation: orientation || 'landscape',
+    // #325: null means "the player's own default", so a screen that has never been given one keeps
+    // the black it has always had. Sent top-level like orientation, not per item.
+    background_color: background_color || null,
     wall_config: wall_config || null,
     group_sync: group_sync || null,
     timezone: timezone || null,

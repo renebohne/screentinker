@@ -4232,6 +4232,14 @@
       const effectiveOrientation = window.WallGeometry
         ? window.WallGeometry.orientationForWallMember(data.orientation, data.wall_config?.rotation)
         : data.orientation;
+      // #325: the letterbox colour behind content that does not fill the frame. Applied before
+      // orientation so a rotation reflow does not flash the old colour. An absent value leaves the
+      // stylesheet's black exactly as it was.
+      if (data.background_color && /^#[0-9a-fA-F]{3,8}$/.test(data.background_color)) {
+        const stage = document.getElementById('playerContainer');
+        if (stage) stage.style.background = data.background_color;
+        document.body.style.background = data.background_color;
+      }
       if (data.orientation) {
         // On BrightSign, rotate the OUTPUT first. Video decodes onto a hardware plane the DOM
         // cannot transform, so the CSS rotation below turns the images and widgets and leaves the

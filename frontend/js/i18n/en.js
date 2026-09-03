@@ -714,6 +714,9 @@ export default {
   'device.event.online': 'Came online',
   // Form
   'device.form.orientation_label': 'Orientation / Rotation',
+  'device.form.background_label': 'Background colour',
+  'device.form.background_reset': 'Use the default',
+  'device.form.background_hint': 'Shown behind content that does not fill the screen. Defaults to black.',
   'device.form.orientation.landscape': 'Landscape (0°)',
   'device.form.orientation.portrait': 'Portrait (90° CW)',
   'device.form.orientation.landscape_flipped': 'Landscape Flipped (180°)',

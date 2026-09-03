@@ -771,6 +771,14 @@ async function loadDevice(deviceId, activeTab = null) {
                 <option value="portrait-flipped" ${'portrait-flipped' === device.orientation ? 'selected' : ''}>${t('device.form.orientation.portrait_flipped')}</option>
               </select>
             </div>
+              <div class="form-group">
+                <label>${t('device.form.background_label')}</label>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <input type="color" id="devBackground" value="${device.background_color || '#000000'}" style="width:60px;height:32px;border:none;cursor:pointer">
+                  <button type="button" class="btn btn-secondary btn-sm" id="devBackgroundReset">${t('device.form.background_reset')}</button>
+                </div>
+                <div style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('device.form.background_hint')}</div>
+              </div>
             <div class="form-group" style="flex:1;margin:0">
               <label>${t('device.form.default_content_label')}</label>
               <select id="deviceDefaultContent" class="input" style="background:var(--bg-input)">
@@ -1632,9 +1640,26 @@ function setupActions(device) {
 
   document.getElementById('saveNotesBtn')?.addEventListener('click', async () => {
     try {
+  // #325: "Use the default" clears the override. A colour input cannot be empty, so the intent is
+  // recorded on the element and read at save time.
+  const bgReset = document.getElementById('devBackgroundReset');
+  const bgInput = document.getElementById('devBackground');
+  if (bgReset && bgInput && !bgReset.dataset.wired) {
+    bgReset.dataset.wired = '1';
+    bgReset.addEventListener('click', () => {
+      bgInput.value = '#000000';
+      bgInput.dataset.cleared = '1';
+    });
+    bgInput.addEventListener('input', () => { bgInput.dataset.cleared = ''; });
+  }
+
       await api.updateDevice(device.id, {
         notes: document.getElementById('deviceNotes').value,
         orientation: document.getElementById('deviceOrientation').value,
+        // #325: the reset button clears the field, which sends '' and the API stores NULL, putting
+        // the screen back on the player's own default rather than pinning it to black.
+        background_color: (document.getElementById('devBackground')?.dataset.cleared === '1')
+          ? '' : (document.getElementById('devBackground')?.value || ''),
         default_content_id: document.getElementById('deviceDefaultContent').value || null,
         ota_enabled: document.getElementById('otaToggle')?.checked ? 1 : 0,
         ota_beta: document.getElementById('otaBetaToggle')?.checked ? 1 : 0,
