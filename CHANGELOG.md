@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+### Added — a plain Crossfade, and it is the default for a new transition widget
+
+The transition library shipped fourteen effects and every one was a set piece: CRT Collapse,
+Datamosh, Film Advance, Van Eck. There was no plain dissolve, so a playlist that just wanted slides
+to melt into each other had to choose between a hard cut and a glitch. Contributed by @rolbk in #315.
+
+The argument for taking it, which was theirs and was right: a dissolve is not a fifteenth effect, it
+is the default transition in every signage product and the one most operators will ever use. "Upload
+your own shader" is the answer for genuinely custom effects, not for the one everybody expects out of
+the box. Nobody should have to write GLSL to get a fade between two slides. `Crossfade` therefore
+sorts first in the manifest and is what a new transition widget previews, and the file sort is
+case-insensitive so that ordering cannot drift back on a later filename.
+
+Two parameters, both 0..1: `ease` (default 1) applies a smoothstep to the linear `progress` every
+player drives, so the dissolve is slow-in and slow-out; `dipToBlack` (default 0) blends toward a
+fade through black. At progress 0 the output is exactly the outgoing frame and at 1 exactly the
+incoming one, so the mounted element underneath matches the last wipe frame with no seam.
+
+No new build step: a `.glsl` flows through the generators that already exist, and the checked-in
+`manifest.json` and `tizen/js/transitions.js` were regenerated with it.
+
+### Fixed — a clock widget could not hide its seconds, and was always English (#323)
+
+`second:'2-digit'` was unconditional, so a clock widget could only ever be HH:MM:SS, while the
+Designer's clock element has had a seconds checkbox all along. There is a setting now, defaulting to
+on so existing widgets are unchanged. The clock was also formatted with a hardcoded `en-US`, so a
+Spanish operator got English weekday and month names on a screen whose dashboard, timezone and
+audience were all Spanish. A blank locale now means the screen's own locale rather than English,
+which is what the Slides clock has always done.
+
+### Changed — llms.txt
+
+There was no `llms.txt`, and the SPA catch-all answered 200 with the dashboard shell for it, so an
+audit read a missing file as a malformed one. Added with an H1, a summary and linked sections, every
+internal link checked against a file on disk.
+
+### Changed — the Tizen bundle byte-identity guard is gone
+
+It arrived with #315 and it was a fair catch: the `#BS-UMD` guard reads the checked-in
+`tizen/js/transitions.js`, so a copy that has drifted from the bundler is one that guard is silently
+not guarding, and it had drifted. Requiring a regeneration commit after every shader change is the
+wrong fix. The cleaner answer is to stop committing that file at all, since `build-wgt.sh`
+regenerates it on every build, and point the existing guard at `bundle()` instead.
+
 ## 2.0.5
 
 ### Fixed — every wipe on a portrait panel was drawn in landscape
