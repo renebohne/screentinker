@@ -242,3 +242,21 @@ describe('Postprocessing & Dithering', () => {
   });
 });
 
+const { render } = require('../lib/embedded-render');
+
+describe('Embedded Renderer with Widgets', () => {
+  test('renders clock widget to PNG buffer', async () => {
+    const item = {
+      id: 'item-clock',
+      widget_id: 'w-clock-1',
+      widget_type: 'clock',
+      widget_config: { format: '24', showDate: true },
+    };
+    const profile = { width: 800, height: 480 };
+    const res = await render(item, null, profile);
+    assert.ok(res.png);
+    assert.ok(Buffer.isBuffer(res.png));
+    assert.ok(res.png.length > 1000);
+  });
+});
+

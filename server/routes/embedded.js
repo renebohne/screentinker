@@ -278,10 +278,17 @@ router.get('/render', resolveAuth, async (req, res) => {
   console.log(`[embedded] Device '${device.name}' (${device.id}) requested frame [item=${itemIndex + 1}/${total}] from ${clientIp}`);
 
   // ── Cache check ─────────────────────────────────────────────────────────────
+  let dynamicRev = item.widget_updated_at || content?.content_updated_at || item.updated_at || 0;
+  if (item.widget_type === 'clock') {
+    dynamicRev = `clock_${Math.floor(Date.now() / 60000)}`; // invalidate every minute
+  } else if (item.widget_type === 'weather') {
+    dynamicRev = `weather_${Math.floor(Date.now() / 600000)}`; // invalidate every 10 min
+  }
+
   const key = cacheKey(
     device.id,
     item.id,
-    content?.content_updated_at || item.updated_at || 0,
+    dynamicRev,
     profile
   );
 

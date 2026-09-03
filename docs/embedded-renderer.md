@@ -125,7 +125,7 @@ Fetches the pre-rendered image for the current playlist item.
 - **`400 Bad Request`**: Device lacks a configured `screen_profile`.
 - **`401 Unauthorized`**: Invalid or missing device token.
 - **`404 Not Found`**: Device not found or no playlist assigned.
-- **`501 Not Implemented`**: Content requires HTML/Puppeteer rendering (Phase 2).
+- **`501 Not Implemented`**: Sent only for unsupported media types (e.g. video files on monochrome e-paper). All HTML widgets (Clock, Weather, RSS, Text, Slides) and remote web pages are rendered server-side via headless Chrome.
 
 ---
 
