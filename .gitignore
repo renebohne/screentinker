@@ -74,3 +74,7 @@ brightsign/*.zip
 # The payload manifest is generated from the zip it describes — tracking it would let the two drift,
 # which is precisely the failure it exists to prevent (advertise one version, serve another).
 brightsign/server-payload.json
+
+# Local temp directory and cache
+temp/
+server/data/

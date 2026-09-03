@@ -73,6 +73,10 @@ CREATE TABLE IF NOT EXISTS devices (
     screen_width    INTEGER,
     screen_height   INTEGER,
     playlist_id     TEXT REFERENCES playlists(id) ON DELETE SET NULL,
+    -- embedded-renderer: JSON screen profile for MCU clients (see lib/embedded-profiles.js)
+    screen_profile  TEXT,
+    -- embedded-renderer: one-time secret for claim polling security
+    claim_secret    TEXT,
     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
@@ -628,4 +632,13 @@ CREATE INDEX IF NOT EXISTS idx_agency_notifications_unsent ON agency_notificatio
 CREATE TABLE IF NOT EXISTS schema_migrations (
     id              TEXT PRIMARY KEY,
     ran_at          INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+
+-- embedded-renderer: server-side item cursor so an MCU can wake, fetch the current frame,
+-- then sleep for exactly X-ST-Expires-In seconds without any local playlist state.
+-- started_at = Unix seconds; the route advances item_index when now-started_at >= duration_sec.
+CREATE TABLE IF NOT EXISTS embedded_cursor (
+    device_id   TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+    item_index  INTEGER NOT NULL DEFAULT 0,
+    started_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );

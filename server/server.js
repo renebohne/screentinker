@@ -1373,6 +1373,12 @@ if (process.env.TELEMETRY_COLLECTOR === '1') {
 // No tenancy — billing is platform-global.
 app.use('/api/billing', bearerAuth, require('./routes/billing'));
 
+// Embedded renderer — pre-renders playlist content as device-native images (1-bit e-paper,
+// RGB565, etc.) for MCUs that call HTTP instead of running a browser. Handles its own dual
+// auth (device token OR API token) so it cannot use the PUBLIC_ROUTERS bearerAuth loop.
+app.use('/api/embedded', require('./routes/embedded'));
+
+
 // Activity logging middleware now mounted earlier (just before the workspace
 // route block) - leaving this comment here as a breadcrumb for the move.
 
