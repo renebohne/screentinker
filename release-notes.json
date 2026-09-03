@@ -14,6 +14,17 @@
   ],
   "releases": [
     {
+      "version": "2.0.6",
+      "date": "2026-09-03",
+      "notes": [
+        "E-paper and microcontroller screens are now supported. The server can render what a screen should show as a device-ready image, so a cheap battery panel with no browser on it can be a display. It sleeps between updates and only wakes when something has actually changed.",
+        "You can upload your own transition effect. Add a shader file in the transition settings and it appears alongside the built-in effects, on your screens only. The built-in set is unchanged.",
+        "The Android app now installs on Android 6.0, so older boxes and tablets can run the full player instead of only a browser page.",
+        "Schedules can repeat on specific days of the week, and a repeat can now be given an end date. Both were possible behind the scenes but there was no way to ask for them.",
+        "Screens can have their own background colour instead of always black, the weather widget now scales properly in small areas, and the clock can hide its seconds and show dates in your own language."
+      ]
+    },
+    {
       "version": "2.0.5",
       "date": "2026-09-02",
       "notes": [

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.6
 
 ### Added — e-paper and microcontroller displays
 
