@@ -16,9 +16,24 @@
 const fs = require('fs');
 const path = require('path');
 const { Jimp } = require('jimp');
+const config = require('../config');
 
-function uploadDir() {
-  return process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
+/*
+ * ⚠️ ASK config, DO NOT RE-DERIVE THIS.
+ *
+ * This used to read `process.env.UPLOAD_DIR` and fall back to `<server>/uploads`. Neither matches
+ * how the rest of the server resolves uploads: config.js uses `UPLOADS_DIR` (plural) and falls back
+ * to `DATA_DIR/uploads`. `UPLOAD_DIR` is not a variable this project sets anywhere.
+ *
+ * The consequence was invisible in a dev checkout and total in production. The Docker image runs
+ * with DATA_DIR=/data, so content lands in /data/uploads/content while this looked in
+ * /app/server/uploads/content — and the local-image path, the one native renderer that needs no
+ * browser, answered 501 "No renderable items in playlist" for every image on the shipped image.
+ * Reproduced end to end: 501 as written, 200 with exactly 48000 bytes (800x480 packed 1-bit) once
+ * the directory matched.
+ */
+function contentDir() {
+  return config.contentDir;
 }
 
 // MIME types Jimp can decode natively
@@ -141,7 +156,7 @@ process.on('SIGINT', () => { closeBrowser(); });
 // ─── Native Image Renderers (Jimp) ───────────────────────────────────────────
 
 async function renderLocalImage(content, profile) {
-  const filepath = path.join(uploadDir(), 'content', content.filepath);
+  const filepath = path.join(contentDir(), content.filepath);
   if (!fs.existsSync(filepath)) {
     throw Object.assign(new Error('Content file not found on disk'), { code: 'NOT_FOUND' });
   }
