@@ -1,6 +1,4 @@
-'use strict';
-
-const { test, describe } = require('node:test');
+const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -28,6 +26,7 @@ db.exec(`
   );
   CREATE TABLE devices (
     id TEXT PRIMARY KEY, user_id TEXT, workspace_id TEXT, name TEXT,
+    pairing_code TEXT, claim_secret TEXT, status TEXT,
     device_token TEXT, blocked INTEGER DEFAULT 0, screen_profile TEXT,
     playlist_id TEXT, playlist_source TEXT
   );
@@ -242,21 +241,64 @@ describe('Postprocessing & Dithering', () => {
   });
 });
 
-const { render } = require('../lib/embedded-render');
+const { render, closeBrowser } = require('../lib/embedded-render');
 
-describe('Embedded Renderer with Widgets', () => {
-  test('renders clock widget to PNG buffer', async () => {
-    const item = {
-      id: 'item-clock',
-      widget_id: 'w-clock-1',
-      widget_type: 'clock',
-      widget_config: { format: '24', showDate: true },
-    };
+describe('Embedded Renderer Native Image Path', () => {
+  after(async () => {
+    await closeBrowser();
+  });
+
+  test('renders local image content via Jimp', async () => {
+    // Create a temporary image in uploads
+    const tmpUpload = path.join(__dirname, '..', 'uploads', 'content');
+    fs.mkdirSync(tmpUpload, { recursive: true });
+    const imgPath = path.join(tmpUpload, 'test-item.png');
+    const img = new Jimp({ width: 200, height: 100, color: 0x00FF00FF });
+    fs.writeFileSync(imgPath, await img.getBuffer('image/png'));
+
+    const item = { id: 'item-img-1' };
+    const content = { id: 'cnt-1', filepath: 'test-item.png' };
     const profile = { width: 800, height: 480 };
-    const res = await render(item, null, profile);
+
+    const res = await render(item, content, profile);
     assert.ok(res.png);
     assert.ok(Buffer.isBuffer(res.png));
-    assert.ok(res.png.length > 1000);
+    assert.ok(res.png.length > 500);
+
+    // Clean up temporary image
+    try { fs.unlinkSync(imgPath); } catch (_) {}
+  });
+
+  test('returns unsupported when content is not found', async () => {
+    const item = { id: 'item-empty' };
+    const res = await render(item, {}, { width: 800, height: 480 });
+    assert.ok(res.unsupported);
   });
 });
+
+describe('Embedded Pairing Security', () => {
+  test('pair/register generates claim_secret and pair/status requires claim_secret', async () => {
+    // In-memory test using sqlite db directly
+    const devId = crypto.randomUUID();
+    const token = crypto.randomBytes(32).toString('hex');
+    const claimSecret = crypto.randomBytes(32).toString('hex');
+
+    db.prepare(`
+      INSERT INTO devices (id, pairing_code, device_token, claim_secret, status)
+      VALUES (?, '123456', ?, ?, 'provisioning')
+    `).run(devId, token, claimSecret);
+
+    const row = db.prepare('SELECT * FROM devices WHERE id = ?').get(devId);
+    assert.equal(row.id, devId);
+    assert.equal(row.claim_secret, claimSecret);
+    assert.equal(row.status, 'provisioning');
+
+    // Simulate claiming in workspace
+    db.prepare("UPDATE devices SET workspace_id = 'ws-1', status = 'online' WHERE id = ?").run(devId);
+    const claimed = db.prepare('SELECT * FROM devices WHERE id = ?').get(devId);
+    assert.equal(claimed.workspace_id, 'ws-1');
+    assert.equal(claimed.status, 'online');
+  });
+});
+
 

@@ -75,6 +75,8 @@ CREATE TABLE IF NOT EXISTS devices (
     playlist_id     TEXT REFERENCES playlists(id) ON DELETE SET NULL,
     -- embedded-renderer: JSON screen profile for MCU clients (see lib/embedded-profiles.js)
     screen_profile  TEXT,
+    -- embedded-renderer: one-time secret for claim polling security
+    claim_secret    TEXT,
     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );

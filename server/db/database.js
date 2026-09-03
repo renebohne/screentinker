@@ -1589,6 +1589,8 @@ const migrations = [
   // Schema: { width, height, rotation, colorDepth, dither, outputFormat }
   // See server/lib/embedded-profiles.js for the preset library and field vocabulary.
   'ALTER TABLE devices ADD COLUMN screen_profile TEXT',
+  // embedded-renderer: one-time secret for claim polling security (see routes/embedded.js)
+  'ALTER TABLE devices ADD COLUMN claim_secret TEXT',
 
   // embedded-renderer: server-side item cursor so an MCU can wake, fetch, sleep without
   // any local state. started_at is Unix seconds; the route advances item_index when

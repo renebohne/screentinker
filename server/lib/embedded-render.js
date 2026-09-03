@@ -1,23 +1,21 @@
 'use strict';
 
 /*
- * Embedded renderer — Jimp + Puppeteer backends.
+ * Embedded renderer — Pure Jimp (production) + Optional Headless Browser (dev/opt-in).
  *
  * Takes a resolved playlist item + content row + screen_profile and returns a raw PNG
  * buffer ready for embedded-postprocess.js.
  *
- * Supported item types:
- *   image / local file  — decoded & cropped with Jimp, return PNG.
- *   remote_url          — direct images decoded with Jimp; web pages rendered with Puppeteer.
- *   widget (clock, weather, rss, text, slide, etc.) — rendered to DOM and screenshotted with Puppeteer.
- *   slide               — rendered with Puppeteer slide template engine.
+ * Zero-browser architecture:
+ *   image / local file  — decoded, resized & cropped with Jimp (production dependency), return PNG.
+ *   remote_url (images) — fetched & processed with Jimp, return PNG.
+ *   widget / web page   — optionally rendered with Puppeteer if installed and Chrome is found;
+ *                         otherwise degrades gracefully returning { unsupported: true, reason }.
  */
 
 const fs = require('fs');
 const path = require('path');
 const { Jimp } = require('jimp');
-const puppeteer = require('puppeteer-core');
-const { renderWidgetHtml } = require('../routes/widgets');
 
 function uploadDir() {
   return process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
@@ -47,7 +45,7 @@ function looksLikeImage(url, contentType) {
   }
 }
 
-// ─── Chrome / Chromium Path Detection ─────────────────────────────────────────
+// ─── Optional Chrome / Chromium Path Detection ───────────────────────────────
 function findChromePath() {
   const candidates = [
     process.env.CHROME_PATH,
@@ -75,13 +73,31 @@ function findChromePath() {
 
 let browserInstance = null;
 
+function getPuppeteer() {
+  try {
+    return require('puppeteer-core');
+  } catch (_) {
+    return null;
+  }
+}
+
 async function getBrowser() {
   if (browserInstance && browserInstance.connected) {
     return browserInstance;
   }
+
+  const puppeteer = getPuppeteer();
+  if (!puppeteer) {
+    const err = new Error('puppeteer-core is not installed. Browser rendering is unavailable.');
+    err.code = 'BROWSER_UNAVAILABLE';
+    throw err;
+  }
+
   const chromePath = findChromePath();
   if (!chromePath) {
-    throw new Error('Chrome/Chromium executable not found. Set CHROME_PATH environment variable.');
+    const err = new Error('Chrome/Chromium executable not found. Set CHROME_PATH environment variable.');
+    err.code = 'BROWSER_NOT_FOUND';
+    throw err;
   }
 
   browserInstance = await puppeteer.launch({
@@ -104,7 +120,25 @@ async function getBrowser() {
   return browserInstance;
 }
 
-// ─── Renderers ────────────────────────────────────────────────────────────────
+async function closeBrowser() {
+  if (browserInstance) {
+    try {
+      await browserInstance.close();
+    } catch (_) {}
+    browserInstance = null;
+  }
+}
+
+// Clean lifecycle hooks to prevent hanging processes
+process.on('exit', () => {
+  if (browserInstance) {
+    try { browserInstance.process()?.kill(); } catch (_) {}
+  }
+});
+process.on('SIGTERM', () => { closeBrowser(); });
+process.on('SIGINT', () => { closeBrowser(); });
+
+// ─── Native Image Renderers (Jimp) ───────────────────────────────────────────
 
 async function renderLocalImage(content, profile) {
   const filepath = path.join(uploadDir(), 'content', content.filepath);
@@ -155,31 +189,10 @@ async function renderWidgetOrHtml(html, profile) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   try {
-    await page.setViewport({
-      width: profile.width,
-      height: profile.height,
-      deviceScaleFactor: 1,
-    });
-
-    await page.setContent(html, {
-      waitUntil: ['load', 'networkidle0'],
-      timeout: 8000,
-    }).catch(() => {});
-
-    await new Promise(resolve => setTimeout(resolve, 300));
-
-    const png = await page.screenshot({
-      type: 'png',
-      fullPage: false,
-      clip: {
-        x: 0,
-        y: 0,
-        width: profile.width,
-        height: profile.height,
-      },
-    });
-
-    return Buffer.from(png);
+    await page.setViewport({ width: profile.width, height: profile.height });
+    await page.setContent(html, { waitUntil: 'load', timeout: 5000 });
+    const snap = await page.screenshot({ type: 'png' });
+    return Buffer.from(snap);
   } finally {
     await page.close().catch(() => {});
   }
@@ -204,9 +217,20 @@ async function render(item, content, profile) {
       config = item.widget_config;
     }
 
-    const html = renderWidgetHtml(type, config);
-    const png = await renderWidgetOrHtml(html, profile);
-    return { png };
+    try {
+      const { renderWidgetHtml } = require('../routes/widgets');
+      const html = renderWidgetHtml(type, config);
+      const png = await renderWidgetOrHtml(html, profile);
+      return { png };
+    } catch (e) {
+      if (e.code === 'BROWSER_UNAVAILABLE' || e.code === 'BROWSER_NOT_FOUND') {
+        return {
+          unsupported: true,
+          reason: 'Widget rendering requires a browser (set CHROME_PATH). Image content works natively without a browser.',
+        };
+      }
+      throw e;
+    }
   }
 
   // ── Remote Web Page or Remote Image ──────────────────────────────────────
@@ -214,20 +238,30 @@ async function render(item, content, profile) {
     const png = await renderRemoteImage(content, profile);
     if (png) return { png };
 
-    // Remote web page fallback via Puppeteer
-    const browser = await getBrowser();
-    const page = await browser.newPage();
+    // Remote web page fallback via optional browser
     try {
-      await page.setViewport({ width: profile.width, height: profile.height });
-      await page.goto(content.remote_url, { waitUntil: 'load', timeout: 10000 });
-      const snap = await page.screenshot({ type: 'png' });
-      return { png: Buffer.from(snap) };
-    } finally {
-      await page.close().catch(() => {});
+      const browser = await getBrowser();
+      const page = await browser.newPage();
+      try {
+        await page.setViewport({ width: profile.width, height: profile.height });
+        await page.goto(content.remote_url, { waitUntil: 'load', timeout: 10000 });
+        const snap = await page.screenshot({ type: 'png' });
+        return { png: Buffer.from(snap) };
+      } finally {
+        await page.close().catch(() => {});
+      }
+    } catch (e) {
+      if (e.code === 'BROWSER_UNAVAILABLE' || e.code === 'BROWSER_NOT_FOUND') {
+        return {
+          unsupported: true,
+          reason: 'Web page rendering requires a browser (set CHROME_PATH). Direct images work natively.',
+        };
+      }
+      throw e;
     }
   }
 
-  // ── Local Image ──────────────────────────────────────────────────────────
+  // ── Local Image (Primary native path) ────────────────────────────────────
   if (content && content.filepath) {
     const png = await renderLocalImage(content, profile);
     return { png };
@@ -236,4 +270,4 @@ async function render(item, content, profile) {
   return { unsupported: true, reason: 'No renderable source found for this content item.' };
 }
 
-module.exports = { render };
+module.exports = { render, closeBrowser, getBrowser };

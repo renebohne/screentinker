@@ -44,6 +44,7 @@ const { parseProfile, listPresets } = require('../lib/embedded-profiles');
 const { cacheKey, toETag, isNotModified, get: cacheGet, set: cacheSet } = require('../lib/embedded-cache');
 const { render }            = require('../lib/embedded-render');
 const { postprocess }       = require('../lib/embedded-postprocess');
+const pairLockout           = require('../lib/pair-lockout');
 
 // ─── Auth helper ───────────────────────────────────────────────────────────────
 
@@ -203,7 +204,13 @@ function resolveCurrentItem(deviceId, forceIndex) {
 
 // ─── POST /api/embedded/pair/register ───────────────────────────────────────────
 // An embedded device (e.g. ESP32) registers a 6-digit pairing code to show on screen.
+// Returns a cryptographically random claim_secret that the device must use to poll status.
 router.post('/pair/register', (req, res) => {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  if (pairLockout.isLocked(ip)) {
+    return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
+  }
+
   const { pairing_code, screen_profile, screen_width, screen_height } = req.body || {};
   if (!pairing_code || String(pairing_code).trim().length !== 6) {
     return res.status(400).json({ error: 'Valid 6-digit pairing_code required' });
@@ -212,15 +219,16 @@ router.post('/pair/register', (req, res) => {
   const code = String(pairing_code).trim();
   const id = crypto.randomUUID();
   const newToken = crypto.randomBytes(32).toString('hex');
+  const claimSecret = crypto.randomBytes(32).toString('hex');
   const width = parseInt(screen_width) || 800;
   const height = parseInt(screen_height) || 480;
   const profile = typeof screen_profile === 'object' ? JSON.stringify(screen_profile) : (screen_profile || 'seeed-reterminal-sticky');
 
   try {
     db.prepare(`
-      INSERT INTO devices (id, pairing_code, device_token, status, client_type, screen_profile, screen_width, screen_height, render_width, render_height, last_heartbeat)
-      VALUES (?, ?, ?, 'provisioning', 'embedded', ?, ?, ?, ?, ?, strftime('%s','now'))
-    `).run(id, code, newToken, profile, width, height, width, height);
+      INSERT INTO devices (id, pairing_code, device_token, claim_secret, status, client_type, screen_profile, screen_width, screen_height, render_width, render_height, last_heartbeat)
+      VALUES (?, ?, ?, ?, 'provisioning', 'embedded', ?, ?, ?, ?, ?, strftime('%s','now'))
+    `).run(id, code, newToken, claimSecret, profile, width, height, width, height);
   } catch (e) {
     return res.status(409).json({ error: 'Pairing code collision. Retry with a new code.' });
   }
@@ -229,24 +237,54 @@ router.post('/pair/register', (req, res) => {
     status: 'ok',
     device_id: id,
     pairing_code: code,
+    claim_secret: claimSecret,
     message: 'Display registered for pairing. Show code on screen.',
   });
 });
 
 // ─── GET /api/embedded/pair/status ──────────────────────────────────────────────
 // Embedded device polls to check if the user entered the pairing code in the dashboard.
+// Protected by claim_secret (Bearer token or ?claim_secret=).
 router.get('/pair/status', (req, res) => {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  if (pairLockout.isLocked(ip)) {
+    return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
+  }
+
   const { device_id } = req.query;
   if (!device_id) {
     return res.status(400).json({ error: 'device_id required' });
   }
 
-  const device = db.prepare('SELECT id, status, workspace_id, device_token, pairing_code FROM devices WHERE id = ?').get(device_id);
+  const authHeader = req.headers['authorization'];
+  const claimSecret = (authHeader && authHeader.startsWith('Bearer '))
+    ? authHeader.slice(7).trim()
+    : (req.query.claim_secret ? String(req.query.claim_secret).trim() : null);
+
+  if (!claimSecret) {
+    pairLockout.recordFailure(ip);
+    return res.status(401).json({ error: 'Authorization: Bearer <claim_secret> required' });
+  }
+
+  const device = db.prepare('SELECT id, status, workspace_id, device_token, pairing_code, claim_secret FROM devices WHERE id = ?').get(device_id);
   if (!device) {
+    pairLockout.recordFailure(ip);
     return res.status(404).json({ error: 'Device not found' });
   }
 
+  // Constant-time comparison for claim_secret
+  const bufA = Buffer.from(claimSecret, 'utf8');
+  const bufB = Buffer.from(device.claim_secret || '', 'utf8');
+  if (bufA.length === 0 || bufA.length !== bufB.length || !crypto.timingSafeEqual(bufA, bufB)) {
+    pairLockout.recordFailure(ip);
+    return res.status(401).json({ error: 'Invalid claim secret' });
+  }
+
+  // Once claimed into a workspace, return token and burn claim_secret
   if (device.workspace_id && device.status !== 'provisioning') {
+    db.prepare("UPDATE devices SET claim_secret = NULL WHERE id = ?").run(device_id);
+    pairLockout.reset(ip);
+
     return res.json({
       paired: true,
       status: 'online',
