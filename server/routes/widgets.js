@@ -1490,3 +1490,4 @@ function renderDiagSmoothness(config) {
 }
 
 module.exports = router;
+module.exports.renderWidgetHtml = renderWidgetHtml;

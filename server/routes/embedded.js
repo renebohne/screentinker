@@ -141,16 +141,19 @@ function resolveCurrentItem(deviceId, forceIndex) {
   const { playlist_id } = resolveDevicePlaylist(deviceId);
   if (!playlist_id) return null;
 
-  // Fetch all active, published items in playlist order.
+  // Fetch all active, published items in playlist order (joining content and widgets).
   const items = db.prepare(`
     SELECT pi.*, c.mime_type, c.filepath, c.remote_url, c.thumbnail_path,
-           c.updated_at AS content_updated_at, c.id AS content_id
+           c.updated_at AS content_updated_at, c.id AS content_id,
+           w.widget_type, w.config AS widget_config, w.name AS widget_name,
+           w.updated_at AS widget_updated_at
     FROM playlist_items pi
     JOIN playlists pl ON pl.id = pi.playlist_id
     LEFT JOIN content c ON c.id = pi.content_id
+    LEFT JOIN widgets w ON pi.widget_id = w.id
     WHERE pi.playlist_id = ?
       AND (pl.status = 'published' OR pl.status IS NULL)
-      AND (c.is_active IS NULL OR c.is_active = 1)
+      AND (c.id IS NULL OR c.is_active IS NULL OR c.is_active = 1)
     ORDER BY pi.sort_order ASC, pi.id ASC
   `).all(playlist_id);
 
@@ -309,17 +312,31 @@ router.get('/render', resolveAuth, async (req, res) => {
 
   // ── Render ──────────────────────────────────────────────────────────────────
   let renderResult;
-  try {
-    renderResult = await render(item, content, profile);
-  } catch (e) {
-    console.error('[embedded] render error:', e.message);
-    return res.status(500).json({ error: `Render failed: ${e.message}` });
+  let renderItem = item;
+  let renderContent = content;
+  let renderIndex = itemIndex;
+
+  for (let attempt = 0; attempt < total; attempt++) {
+    try {
+      renderResult = await render(renderItem, renderContent, profile);
+      if (!renderResult.unsupported) break;
+    } catch (e) {
+      console.warn(`[embedded] item ${renderIndex} render error: ${e.message}`);
+    }
+    if (attempt < total - 1) {
+      renderIndex = (renderIndex + 1) % total;
+      const nextResolved = resolveCurrentItem(device.id, renderIndex);
+      if (nextResolved) {
+        renderItem = nextResolved.item;
+        renderContent = nextResolved.content;
+      }
+    }
   }
 
-  if (renderResult.unsupported) {
+  if (!renderResult || renderResult.unsupported) {
     return res.status(501).json({
       error: 'Content type not yet supported by Phase 1 renderer.',
-      detail: renderResult.reason,
+      detail: renderResult?.reason || 'No renderable items in playlist',
     });
   }
 
