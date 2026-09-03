@@ -24,7 +24,15 @@ const { MANIFEST } = require('../lib/transition-config');
 
 const MAX_SOURCE_BYTES = 64 * 1024;   // a shader is a couple of KB; this is generous
 const MAX_PARAMS = 8;                 // more than this is an unusable picker, not a shader
-const MAX_PER_WORKSPACE = 50;
+/*
+ * ⚠️ THE CAP IS PER ORGANISATION, NOT PER WORKSPACE.
+ *
+ * Workspaces are cheap to create, so a per-workspace cap is not a cap: anyone hitting it can make
+ * another workspace and carry on. The organisation is the billing and ownership boundary, so it is
+ * the boundary the limit belongs on. Isolation stays per workspace — one workspace still cannot see
+ * or delete another's shader, even inside the same org.
+ */
+const MAX_PER_ORG = 50;
 
 const BUILTIN_IDS = new Set(MANIFEST.map((m) => m.id));
 
@@ -84,9 +92,16 @@ router.post('/', (req, res) => {
   const problem = validate(source);
   if (problem) return res.status(400).json({ error: problem });
 
-  const count = db.prepare('SELECT COUNT(*) n FROM custom_shaders WHERE workspace_id = ?').get(req.workspaceId).n;
-  if (count >= MAX_PER_WORKSPACE) {
-    return res.status(400).json({ error: `This workspace already has ${MAX_PER_WORKSPACE} custom transitions.` });
+  // Count across every workspace in this workspace's organisation. A workspace with no organisation
+  // (single-tenant self-host) counts only itself, which is the same number by definition.
+  const org = db.prepare('SELECT organization_id FROM workspaces WHERE id = ?').get(req.workspaceId);
+  const count = org && org.organization_id
+    ? db.prepare(`SELECT COUNT(*) n FROM custom_shaders cs
+                    JOIN workspaces w ON w.id = cs.workspace_id
+                   WHERE w.organization_id = ?`).get(org.organization_id).n
+    : db.prepare('SELECT COUNT(*) n FROM custom_shaders WHERE workspace_id = ?').get(req.workspaceId).n;
+  if (count >= MAX_PER_ORG) {
+    return res.status(400).json({ error: `This organisation already has ${MAX_PER_ORG} custom transitions.` });
   }
 
   const header = headerOf(source);

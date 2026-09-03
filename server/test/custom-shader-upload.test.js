@@ -136,3 +136,72 @@ test('#320: every player merges the sources into the lookup it already has', () 
   assert.match(kt, /uploaded\[shaderId\]\?\.let \{ return it \}/, 'android checks uploads before assets');
   assert.match(kt, /if \(k\.startsWith\("custom-"\)\) uploaded\[k\] = v/, 'and refuses to hold a non-custom id');
 });
+
+// ---------------------------------------------------------------------------
+// Tenancy: isolated per workspace, capped per organisation.
+// ---------------------------------------------------------------------------
+
+const Database = require('better-sqlite3');
+
+test('#320: one workspace cannot read or delete another workspace\'s shader', async () => {
+  // A second, unrelated account -> its own workspace and its own organisation.
+  const email2 = 'cs2' + crypto.randomBytes(4).toString('hex') + '@x.local';
+  const jwt2 = (await (await fetch(BASE + '/api/auth/register', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: email2, password: 'Passw0rd123' }),
+  })).json()).token;
+  const auth2 = (extra) => ({ headers: { Authorization: 'Bearer ' + jwt2, ...(extra || {}) } });
+
+  const mine = await (await fetch(BASE + '/api/transitions/custom', post({ source: GOOD, name: 'Mine Only' }))).json();
+  // They upload one too, so the isolation is two-way and the payload fixture below is real.
+  const theirs = await (await fetch(BASE + '/api/transitions/custom', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + jwt2, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: GOOD, name: 'Theirs Only' }),
+  })).json();
+
+  // Each sees only its own.
+  const theirList = await (await fetch(BASE + '/api/transitions/custom', auth2())).json();
+  assert.ok(!theirList.some((x) => x.id === mine.id), 'another workspace does not list mine');
+  assert.ok(theirList.some((x) => x.id === theirs.id), 'but does list its own');
+  const myList = await (await fetch(BASE + '/api/transitions/custom', get())).json();
+  assert.ok(!myList.some((x) => x.id === theirs.id), 'and I do not list theirs');
+
+  // They cannot delete it.
+  const delRes = await fetch(BASE + '/api/transitions/custom/' + mine.id, {
+    method: 'DELETE', ...auth2(),
+  });
+  assert.equal(delRes.status, 403, 'deleting across workspaces is refused');
+
+  // And it is still there afterwards.
+  const stillMine = await (await fetch(BASE + '/api/transitions/custom', get())).json();
+  assert.ok(stillMine.some((x) => x.id === mine.id), 'and it survived the attempt');
+});
+
+test('#320: a device is only ever sent its OWN workspace\'s shaders', () => {
+  const db = new Database(path.join(DATA_DIR, 'db', 'remote_display.db'), { readonly: true });
+  try {
+    const rows = db.prepare('SELECT workspace_id, shader_id FROM custom_shaders').all();
+    const byWs = new Map();
+    for (const r of rows) byWs.set(r.workspace_id, (byWs.get(r.workspace_id) || 0) + 1);
+    assert.ok(byWs.size >= 2, 'the fixture really does have two workspaces holding shaders');
+
+    // The payload helpers select on workspace_id, so a device in workspace A can never be handed a
+    // shader stored against workspace B. Assert the query shape rather than trusting the comment.
+    const ds = fs.readFileSync(path.join(__dirname, '..', 'ws', 'deviceSocket.js'), 'utf8');
+    assert.match(ds, /FROM custom_shaders WHERE workspace_id = \?/,
+      'the registry is scoped to the device workspace');
+    assert.match(ds, /WHERE workspace_id = \? AND shader_id = \?/,
+      'and so is each source lookup');
+    assert.match(ds, /customShaderRegistry\(workspace_id\)/, 'using the device row workspace');
+  } finally { db.close(); }
+});
+
+test('#320: the cap counts across the whole organisation, not one workspace', () => {
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'custom-shaders.js'), 'utf8');
+  assert.match(route, /const MAX_PER_ORG/, 'the limit is named per organisation');
+  assert.match(route, /JOIN workspaces w ON w\.id = cs\.workspace_id/,
+    'counting joins through workspaces');
+  assert.match(route, /WHERE w\.organization_id = \?/, 'and groups by the organisation');
+  assert.doesNotMatch(route, /MAX_PER_WORKSPACE/, 'the per-workspace cap is gone');
+});
