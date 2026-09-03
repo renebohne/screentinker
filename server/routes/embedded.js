@@ -1,0 +1,356 @@
+'use strict';
+
+/*
+ * Embedded renderer route.
+ *
+ * Provides two endpoints for embedded devices (ESP32, Raspberry Pi, etc.):
+ *
+ *   GET /api/embedded/render
+ *     Returns a pre-rendered image of the device's current playlist item,
+ *     formatted for the device's screen (resolution, color depth, dithering).
+ *     Supports HTTP 304 Not Modified via ETag so the MCU can skip SPI writes.
+ *
+ *   GET /api/embedded/info
+ *     Returns JSON metadata (no image): screen profile, current item, timing.
+ *     Useful for MCU startup negotiation and debugging.
+ *
+ * Authentication — two paths, resolved in this order:
+ *   1. Device token:  Authorization: Bearer <device_token>  +  ?device_id=<id>
+ *      The same credential the device uses for its WebSocket connection.
+ *      Sets req.device, req.workspaceId.
+ *   2. API token:     Authorization: Bearer st_...  (for preview/dashboard use)
+ *      Requires ?device_id=<id>. The token must be scoped to the same workspace
+ *      as the target device. Sets req.user, req.workspaceId (via bearerAuth +
+ *      resolveTenancy applied inline).
+ *
+ * This route is mounted MANUALLY in server.js (not via api-surface.js PUBLIC_ROUTERS)
+ * because the dual auth model — device token OR API token — does not fit the
+ * bearerAuth loop that all PUBLIC_ROUTERS share.
+ *
+ * ⚠️ Never call stripDeviceSecrets() on req.device before using it here; we only
+ *    read workspace_id and screen_profile, we never return the row to the client.
+ */
+
+const express = require('express');
+const router  = express.Router();
+const crypto  = require('crypto');
+
+const { db }                = require('../db/database');
+const { deviceTokenAuth }   = require('../middleware/deviceTokenAuth');
+const { bearerAuth }        = require('../middleware/apiToken');
+const { resolveTenancy }    = require('../lib/tenancy');
+const { resolveDevicePlaylist } = require('../lib/resolve-device-playlist');
+const { parseProfile, listPresets } = require('../lib/embedded-profiles');
+const { cacheKey, toETag, isNotModified, get: cacheGet, set: cacheSet } = require('../lib/embedded-cache');
+const { render }            = require('../lib/embedded-render');
+const { postprocess }       = require('../lib/embedded-postprocess');
+
+// ─── Auth helper ───────────────────────────────────────────────────────────────
+
+/*
+ * Resolve authentication for the embedded endpoints.
+ *
+ * Tries device token first. If the Authorization header starts with 'Bearer st_',
+ * falls through to the standard API token path.
+ *
+ * After resolution, req.device (device token path) or req.user (API token path)
+ * is set, and req.workspaceId is always set.
+ *
+ * Returns false and sends a 401/400 response if auth fails.
+ */
+function resolveAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  if (header.startsWith('Bearer st_')) {
+    // API token path (preview / dashboard use)
+    return bearerAuth(req, res, (err) => {
+      if (err) return next(err);
+      resolveTenancy(req, res, next);
+    });
+  }
+  // Device token path
+  return deviceTokenAuth(req, res, next);
+}
+
+/*
+ * After resolveAuth, get the target device row.
+ *
+ * - Device token path: req.device is already set.
+ * - API token path: ?device_id is required; verify device is in the caller's workspace.
+ */
+function resolveDevice(req, res) {
+  if (req.device) return req.device;
+
+  const deviceId = req.query.device_id;
+  if (!deviceId) {
+    res.status(400).json({ error: 'device_id query parameter required' });
+    return null;
+  }
+
+  const device = db.prepare('SELECT * FROM devices WHERE id = ?').get(deviceId);
+  if (!device) {
+    res.status(404).json({ error: 'Device not found' });
+    return null;
+  }
+  if (device.workspace_id !== req.workspaceId) {
+    res.status(403).json({ error: 'Device belongs to a different workspace' });
+    return null;
+  }
+  return device;
+}
+
+function touchDeviceHeartbeat(device, req) {
+  const clientIp = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || req.ip || '').replace(/^::ffff:/, '');
+  try {
+    db.prepare(`
+      UPDATE devices
+      SET status = 'online',
+          last_heartbeat = strftime('%s','now'),
+          ip_address = CASE WHEN ? != '' THEN ? ELSE ip_address END,
+          updated_at = strftime('%s','now')
+      WHERE id = ?
+    `).run(clientIp, clientIp, device.id);
+  } catch {
+    // non-fatal
+  }
+  return clientIp;
+}
+
+
+// ─── Item cursor helpers ────────────────────────────────────────────────────────
+
+const CURSOR_GET = db.prepare(
+  'SELECT item_index, started_at FROM embedded_cursor WHERE device_id = ?'
+);
+const CURSOR_UPSERT = db.prepare(`
+  INSERT INTO embedded_cursor (device_id, item_index, started_at)
+  VALUES (?, ?, strftime('%s','now'))
+  ON CONFLICT(device_id) DO UPDATE SET item_index = excluded.item_index,
+                                       started_at = strftime('%s','now')
+`);
+
+/*
+ * Resolve the current playlist item for a device, advancing the cursor if the
+ * current item's duration has elapsed.
+ *
+ * @param {string} deviceId
+ * @param {string|null} forceIndex  Optional ?item= override (for testing).
+ * @returns {{ item, content, itemIndex, expiresIn } | null}
+ *   null when no playlist or no items.
+ */
+function resolveCurrentItem(deviceId, forceIndex) {
+  const { playlist_id } = resolveDevicePlaylist(deviceId);
+  if (!playlist_id) return null;
+
+  // Fetch all active, published items in playlist order.
+  const items = db.prepare(`
+    SELECT pi.*, c.mime_type, c.filepath, c.remote_url, c.thumbnail_path,
+           c.updated_at AS content_updated_at, c.id AS content_id
+    FROM playlist_items pi
+    JOIN playlists pl ON pl.id = pi.playlist_id
+    LEFT JOIN content c ON c.id = pi.content_id
+    WHERE pi.playlist_id = ?
+      AND (pl.status = 'published' OR pl.status IS NULL)
+      AND (c.is_active IS NULL OR c.is_active = 1)
+    ORDER BY pi.sort_order ASC, pi.id ASC
+  `).all(playlist_id);
+
+  if (!items.length) return null;
+
+  const now = Math.floor(Date.now() / 1000);
+
+  // If caller forces an index (for testing), honour it directly.
+  if (forceIndex !== undefined && forceIndex !== null) {
+    const idx  = Math.max(0, Math.min(Number(forceIndex), items.length - 1));
+    const item = items[idx];
+    return { item, content: item, itemIndex: idx, expiresIn: item.duration_sec || 30, total: items.length };
+  }
+
+  // Load or initialise cursor
+  let cursor = CURSOR_GET.get(deviceId);
+  if (!cursor) {
+    CURSOR_UPSERT.run(deviceId, 0);
+    cursor = { item_index: 0, started_at: now };
+  }
+
+  let idx        = cursor.item_index % items.length;
+  let startedAt  = cursor.started_at;
+  const item     = items[idx];
+  const duration = item.duration_sec || 30;
+  const elapsed  = now - startedAt;
+
+  // Advance if the current item's time has passed
+  if (elapsed >= duration) {
+    idx = (idx + 1) % items.length;
+    CURSOR_UPSERT.run(deviceId, idx);
+    startedAt = now;
+  }
+
+  const currentItem = items[idx];
+  const currentDuration = currentItem.duration_sec || 30;
+  const expiresIn = Math.max(1, currentDuration - (now - startedAt));
+
+  return {
+    item: currentItem,
+    content: currentItem,
+    itemIndex: idx,
+    expiresIn,
+    total: items.length,
+  };
+}
+
+// ─── GET /api/embedded/info ─────────────────────────────────────────────────────
+
+router.get('/info', resolveAuth, (req, res) => {
+  const device = resolveDevice(req, res);
+  if (!device) return;
+
+  touchDeviceHeartbeat(device, req);
+  const profile = parseProfile(device.screen_profile);
+  const resolved = resolveCurrentItem(device.id, req.query.item);
+
+  res.json({
+    device_id: device.id,
+    device_name: device.name,
+    screen_profile: profile,
+    presets: listPresets(),
+    playlist: resolved
+      ? { item_count: resolved.total, current_index: resolved.itemIndex }
+      : null,
+    current_item: resolved
+      ? {
+          index: resolved.itemIndex,
+          content_id: resolved.content?.content_id || null,
+          content_type: resolved.item?.widget_id ? 'widget' : (resolved.content?.mime_type || null),
+          expires_in_seconds: resolved.expiresIn,
+        }
+      : null,
+    server_time_utc: new Date().toISOString(),
+  });
+});
+
+// ─── GET /api/embedded/presets ──────────────────────────────────────────────────
+
+router.get('/presets', resolveAuth, (req, res) => {
+  res.json(listPresets());
+});
+
+// ─── GET /api/embedded/render ───────────────────────────────────────────────────
+
+router.get('/render', resolveAuth, async (req, res) => {
+  const device = resolveDevice(req, res);
+  if (!device) return;
+
+  const profile = parseProfile(device.screen_profile);
+  if (!profile) {
+    return res.status(400).json({
+      error: 'Embedded rendering not configured for this device.',
+      hint: 'Set devices.screen_profile (use GET /api/embedded/presets for options).',
+    });
+  }
+
+  // Allow optional query overrides (e.g. ?format=jpeg or ?format=png or ?dither=atkinson for previewing)
+  if (req.query.format) {
+    const fmt = String(req.query.format).toLowerCase();
+    if (fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed') {
+      profile.outputFormat = fmt;
+    }
+  }
+  if (req.query.dither) {
+    const d = String(req.query.dither).toLowerCase();
+    if (d === 'floyd-steinberg' || d === 'atkinson' || d === 'none') {
+      profile.dither = d;
+    }
+  }
+
+  const forceIndex = req.query.item !== undefined ? req.query.item : null;
+  const resolved = resolveCurrentItem(device.id, forceIndex);
+  if (!resolved) {
+    return res.status(404).json({ error: 'No playlist assigned or no active items for this device.' });
+  }
+
+  const clientIp = touchDeviceHeartbeat(device, req);
+  const { item, content, itemIndex, expiresIn, total } = resolved;
+  const isPreview = req.query.preview === '1';
+
+  console.log(`[embedded] Device '${device.name}' (${device.id}) requested frame [item=${itemIndex + 1}/${total}] from ${clientIp}`);
+
+  // ── Cache check ─────────────────────────────────────────────────────────────
+  const key = cacheKey(
+    device.id,
+    item.id,
+    content?.content_updated_at || item.updated_at || 0,
+    profile
+  );
+
+  // Common response headers
+  const headers = {
+    'ETag': toETag(key),
+    'Cache-Control': 'no-store',
+    'X-ST-Device-Id': device.id,
+    'X-ST-Content-Id': content?.content_id || '',
+    'X-ST-Expires-In': String(expiresIn),
+    'X-ST-Item-Index': String(itemIndex),
+    'X-ST-Total-Items': String(total),
+  };
+
+  if (!isPreview && isNotModified(key, req.headers['if-none-match'])) {
+    res.set(headers).status(304).end();
+    return;
+  }
+
+  // ── Cache hit ───────────────────────────────────────────────────────────────
+  if (!isPreview) {
+    const cached = cacheGet(key);
+    if (cached.hit) {
+      res.set({ ...headers, 'Content-Type': detectContentType(profile) });
+      return res.status(200).send(cached.buffer);
+    }
+  }
+
+  // ── Render ──────────────────────────────────────────────────────────────────
+  let renderResult;
+  try {
+    renderResult = await render(item, content, profile);
+  } catch (e) {
+    console.error('[embedded] render error:', e.message);
+    return res.status(500).json({ error: `Render failed: ${e.message}` });
+  }
+
+  if (renderResult.unsupported) {
+    return res.status(501).json({
+      error: 'Content type not yet supported by Phase 1 renderer.',
+      detail: renderResult.reason,
+    });
+  }
+
+  // ── Post-process ─────────────────────────────────────────────────────────────
+  let processed;
+  try {
+    processed = await postprocess(renderResult.png, profile);
+  } catch (e) {
+    console.error('[embedded] postprocess error:', e.message);
+    return res.status(500).json({ error: `Post-processing failed: ${e.message}` });
+  }
+
+  // Store in cache (non-blocking; non-fatal on failure)
+  if (!isPreview) {
+    try { cacheSet(key, processed.buffer); } catch { /* best-effort */ }
+  }
+
+  res.set({ ...headers, 'Content-Type': processed.contentType });
+  res.status(200).send(processed.buffer);
+});
+
+// ─── Helpers ────────────────────────────────────────────────────────────────────
+
+function detectContentType(profile) {
+  switch (profile.outputFormat) {
+    case 'png': return 'image/png';
+    case 'jpeg':
+    case 'jpg': return 'image/jpeg';
+    case 'bmp': return 'image/bmp';
+    default:    return 'application/octet-stream';
+  }
+}
+
+module.exports = router;

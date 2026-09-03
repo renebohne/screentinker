@@ -1584,6 +1584,20 @@ const migrations = [
      currency    TEXT,
      sent_at     INTEGER NOT NULL
    )`,
+
+  // embedded-renderer: per-device screen profile (JSON). NULL = not an embedded client.
+  // Schema: { width, height, rotation, colorDepth, dither, outputFormat }
+  // See server/lib/embedded-profiles.js for the preset library and field vocabulary.
+  'ALTER TABLE devices ADD COLUMN screen_profile TEXT',
+
+  // embedded-renderer: server-side item cursor so an MCU can wake, fetch, sleep without
+  // any local state. started_at is Unix seconds; the route advances item_index when
+  // now - started_at >= item.duration_sec and resets started_at.
+  `CREATE TABLE IF NOT EXISTS embedded_cursor (
+     device_id   TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+     item_index  INTEGER NOT NULL DEFAULT 0,
+     started_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+   )`,
 ];
 // Apply each ALTER idempotently. A "duplicate column name" / "already exists"
 // error means the column is already present (expected on a migrated DB) - benign.
