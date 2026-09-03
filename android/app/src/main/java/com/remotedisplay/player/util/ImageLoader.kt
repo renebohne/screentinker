@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.media.ExifInterface
+import android.os.Build
 import android.util.Log
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -81,6 +82,21 @@ object ImageLoader {
         }
     }
 
+    // ExifInterface(InputStream) is API 24. Android 6 (API 23) only has the file-path constructor, so
+    // below N the bytes go through a temp file in the app cache (java.io.tmpdir on Android); the
+    // orientation is read the same way and the file is removed at once. Any failure reads as NORMAL.
+    private fun exifOrientation(bytes: ByteArray): Int = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            ExifInterface(ByteArrayInputStream(bytes)).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        } else {
+            val tmp = File.createTempFile("exif", ".img")
+            try {
+                tmp.writeBytes(bytes)
+                ExifInterface(tmp.absolutePath).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            } finally { tmp.delete() }
+        }
+    } catch (e: Throwable) { ExifInterface.ORIENTATION_NORMAL }
+
     private fun decodeBytes(bytes: ByteArray, maxW: Int, maxH: Int): Bitmap? {
         return try {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -90,11 +106,8 @@ object ImageLoader {
                 inSampleSize = calcSampleSize(bounds.outWidth, bounds.outHeight, maxW, maxH)
             }
             val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return null
-            // #170: honor EXIF orientation for remote images too (ExifInterface(stream) is API 24+).
-            val orientation = try {
-                ExifInterface(ByteArrayInputStream(bytes)).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-            } catch (e: Throwable) { ExifInterface.ORIENTATION_NORMAL }
-            applyExifOrientation(bmp, orientation)
+            // #170: honor EXIF orientation for remote images too.
+            applyExifOrientation(bmp, exifOrientation(bytes))
         } catch (e: OutOfMemoryError) {
             Log.e(TAG, "OOM decoding ${bytes.size} bytes: ${e.message}")
             null

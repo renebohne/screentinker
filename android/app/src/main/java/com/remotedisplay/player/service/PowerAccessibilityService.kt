@@ -152,7 +152,12 @@ class PowerAccessibilityService : AccessibilityService() {
      * Inject a tap at normalized coordinates (0.0-1.0) using dispatchGesture.
      * Works system-wide - can tap on system dialogs, other apps, etc.
      */
+    /** dispatchGesture and GestureDescription are API 24. On Android 6 the caller falls back to
+     *  in-app view dispatch (TouchInjector), which covers the player's own UI. */
+    val canDispatchGestures: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N
+
     fun injectTap(normalizedX: Float, normalizedY: Float) {
+        if (!canDispatchGestures) { Log.w(TAG, "injectTap: gesture dispatch needs API 24"); return }
         val metrics = getScreenMetrics()
         val x = normalizedX * metrics.widthPixels
         val y = normalizedY * metrics.heightPixels
@@ -168,6 +173,7 @@ class PowerAccessibilityService : AccessibilityService() {
      * Inject a swipe gesture at normalized coordinates.
      */
     fun injectSwipe(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long = 300) {
+        if (!canDispatchGestures) { Log.w(TAG, "injectSwipe: gesture dispatch needs API 24"); return }
         val metrics = getScreenMetrics()
         val sx = startX * metrics.widthPixels
         val sy = startY * metrics.heightPixels
