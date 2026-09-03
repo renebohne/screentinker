@@ -539,7 +539,10 @@ export async function render(container) {
           <div class="form-group"><label>${t('widget.field.location')}</label><input type="text" id="wLocation" class="input" value="${esc(config.location || '')}" placeholder="${t('widget.field.location_placeholder')}"></div>
           <div class="form-group"><label>${t('widget.field.units')}</label><select id="wUnits" class="input" style="background:var(--bg-input)"><option value="imperial" ${config.units !== 'metric' ? 'selected' : ''}>${t('widget.field.units_imperial')}</option><option value="metric" ${config.units === 'metric' ? 'selected' : ''}>${t('widget.field.units_metric')}</option></select></div>
           <div class="form-group"><label>${t('widget.field.font_size')}</label><input type="number" id="wFontSize" class="input" value="${config.font_size || 48}"></div>
-          <div class="form-group"><label>${t('widget.field.color')}</label><input type="color" id="wColor" value="${config.color || '#FFFFFF'}" style="width:60px;height:32px;border:none"></div>`;
+          <div class="form-group"><label>${t('widget.field.color')}</label><input type="color" id="wColor" value="${config.color || '#FFFFFF'}" style="width:60px;height:32px;border:none"></div>
+          <div class="form-group"><label>${t('widget.field.layout')}</label><select id="wLayout" class="input" style="background:var(--bg-input)"><option value="vertical" ${config.layout !== 'horizontal' ? 'selected' : ''}>${t('widget.field.layout_vertical')}</option><option value="horizontal" ${config.layout === 'horizontal' ? 'selected' : ''}>${t('widget.field.layout_horizontal')}</option></select></div>
+          <div class="form-group"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="wShowLocation" ${config.show_location === false ? '' : 'checked'}> ${t('widget.field.show_location')}</label></div>
+          <div class="form-group"><label>${t('widget.field.locale')}</label><input type="text" id="wWeatherLocale" class="input" value="${config.locale || ''}" placeholder="es"><div class="form-hint" style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('widget.field.weather_locale_hint')}</div></div>`;
         break;
       case 'rss':
         html += `
@@ -1069,7 +1072,11 @@ export async function render(container) {
         // in en-US regardless of the operator's language. Both are settings now.
         show_seconds: document.getElementById('wShowSeconds') ? document.getElementById('wShowSeconds').checked : true,
         locale: (val('wLocale') || '').trim() }); break;
-      case 'weather': Object.assign(config, { location: val('wLocation'), units: val('wUnits'), font_size: parseInt(val('wFontSize')) || 48, color: val('wColor') }); break;
+      case 'weather': Object.assign(config, { location: val('wLocation'), units: val('wUnits'), font_size: parseInt(val('wFontSize')) || 48, color: val('wColor'),
+        // #324: layout, an optional city line, and a language for the condition text.
+        layout: val('wLayout') || 'vertical',
+        show_location: document.getElementById('wShowLocation') ? document.getElementById('wShowLocation').checked : true,
+        locale: (val('wWeatherLocale') || '').trim() }); break;
       case 'rss': Object.assign(config, { feed_url: val('wFeedUrl'), scroll_speed: parseInt(val('wScrollSpeed')) || 30, max_items: parseInt(val('wMaxItems')) || 10, font_size: parseInt(val('wFontSize')) || 24, color: val('wColor'), background: val('wBg') }); break;
       case 'text': Object.assign(config, { html: val('wHtml'), css: val('wCss'), background: val('wBg') }); break;
       case 'webpage': Object.assign(config, { url: val('wUrl'), zoom: parseInt(val('wZoom')) || 100, refresh_interval: parseInt(val('wRefresh')) || 0 }); break;

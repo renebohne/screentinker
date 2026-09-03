@@ -2,6 +2,74 @@ import { api, assertLocalCallAllowed } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { t } from '../i18n.js';
 import {
+
+/*
+ * #327: compose and parse the recurrence rule.
+ *
+ * The scheduler has always understood BYDAY — services/scheduler.js evaluates it against the
+ * DEVICE's local day-of-week — and recurrence_end has always been stored and honoured. Neither was
+ * reachable from this form: the repeat control offered four fixed presets, so "Mon, Wed, Fri" could
+ * not be expressed, and an end date could not be set at all. These read and write the same strings
+ * the presets already hardcode, so nothing downstream changes.
+ */
+const RRULE_DAYS = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
+
+function checkedDays() {
+  return RRULE_DAYS.filter((d) => {
+    const el = document.querySelector(`.sched-day[value="${d}"]`);
+    return el && el.checked;
+  });
+}
+
+// What the form currently means, as an RRULE string (or null for "does not repeat").
+function readRecurrence() {
+  const sel = document.getElementById('schedRepeat');
+  if (!sel) return null;
+  if (sel.value !== 'CUSTOM') return sel.value || null;
+  const days = checkedDays();
+  // CUSTOM with nothing ticked is not a rule. Treat it as a plain weekly repeat rather than
+  // writing FREQ=WEEKLY;BYDAY= and leaving the engine to interpret an empty list.
+  return days.length ? `FREQ=WEEKLY;BYDAY=${days.join(',')}` : 'FREQ=WEEKLY';
+}
+
+// Put an existing rule back into the form. A BYDAY set that is not one of the presets selects
+// CUSTOM and ticks the days, so editing a schedule shows what it actually does.
+function applyRecurrence(rec) {
+  const sel = document.getElementById('schedRepeat');
+  if (!sel) return;
+  const value = rec || '';
+  const preset = Array.from(sel.options).some((o) => o.value === value && o.value !== 'CUSTOM');
+  const byday = /BYDAY=([A-Z,]+)/.exec(value);
+  if (preset || !byday) {
+    sel.value = value;
+  } else {
+    sel.value = 'CUSTOM';
+    const set = new Set(byday[1].split(','));
+    for (const d of RRULE_DAYS) {
+      const el = document.querySelector(`.sched-day[value="${d}"]`);
+      if (el) el.checked = set.has(d);
+    }
+  }
+  syncRepeatUI();
+}
+
+// Day pickers only make sense for a custom weekly rule; an end date only for something that repeats.
+function wireRepeatOnce() {
+  const sel = document.getElementById('schedRepeat');
+  if (!sel || sel.dataset.wired) return;
+  sel.dataset.wired = '1';
+  sel.addEventListener('change', syncRepeatUI);
+}
+
+function syncRepeatUI() {
+  wireRepeatOnce();
+  const sel = document.getElementById('schedRepeat');
+  const daysRow = document.getElementById('schedDaysRow');
+  const endRow = document.getElementById('schedRepeatEndRow');
+  if (!sel) return;
+  if (daysRow) daysRow.style.display = sel.value === 'CUSTOM' ? '' : 'none';
+  if (endRow) endRow.style.display = sel.value ? '' : 'none';
+}
   HOUR_PX, pxToMinutes, minutesToPx, rangeFromDrag, moveRange, resizeRange,
   toLocalStamp, formatRange, canMoveAcrossDays, editsWholeSeries, isDrag,
   splitAcrossMidnight, crossesMidnight, canDragEvent,
@@ -146,8 +214,37 @@ export async function render(container) {
               <option value="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR">${t('schedule.repeat_weekdays')}</option>
               <option value="FREQ=WEEKLY;BYDAY=SA,SU">${t('schedule.repeat_weekends')}</option>
               <option value="FREQ=WEEKLY">${t('schedule.repeat_weekly')}</option>
+              <option value="CUSTOM">${t('schedule.repeat_custom')}</option>
             </select>
           </div>
+          <!-- #327: the engine has always understood BYDAY (services/scheduler.js filters on it in
+               the DEVICE's local zone), but the four presets above were the only way to express it,
+               so "Mon, Wed, Fri" was unreachable. These checkboxes compose the same BYDAY string
+               the presets hardcode. -->
+          <div class="form-group" id="schedDaysRow" style="display:none">
+            <label>${t('schedule.repeat_days')}</label>
+            <div id="schedDays" style="display:flex;gap:6px;flex-wrap:wrap">
+              <!-- Every key is spelled out in full on purpose. The i18n checker scans for literal
+                   translation calls, so building a key by concatenation leaves it reading the
+                   prefix alone as though that were the key, and reporting it missing. Seven
+                   literals cost nothing and stay checkable. (Do not write an example of the
+                   concatenated form here either: the checker reads comments too.) -->
+              ${[['MO', t('schedule.day_mo')], ['TU', t('schedule.day_tu')], ['WE', t('schedule.day_we')],
+                 ['TH', t('schedule.day_th')], ['FR', t('schedule.day_fr')], ['SA', t('schedule.day_sa')],
+                 ['SU', t('schedule.day_su')]].map(([d, label]) => `
+                <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;padding:4px 8px;border:1px solid var(--border);border-radius:var(--radius)">
+                  <input type="checkbox" class="sched-day" value="${d}"> ${label}
+                </label>`).join('')}
+              </div>
+            </div>
+            <!-- #327: recurrence_end has been in the schema, accepted by the API and honoured by both
+                 the scheduler and the calendar. It was simply never on the form, so a repeat could
+                 not be given an end date. -->
+            <div class="form-group" id="schedRepeatEndRow" style="display:none">
+              <label>${t('schedule.repeat_until')}</label>
+              <input type="date" id="schedRepeatEnd" class="input">
+              <div style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('schedule.repeat_until_hint')}</div>
+            </div>
           <div class="form-group"><label>${t('schedule.priority')}</label><input type="number" id="schedPriority" class="input" value="0" min="0" max="100"></div>
           <div class="form-group"><label>${t('schedule.color')}</label><input type="color" id="schedColor" value="#3B82F6" style="width:60px;height:32px;border:none;cursor:pointer"></div>
         </div>
@@ -710,7 +807,9 @@ export async function render(container) {
     const end = new Date(ev.end_time);
     document.getElementById('schedStart').value = `${String(start.getHours()).padStart(2,'0')}:${String(start.getMinutes()).padStart(2,'0')}`;
     document.getElementById('schedEnd').value = `${String(end.getHours()).padStart(2,'0')}:${String(end.getMinutes()).padStart(2,'0')}`;
-    document.getElementById('schedRepeat').value = ev.recurrence || '';
+    applyRecurrence(ev.recurrence);
+    const endEl = document.getElementById('schedRepeatEnd');
+    if (endEl) endEl.value = (ev.recurrence_end || '').slice(0, 10);
     document.getElementById('schedPriority').value = ev.priority || 0;
     document.getElementById('schedColor').value = ev.color || '#3B82F6';
 
@@ -740,10 +839,16 @@ export async function render(container) {
     document.getElementById('schedPlaylist').value = '';
     document.getElementById('schedLayout').value = '';
     document.getElementById('schedContent').value = '';
+    // #327: a fresh form must not inherit the previous edit's days or end date.
+    applyRecurrence('');
+    document.querySelectorAll('.sched-day').forEach((el) => { el.checked = false; });
+    const newEnd = document.getElementById('schedRepeatEnd');
+    if (newEnd) newEnd.value = '';
     deviceRadio.checked = true;
     deviceSelect.value = document.getElementById('schedDevice').value;
     updateTargetVisibility();
     document.getElementById('deleteScheduleBtn').style.display = 'none';
+    syncRepeatUI();
     document.getElementById('scheduleModal').style.display = 'flex';
   };
 
@@ -793,7 +898,8 @@ export async function render(container) {
       title: document.getElementById('schedTitle').value,
       start_time: `${today}T${startTime}:00`,
       end_time: `${today}T${endTime}:00`,
-      recurrence: document.getElementById('schedRepeat').value || null,
+      recurrence: readRecurrence(),
+      recurrence_end: (document.getElementById('schedRepeatEnd')?.value || null),
       priority: parseInt(document.getElementById('schedPriority').value) || 0,
       color: document.getElementById('schedColor').value,
     };

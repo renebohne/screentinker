@@ -141,3 +141,53 @@ test('#323: a junk locale cannot be injected into the emitted script', async () 
   assert.doesNotMatch(html, /alert\(1\)/, 'not interpolated');
   assert.match(html, /toLocaleTimeString\(undefined/, 'falls back to the runtime locale');
 });
+
+// ---------------------------------------------------------------------------
+// #324: the weather widget scales as a whole, and can speak the operator's language.
+// ---------------------------------------------------------------------------
+
+const renderWeather = async (cfg) => {
+  const w = await (await fetch(BASE + '/api/widgets', post(jwt, {
+    widget_type: 'weather', name: 'w' + crypto.randomBytes(3).toString('hex'), config: cfg,
+  }))).json();
+  return (await fetch(BASE + '/api/widgets/' + w.id + '/render')).text();
+};
+
+test('#324: every text size scales with font_size, not just the temperature', async () => {
+  const small = await renderWeather({ location: 'Madrid', font_size: 20 });
+  const big = await renderWeather({ location: 'Madrid', font_size: 80 });
+  const sizesOf = (html) => [...html.matchAll(/font-size:(\d+)px/g)].map((m) => Number(m[1]));
+  const s = sizesOf(small), b = sizesOf(big);
+  assert.ok(s.length >= 4 && b.length >= 4, 'temp, location, desc and icon all carry a size');
+  // Every size in the small render must be smaller than its counterpart in the big one.
+  for (let i = 0; i < Math.min(s.length, b.length); i++) {
+    assert.ok(b[i] > s[i], `size #${i} did not scale (${s[i]} -> ${b[i]})`);
+  }
+  assert.doesNotMatch(small, /font-size:64px/, 'the hardcoded 64px icon is gone');
+  assert.doesNotMatch(small, /font-size:18px/, 'the hardcoded 18px location is gone');
+});
+
+test('#324: a signage widget never offers a scrollbar', async () => {
+  assert.match(await renderWeather({ location: 'Madrid', font_size: 90 }), /overflow:hidden/);
+});
+
+test('#324: the city line can be hidden', async () => {
+  assert.doesNotMatch(await renderWeather({ location: 'Madrid', show_location: false }), /class="location"/);
+  assert.match(await renderWeather({ location: 'Madrid' }), /class="location"/);
+});
+
+test('#324: a side-by-side layout is available', async () => {
+  assert.match(await renderWeather({ location: 'Madrid', layout: 'horizontal' }), /body class="horizontal"/);
+});
+
+test('#324: a locale reaches the weather provider, and junk does not', async () => {
+  // Match the fetch URL, not the word anywhere in the file: the comment above the fetch contains
+  // "lang=" and a bare /lang=/ therefore passes on the prose rather than on the behaviour.
+  const url = /format=j1&lang=([a-z]{2})/;
+  assert.match(await renderWeather({ location: 'Madrid', locale: 'es' }), url);
+  assert.equal(url.exec(await renderWeather({ location: 'Madrid', locale: 'es-ES' }))[1], 'es',
+    'a full BCP-47 tag is narrowed to the two-letter code the provider wants');
+  const junk = await renderWeather({ location: 'Madrid', locale: "x'); alert(1);//" });
+  assert.doesNotMatch(junk, /alert\(1\)/);
+  assert.doesNotMatch(junk, url, 'an unusable locale is simply omitted from the request');
+});

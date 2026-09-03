@@ -523,28 +523,47 @@ function renderWeather(c) {
   return `<!DOCTYPE html><html><head><style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body { background:${safeCss(c.background, 'transparent')}; display:flex; align-items:center; justify-content:center; height:100vh; font-family:-apple-system,sans-serif; color:${safeCss(c.color, '#FFF')}; }
-  .weather { text-align:center; }
-  .temp { font-size:${safeNumber(c.font_size, 48)}px; font-weight:700; }
-  .location { font-size:18px; opacity:0.7; margin-top:4px; }
-  .desc { font-size:16px; opacity:0.6; margin-top:8px; }
-  .icon { font-size:64px; }
-</style></head><body>
+  /*
+   * #324: EVERYTHING SCALES, OR NOTHING DOES.
+   *
+   * Only .temp was tied to font_size; location, description and icon were pinned at 18px, 16px
+   * and 64px. In a small zone the icon alone is 64px whatever the space, the content overflows,
+   * and the widget gets a scrollbar - reported as "the font size does change, but nothing else".
+   * No Fit setting could help, because Fit places the widget's output rather than laying it out.
+   * The other three are derived from the same base size now, so one control moves all of them.
+   */
+  .weather { text-align:center; max-width:100%; max-height:100%; }
+  .temp { font-size:${safeNumber(c.font_size, 48)}px; font-weight:700; line-height:1.1; }
+  .location { font-size:${Math.max(10, Math.round(safeNumber(c.font_size, 48) * 0.34))}px; opacity:0.7; margin-top:2px; }
+  .desc { font-size:${Math.max(10, Math.round(safeNumber(c.font_size, 48) * 0.30))}px; opacity:0.6; margin-top:4px; }
+  .icon { font-size:${Math.max(14, Math.round(safeNumber(c.font_size, 48) * 1.2))}px; line-height:1; }
+  /* A signage widget must never offer a scrollbar. If it still does not fit, it clips. */
+  html, body { overflow:hidden; }
+  body.horizontal .weather { display:flex; align-items:center; justify-content:center; gap:${Math.max(6, Math.round(safeNumber(c.font_size, 48) * 0.25))}px; text-align:left; }
+</style></head><body class="${c.layout === 'horizontal' ? 'horizontal' : ''}">
 <div class="weather">
   <div class="icon" id="icon"></div>
-  <div class="temp" id="temp">--</div>
-  <div class="location">${escapeHtml(c.location) || 'Unknown'}</div>
-  <div class="desc" id="desc"></div>
+  <div>
+    <div class="temp" id="temp">--</div>
+    ${c.show_location === false ? '' : `<div class="location">${escapeHtml(c.location) || 'Unknown'}</div>`}
+    <div class="desc" id="desc"></div>
+  </div>
 </div>
 <script>
 async function load() {
   try {
-    const r = await fetch('https://wttr.in/${encodeURIComponent(c.location || 'New York')}?format=j1');
+    // #324: wttr.in accepts lang=, so "Sunny" can arrive in the operator's language rather than
+    // always English. Same locale field the clock gained in #323; blank leaves wttr.in's default.
+    const r = await fetch('https://wttr.in/${encodeURIComponent(c.location || 'New York')}?format=j1${/^[A-Za-z]{2}$/.test(String(c.locale || '').slice(0, 2)) ? '&lang=' + String(c.locale).slice(0, 2).toLowerCase() : ''}');
     const d = await r.json();
     const cur = d.current_condition[0];
     const unit = '${c.units === 'metric' ? 'temp_C' : 'temp_F'}';
     const deg = '${c.units === 'metric' ? '°C' : '°F'}';
     document.getElementById('temp').textContent = cur[unit] + deg;
-    document.getElementById('desc').textContent = cur.weatherDesc[0].value;
+    // With lang=, wttr.in returns localised text under lang_<code>; fall back to English.
+    const langKey = Object.keys(cur).find((k) => k.startsWith('lang_'));
+    document.getElementById('desc').textContent =
+      (langKey && cur[langKey] && cur[langKey][0] && cur[langKey][0].value) || cur.weatherDesc[0].value;
     const code = parseInt(cur.weatherCode);
     const icons = {113:'☀️',116:'⛅',119:'☁️',122:'☁️',143:'🌫️',176:'🌧️',200:'⛈️',227:'🌨️',260:'🌫️',263:'🌧️',266:'🌧️',293:'🌧️',296:'🌧️',299:'🌧️',302:'🌧️',305:'🌧️',308:'🌧️',311:'🌧️',314:'🌧️',317:'🌧️',320:'🌨️',323:'🌨️',326:'🌨️',329:'🌨️',332:'🌨️',335:'🌨️',338:'🌨️',350:'🌧️',353:'🌧️',356:'🌧️',359:'🌧️',362:'🌨️',365:'🌨️',368:'🌨️',371:'🌨️',374:'🌨️',377:'🌨️',386:'⛈️',389:'⛈️',392:'⛈️',395:'🌨️'};
     document.getElementById('icon').textContent = icons[code] || '🌡️';
