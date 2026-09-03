@@ -214,7 +214,7 @@ router.post('/pair/register', (req, res) => {
   const newToken = crypto.randomBytes(32).toString('hex');
   const width = parseInt(screen_width) || 800;
   const height = parseInt(screen_height) || 480;
-  const profile = screen_profile || 'sticky_800x480';
+  const profile = typeof screen_profile === 'object' ? JSON.stringify(screen_profile) : (screen_profile || 'seeed-reterminal-sticky');
 
   try {
     db.prepare(`

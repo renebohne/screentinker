@@ -94,13 +94,22 @@ const DEFAULTS = {
  */
 function parseProfile(raw) {
   if (!raw) return null;
+  if (typeof raw === 'string' && PRESETS[raw]) {
+    return { ...PRESETS[raw] };
+  }
   let obj;
   try {
     obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
   } catch {
+    if (typeof raw === 'string' && PRESETS[raw]) return { ...PRESETS[raw] };
     return null;
   }
+  if (typeof obj === 'string' && PRESETS[obj]) return { ...PRESETS[obj] };
   if (typeof obj !== 'object' || obj === null) return null;
+
+  if (obj.preset && PRESETS[obj.preset]) {
+    obj = { ...PRESETS[obj.preset], ...obj };
+  }
 
   const width  = Number.isInteger(obj.width)  && obj.width  > 0 ? obj.width  : null;
   const height = Number.isInteger(obj.height) && obj.height > 0 ? obj.height : null;
