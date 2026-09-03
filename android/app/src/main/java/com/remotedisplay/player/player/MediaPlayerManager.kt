@@ -287,7 +287,19 @@ class MediaPlayerManager(
         val view = transitionView
         if (view == null || spec == null || from == null || !transitionsActive()) return false
         val picked = pickEffect(spec) ?: return false
-        val w = ImageLoader.screenWidth(context); val h = ImageLoader.screenHeight(context)
+        // #326: THE STAGE'S OWN BOX, NOT THE DEVICE'S.
+        //
+        // MainActivity rotates rootView for a portrait screen and TRANSPOSES its layout params
+        // (lp.width = h, lp.height = w) before setting rotation. A View's rotation does not change
+        // its layout bounds, so on a portrait panel the stage is laid out 1080x1920 while
+        // displayMetrics still reports 1920x1080 — each the other's transpose. Fitting both bitmaps
+        // to displayMetrics therefore played every wipe at the wrong aspect and snapped back when
+        // the plain mount took over, which is the same fault #315 fixed in the web player.
+        //
+        // transitionView is added to that same rootView with MATCH_PARENT in both axes, so its own
+        // measured size IS the stage box. Zero means it has not been laid out yet, and the existing
+        // guard below turns that into a hard cut rather than a wipe fitted to nothing.
+        val w = view.width; val h = view.height
         if (w <= 0 || h <= 0) return false
         val fromFit: Bitmap; val toFit: Bitmap
         try { fromFit = fitTransitionBitmap(from, w, h); toFit = fitTransitionBitmap(toBitmap, w, h) }
