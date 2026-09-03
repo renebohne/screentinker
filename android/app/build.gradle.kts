@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.remotedisplay.player"
-        minSdk = 24
+        minSdk = 23
         targetSdk = 34
         // Env-overridable so device-owner reinstalls (which require an ever-increasing
         // versionCode — downgrades are blocked) don't churn this file each build.

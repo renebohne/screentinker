@@ -11,6 +11,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.wifi.WifiManager
 import android.os.Binder
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -175,8 +176,9 @@ class WebSocketService : Service() {
      * feat/offline-cause-log: watch the DEFAULT network so a connectivity-report can distinguish a
      * lost physical link (Wi‑Fi/Ethernet down) from "link up but the server is unreachable". onLost
      * of the default network during an offline gap flips linkLostDuringGap; it is reset after the
-     * next report. registerDefaultNetworkCallback is API 24 (== minSdk), so no version gate needed,
-     * but everything is still wrapped so a locked-down ROM can't crash the service.
+     * next report. registerDefaultNetworkCallback is API 24; Android 6 registers for any network
+     * instead (API 21), which is the same signal for a single-link signage box. Everything is still
+     * wrapped so a locked-down ROM can't crash the service.
      */
     private fun registerNetworkCallback() {
         try {
@@ -197,7 +199,8 @@ class WebSocketService : Service() {
                     }
                 }
             }
-            cm.registerDefaultNetworkCallback(cb)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) cm.registerDefaultNetworkCallback(cb)
+            else cm.registerNetworkCallback(android.net.NetworkRequest.Builder().build(), cb)
             netCallback = cb
         } catch (e: Throwable) { Log.w("WebSocketService", "registerNetworkCallback: ${e.message}") }
     }
@@ -525,13 +528,13 @@ class WebSocketService : Service() {
                     val svc = PowerAccessibilityService.instance
                     when {
                         // #159: drag = a swipe gesture (scroll). Dashboard sends normalized end point + duration.
-                        svc != null && action == "swipe" -> {
+                        svc != null && svc.canDispatchGestures && action == "swipe" -> {
                             val x2 = data.optDouble("x2", x.toDouble()).toFloat()
                             val y2 = data.optDouble("y2", y.toDouble()).toFloat()
                             val dur = data.optLong("duration", 300L).coerceIn(50L, 3000L)
                             handler.post { try { svc.injectSwipe(x, y, x2, y2, dur) } catch (e: Throwable) { Log.e("WebSocketService", "injectSwipe: ${e.message}") } }
                         }
-                        svc != null && action == "tap" -> {
+                        svc != null && svc.canDispatchGestures && action == "tap" -> {
                             handler.post { try { svc.injectTap(x, y) } catch (e: Throwable) { Log.e("WebSocketService", "injectTap: ${e.message}") } }
                         }
                         else -> {

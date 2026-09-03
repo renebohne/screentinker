@@ -72,7 +72,7 @@ Fedora, and Category X at Apache. Not copyleft, but not a term to accept in a bi
 commercially.
 
 It is now excluded in `android/app/build.gradle.kts`. Nothing is lost — Android has provided
-`org.json` in the platform since API 1 and `minSdk` is 24 — and `android/licenses.json` denies it by
+`org.json` in the platform since API 1 and `minSdk` is 23 — and `android/licenses.json` denies it by
 name so it cannot return quietly.
 
 ## SBOM
