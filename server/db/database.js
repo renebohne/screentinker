@@ -1504,6 +1504,22 @@ const migrations = [
    * screen showing a slide in this face downloads it. The bundled fonts are OFL so that is settled;
    * for an upload it is the uploader's assertion, and on a hosted instance the operator needs to be
    * able to see who made it and on what basis. Recorded at upload, shown in the editor. */
+  // #320: operator-uploaded GLSL transitions. Customer content, kept out of shared/Transitions/ so
+  // the first-party licensing claim in docs/licensing.md stays a flat statement.
+  `CREATE TABLE IF NOT EXISTS custom_shaders (
+     id            TEXT PRIMARY KEY,
+     workspace_id  TEXT NOT NULL,
+     uploaded_by   TEXT,
+     shader_id     TEXT NOT NULL,
+     name          TEXT NOT NULL,
+     blurb         TEXT NOT NULL DEFAULT '',
+     source        TEXT NOT NULL,
+     params        TEXT NOT NULL DEFAULT '[]',
+     licence_note  TEXT,
+     created_at    INTEGER NOT NULL,
+     UNIQUE (workspace_id, shader_id)
+   )`,
+  'CREATE INDEX IF NOT EXISTS idx_custom_shaders_ws ON custom_shaders(workspace_id)',
   `CREATE TABLE IF NOT EXISTS custom_fonts (
      id            TEXT PRIMARY KEY,
      workspace_id  TEXT,

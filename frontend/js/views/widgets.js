@@ -633,6 +633,11 @@ export async function render(container) {
         html += `
           <div class="form-group"><label>${t('widget.trans.shader')}</label>
             <div id="wTransList" style="max-height:158px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:4px;background:var(--bg-input)"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+              <button type="button" class="btn btn-secondary btn-sm" id="wTransUpload">${t('widget.trans.upload')}</button>
+              <input type="file" id="wTransUploadFile" accept=".glsl,text/plain" style="display:none">
+              <span style="font-size:12px;color:var(--text-muted)">${t('widget.trans.upload_hint')}</span>
+            </div>
             <div class="hint" style="font-size:11px;color:var(--text-muted);margin-top:6px">${t('widget.trans.multi_hint')}</div>
             <div id="wTransBlurb" style="font-size:11px;color:var(--text-muted);margin-top:4px"></div></div>
           <div class="form-group">
@@ -732,9 +737,45 @@ export async function render(container) {
     const paramsBox = document.getElementById('wTransParams');
     if (!canvas || !list) return;
 
+    // #320: upload your own. A .glsl file is read in the browser and posted as text; the server
+    // validates shape and size and reads the name and blurb out of the header comments exactly as
+    // generate-manifest.js does for the shipped set.
+    const upBtn = document.getElementById('wTransUpload');
+    const upFile = document.getElementById('wTransUploadFile');
+    if (upBtn && upFile && !upBtn.dataset.wired) {
+      upBtn.dataset.wired = '1';
+      upBtn.addEventListener('click', () => upFile.click());
+      upFile.addEventListener('change', async () => {
+        const f = upFile.files && upFile.files[0];
+        if (!f) return;
+        try {
+          const text = await f.text();
+          await api.uploadCustomShader(text, f.name.replace(/\.glsl$/i, ''));
+          showToast(t('widget.trans.uploaded'), 'success');
+          initTransitionForm(config);   // re-read the list so it appears in the picker
+        } catch (e) {
+          showToast(e.message, 'error');   // the server's own words: why it was refused
+        } finally { upFile.value = ''; }
+      });
+    }
+
     const ready = await ensureTransitionRuntime();
     if (!ready || !window.__TRANSITION_MANIFEST) { blurb.textContent = t('widget.trans.unavailable'); return; }
-    const MAN = window.__TRANSITION_MANIFEST;
+    /*
+     * #320: the workspace's uploaded shaders join the shipped manifest for the picker and the live
+     * preview. Appended, never merged over: a built-in with the same id would win, and the server
+     * prefixes uploads `custom-` so the case cannot arise anyway. A failure to load them leaves the
+     * shipped set working, because a picker with fourteen effects beats an error dialog.
+     */
+    const MAN = window.__TRANSITION_MANIFEST.slice();
+    try {
+      const customs = await api.listCustomShaders();
+      for (const c of customs || []) {
+        if (MAN.some((m) => m.id === c.shader_id)) continue;
+        MAN.push({ id: c.shader_id, name: c.name, blurb: c.blurb || '', params: c.params || [], custom: true });
+        if (c.source && window.__TRANSITION_SHADERS) window.__TRANSITION_SHADERS[c.shader_id] = c.source;
+      }
+    } catch (e) { /* shipped set only */ }
     const byId = (id) => MAN.find((x) => x.id === id);
 
     // initial selection: config.shaders, else legacy single config.shader, else the first effect

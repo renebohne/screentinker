@@ -653,6 +653,11 @@ export const api = {
    * the call site rather than here — it is a request that is SUPPOSED to take 30-60 seconds, and a
    * default timeout would abort the one thing it exists to do.
    */
+  // #320: operator-uploaded GLSL transitions, workspace-scoped like fonts.
+  listCustomShaders: () => request('/transitions/custom'),
+  uploadCustomShader: (source, name, licence_note) =>
+    request('/transitions/custom', { method: 'POST', body: JSON.stringify({ source, name, licence_note }) }),
+  deleteCustomShader: (id) => request(`/transitions/custom/${id}`, { method: 'DELETE' }),
   adminDiagShape: () => request('/admin/diagnostics/shape'),
   adminDiagLag: (days = 14) => request(`/admin/diagnostics/lag?days=${encodeURIComponent(days)}`),
   adminDiagProfile: (seconds = 30) => request('/admin/diagnostics/cpu-profile', {

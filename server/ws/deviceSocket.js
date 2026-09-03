@@ -619,7 +619,7 @@ function buildPlaylistPayload(deviceId) {
   const group_sync = wall_config ? null : resolveGroupSync(device, deviceId);
   // #104: shared shape + zone-reset tail so the device payload and the dashboard
   // preview payload (GET /api/playlists/:id/preview-payload) can never drift.
-  return assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', background_color: device?.background_color || null, wall_config, group_sync, timezone, triggers, trigger_config });
+  return assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', background_color: device?.background_color || null, workspace_id: device?.workspace_id || null, wall_config, group_sync, timezone, triggers, trigger_config });
 }
 
 // #104: the canonical player payload shape, shared by the device path
@@ -627,12 +627,52 @@ function buildPlaylistPayload(deviceId) {
 // Zone reset: if this isn't a real multi-zone layout (single zone or no layout),
 // strip any leftover zone_id so content falls back to the fullscreen renderer
 // instead of binding to a now-gone left/right zone and never playing.
-function assemblePayload({ assignments, layout, orientation, background_color, wall_config, group_sync, timezone, triggers, trigger_config }) {
+
+/*
+ * #320: the workspace's uploaded shaders, as the resolver and the players each need them.
+ *
+ * registry -> id to a manifest-shaped entry, so resolveTransitionConfig can validate and clamp an
+ * uploaded shader's params exactly as it does a shipped one.
+ * sources  -> id to GLSL, but ONLY for shaders this playlist actually references. A workspace with
+ * fifty uploads sends nothing extra to a screen playing none of them.
+ */
+function customShaderRegistry(workspaceId) {
+  if (!workspaceId) return null;
+  try {
+    const rows = db.prepare('SELECT shader_id, params FROM custom_shaders WHERE workspace_id = ?').all(workspaceId);
+    if (!rows.length) return null;
+    return new Map(rows.map((r) => [r.shader_id, { id: r.shader_id, params: JSON.parse(r.params || '[]') }]));
+  } catch (e) { return null; }   // table absent on an old db -> shipped shaders only
+}
+
+function customShaderSources(workspaceId, items) {
+  if (!workspaceId || !Array.isArray(items)) return null;
+  const wanted = new Set();
+  for (const it of items) {
+    for (const e of (it && it.transition && it.transition.effects) || []) {
+      if (e && typeof e.shader === 'string' && e.shader.startsWith('custom-')) wanted.add(e.shader);
+    }
+  }
+  if (!wanted.size) return null;
+  try {
+    const out = {};
+    const stmt = db.prepare('SELECT source FROM custom_shaders WHERE workspace_id = ? AND shader_id = ?');
+    for (const id of wanted) {
+      const row = stmt.get(workspaceId, id);
+      if (row) out[id] = row.source;
+    }
+    return Object.keys(out).length ? out : null;
+  } catch (e) { return null; }
+}
+
+function assemblePayload({ assignments, layout, orientation, background_color, workspace_id, wall_config, group_sync, timezone, triggers, trigger_config }) {
   let a = Array.isArray(assignments) ? assignments : [];
   // Transition widgets are normalized OUT here (the single device+preview chokepoint): each is dropped
   // from the visible list and its config attached as an opaque `transition` on the item it plays into.
   // Old players simply see no transition widget and ignore the field (hard cut) — no regression.
-  a = normalizeTransitions(a);
+  // #320: the workspace's own uploaded shaders, consulted after the shipped manifest. Built here
+  // rather than inside the resolver so the lookup stays a pure function of what it is given.
+  a = normalizeTransitions(a, customShaderRegistry(workspace_id));
   const zoneCount = layout?.zones?.length || 0;
   if (zoneCount < 2) a = a.map(x => (x && x.zone_id != null ? { ...x, zone_id: null } : x));
   return {
@@ -650,6 +690,11 @@ function assemblePayload({ assignments, layout, orientation, background_color, w
     // signature, exactly as it does for `layout`.
     triggers: Array.isArray(triggers) ? triggers : [],
     trigger_config: trigger_config || null,
+    // #320: the GLSL for any uploaded shader this playlist actually references, sent with the
+    // playlist rather than fetched separately. Every player already resolves a shader as an id
+    // to a source string, so merging these into that lookup is all any of them needs — no new
+    // endpoint, no second round trip, and nothing sent for a workspace that uploaded nothing.
+    custom_shaders: customShaderSources(workspace_id, a),
   };
 }
 

@@ -31,6 +31,7 @@ import com.remotedisplay.player.data.ContentCache
 import com.remotedisplay.player.data.ServerConfig
 import com.remotedisplay.player.player.MediaPlayerManager
 import com.remotedisplay.player.player.TransitionGLView
+import com.remotedisplay.player.player.TransitionGlsl
 import com.remotedisplay.player.player.PlaylistController
 import com.remotedisplay.player.player.PlaylistItem
 import com.remotedisplay.player.player.PipOverlay
@@ -811,6 +812,15 @@ class MainActivity : AppCompatActivity() {
             wallController.exit()                    // never in wall mode here
             val groupObj = if (data.isNull("group_sync")) null else data.optJSONObject("group_sync")
             if (groupObj != null) groupSchedule.apply(groupObj.optString("group_id")) else groupSchedule.exit()
+            // #320: uploaded shaders arrive with the playlist, keyed by the ids the items reference.
+            // Handed to the loader, which checks them before assets. Re-sent on every reconnect, so
+            // there is no cache to invalidate; an id that never arrives hard-cuts exactly as before.
+            run {
+                val cs = data.optJSONObject("custom_shaders")
+                val map = HashMap<String, String>()
+                if (cs != null) { val it2 = cs.keys(); while (it2.hasNext()) { val k = it2.next(); cs.optString(k, "").takeIf { v -> v.isNotEmpty() }?.let { v -> map[k] = v } } }
+                TransitionGlsl.setUploadedShaders(map)
+            }
             applyOrientation(data.optString("orientation", "landscape"))
 
             // Check for multi-zone layout

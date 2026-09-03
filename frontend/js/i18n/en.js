@@ -1127,6 +1127,9 @@ export default {
   'widget.trans.play': 'Play',
   'widget.trans.pause': 'Pause',
   'widget.trans.unavailable': 'Transition preview unavailable',
+  'widget.trans.upload': 'Upload a .glsl',
+  'widget.trans.upload_hint': 'Your own transition. Stays in this workspace.',
+  'widget.trans.uploaded': 'Transition uploaded',
   'widget.trans.compile_error': 'Shader failed to compile',
   // directory-search widget
   'widget.dirsearch.source_label': 'Directory board',

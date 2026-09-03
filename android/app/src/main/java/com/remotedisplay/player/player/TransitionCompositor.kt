@@ -42,9 +42,26 @@ object TransitionGlsl {
 
     // Load a shader's GLSL source by id from assets/transitions/<id>.glsl (copied from shared/Transitions
     // at build). Returns null if missing -> the caller hard-cuts (never a black frame).
-    fun loadSource(assets: AssetManager, shaderId: String): String? = try {
-        assets.open("transitions/$shaderId.glsl").bufferedReader().use { it.readText() }
-    } catch (e: Throwable) { Log.w("TransitionGL", "shader '$shaderId' not found in assets: ${e.message}"); null }
+    /*
+     * #320: shaders an operator uploaded arrive with the playlist and live here, keyed by the same
+     * ids the items reference. Checked BEFORE assets so an upload is found, and never instead of
+     * them: a shipped shader cannot be shadowed because the server only ever sends ids prefixed
+     * "custom-". Held in memory rather than written to disk because the payload re-sends them on
+     * every reconnect, so there is no cache to invalidate and nothing to clean up.
+     */
+    private val uploaded = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    fun setUploadedShaders(map: Map<String, String>?) {
+        uploaded.clear()
+        if (map != null) for ((k, v) in map) if (k.startsWith("custom-")) uploaded[k] = v
+    }
+
+    fun loadSource(assets: AssetManager, shaderId: String): String? {
+        uploaded[shaderId]?.let { return it }
+        return try {
+            assets.open("transitions/$shaderId.glsl").bufferedReader().use { it.readText() }
+        } catch (e: Throwable) { Log.w("TransitionGL", "shader '$shaderId' not found in assets: ${e.message}"); null }
+    }
 }
 
 // Fit a source bitmap into a w×h frame with object-fit:contain letterboxing (matches the static

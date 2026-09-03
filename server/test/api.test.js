@@ -149,6 +149,20 @@ test('partition: the public token surface is exactly the reviewed set (snapshot 
     // a trigger that fails with the WAN down. See docs/triggers-design.md.
     '/api/triggers',
     /*
+     * Uploaded transitions, added deliberately. Same reasoning as fonts, already on this door: it is
+     * workspace content an integrator may reasonably manage from their own tooling, and every route
+     * here is workspace-scoped like its siblings.
+     *
+     * ⚠️ Worth knowing at review time: the payload is GLSL that will execute on the GPU of every
+     * screen in that workspace. That reach is real but not new — a `write` token can already change
+     * what those screens play. It is bounded by the engine's existing failure mode (an unknown or
+     * broken shader hard-cuts, it never blanks a screen) and by validation refusing anything without
+     * the renderer's entry point, anything with a preprocessor directive, anything over 64 KB, and
+     * anything declaring more than eight parameters. Uploads are prefixed `custom-` and consulted
+     * only AFTER the shipped manifest, so no upload can shadow a built-in.
+     */
+    '/api/transitions/custom',
+    /*
      * Slide decks, added deliberately. The deck is an AUTHORING document — it publishes to a
      * playlist of slide widgets and then takes no part in playback — and both of those objects are
      * already on this door, so keeping the thing that writes them off it would be a limitation with

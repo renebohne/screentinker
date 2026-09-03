@@ -40,6 +40,9 @@ const PUBLIC_ROUTERS = [
   // Uploaded fonts for slides. Workspace-scoped; see routes/fonts.js for why redistribution is
   // the thing to understand about this one.
   { path: '/api/fonts',       mod: './routes/fonts' },
+  // #320: operator-uploaded GLSL transitions. Workspace-scoped like fonts, and for the same reason:
+  // it is the customer's content and the customer's licence, not part of the shipped library.
+  { path: '/api/transitions/custom', mod: './routes/custom-shaders' },
   { path: '/api/activity',    mod: './routes/activity' },
   { path: '/api/kiosk',       mod: './routes/kiosk', renderBypass: true },
   { path: '/api/pip',         mod: './routes/pip' },

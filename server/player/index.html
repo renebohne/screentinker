@@ -4232,6 +4232,15 @@
       const effectiveOrientation = window.WallGeometry
         ? window.WallGeometry.orientationForWallMember(data.orientation, data.wall_config?.rotation)
         : data.orientation;
+      // #320: an operator's uploaded shaders arrive with the playlist, keyed by the same ids the
+      // items reference. The renderer resolves a shader by looking one up in this object, so
+      // merging is the entire integration — no fetch, no cache, no new failure mode. An id that
+      // never arrives simply is not found, and the player hard-cuts exactly as it always has.
+      if (data.custom_shaders && typeof data.custom_shaders === 'object' && window.__TRANSITION_SHADERS) {
+        for (const id in data.custom_shaders) {
+          if (typeof data.custom_shaders[id] === 'string') window.__TRANSITION_SHADERS[id] = data.custom_shaders[id];
+        }
+      }
       // #325: the letterbox colour behind content that does not fill the frame. Applied before
       // orientation so a rotation reflow does not flash the old colour. An absent value leaves the
       // stylesheet's black exactly as it was.

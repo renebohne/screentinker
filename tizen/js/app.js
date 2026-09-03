@@ -854,6 +854,14 @@
   // Rotate the playback stage in software for portrait / flipped signage. Tizen TVs
   // are fixed-landscape, so we rotate the CONTENT (not the panel). Values mirror the
   // dashboard: landscape / portrait / landscape-flipped / portrait-flipped.
+  function mergeCustomShaders(map) {
+    if (!map || typeof map !== 'object' || !window.__TRANSITION_SHADERS) return;
+    for (var id in map) {
+      if (Object.prototype.hasOwnProperty.call(map, id) && typeof map[id] === 'string') {
+        window.__TRANSITION_SHADERS[id] = map[id];
+      }
+    }
+  }
   function applyOrientation(o) {
     // #109: apply the SAME transform to #stage AND #pip so the overlay's corner
     // positions track the visible CONTENT, not the physical panel, in every orientation.
@@ -886,6 +894,10 @@
       player.stop();
       zoneRenderer.clear();
       wallController.exit();
+      // #320: an operator's uploaded shaders ride in with the playlist, keyed by the ids the items
+      // reference. Tizen resolves a shader from the same global the web player does, so merging is
+      // the whole integration and the packaged .wgt needs no rebuild. Missing id -> hard cut, as before.
+      mergeCustomShaders(payload.custom_shaders);
       applyOrientation(payload.orientation || 'landscape');
       elStage.innerHTML = '<div class="card" style="position:relative"><h1>' +
         esc(payload.message || 'Display suspended') + '</h1><p class="sub">' +
@@ -945,6 +957,10 @@
     else groupSync.exit();
     // #157: group-sync advances via its own tick, so suppress the solo deferred-rotation there.
     player.setScheduleDriven(!!payload.group_sync);
+    // #320: an operator's uploaded shaders ride in with the playlist, keyed by the ids the items
+    // reference. Tizen resolves a shader from the same global the web player does, so merging is
+    // the whole integration and the packaged .wgt needs no rebuild. Missing id -> hard cut, as before.
+    mergeCustomShaders(payload.custom_shaders);
     applyOrientation(payload.orientation || 'landscape');
     var layout = payload.layout;
     if (layout && Array.isArray(layout.zones) && layout.zones.length) { // B3: non-array zones would throw in zoneRenderer
