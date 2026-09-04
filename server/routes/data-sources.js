@@ -8,7 +8,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const { db } = require('../db/database');
-const { syncDataSource } = require('../lib/data-sources/service');
+const { syncDataSource, withFetchSlot } = require('../lib/data-sources/service');
 const { resolveIcalData } = require('../lib/data-sources/ical-resolver');
 
 // Helper to gate write operations on workspace role
@@ -82,7 +82,7 @@ router.post('/test', async (req, res) => {
   try {
     let previewData = null;
     if (type === 'ical') {
-      previewData = await resolveIcalData(config);
+      previewData = await withFetchSlot(() => resolveIcalData(config));
     } else {
       return res.status(400).json({ error: `Unsupported data source type: ${type}` });
     }
@@ -92,9 +92,13 @@ router.post('/test', async (req, res) => {
       preview: previewData,
     });
   } catch (err) {
+    // Do NOT leak the raw upstream error to the caller: it can betray internal topology or
+    // distinguish "connection refused" from "DNS failed", which aids SSRF reconnaissance.
+    // Log the detail server-side and surface only a generic message.
+    console.warn(`[data-sources] Test failed for type "${type}": ${err.message}`);
     res.status(422).json({
       status: 'error',
-      error: err.message,
+      error: 'Could not fetch or parse the data source. Check the URL and try again.',
     });
   }
 });

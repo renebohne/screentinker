@@ -1300,6 +1300,9 @@ app.use('/api/ai/generate-design', rateLimit(60000, 10));
 app.use('/api/ai/generate-layered', rateLimit(60000, 3));
 app.use('/api/widgets/preview', rateLimit(60000, 30)); // base64 inline = memory-intensive
 app.use('/api/widgets/preview-session', rateLimit(60000, 30)); // preview session creation retains rendered HTML in memory for 5min
+// `/test` triggers an outbound fetch of an arbitrary calendar feed; cap it so a single
+// workspace cannot fan out unbounded requests to third-party URLs.
+app.use('/api/data-sources/test', rateLimit(60000, 10));
 app.get('/api/kiosk/:id/render', (req, res, next) => { req._skipAuth = true; next(); });
 
 for (const r of PUBLIC_ROUTERS) {

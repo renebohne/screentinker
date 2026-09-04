@@ -8,6 +8,77 @@
  */
 
 const ical = require('node-ical');
+const http = require('http');
+const https = require('https');
+const { assertSafeUrl, pinnedLookup, SsrfError } = require('../ssrf-guard');
+
+const FETCH_TIMEOUT_MS = 10000;
+const MAX_REDIRECTS = 4;
+const MAX_BODY_BYTES = 2 * 1024 * 1024; // refuse calendar feeds larger than 2 MB
+
+/**
+ * Fetch a calendar feed over HTTPS/HTTP with the project's SSRF guard applied.
+ *
+ * node-ical's built-in `fromURL` performs an unguarded fetch that follows redirects and
+ * accepts any scheme, making it an open fetch primitive reachable by workspace editors.
+ * Instead we fetch the bytes ourselves, reusing the hardened pipeline from the media
+ * proxy: vet the URL (scheme + DNS + private-IP ranges), pin the socket to a vetted
+ * address (defeating DNS rebinding), re-vet every redirect hop, and enforce a timeout.
+ * The response body is then parsed locally with ical.sync.parseICS().
+ *
+ * @param {string} urlString - http(s) or webcal:// URL
+ * @returns {Promise<string>} The raw calendar text
+ */
+function fetchCalendar(urlString) {
+  const raw = String(urlString || '').trim().replace(/^webcal:\/\//i, 'https://');
+  const follow = (target, redirectsLeft) => new Promise((resolve, reject) => {
+    assertSafeUrl(target).then(({ url, addresses }) => {
+      const mod = url.protocol === 'https:' ? https : http;
+      const req = mod.request(url, {
+        method: 'GET',
+        lookup: pinnedLookup(addresses),
+        servername: url.hostname,
+        headers: {
+          'User-Agent': 'ScreenTinker-DataSource/2.0',
+          'Accept': 'text/calendar, application/json, text/plain',
+        },
+      }, (res) => {
+        const sc = res.statusCode;
+        if (sc >= 300 && sc < 400 && res.headers.location) {
+          res.resume();
+          if (redirectsLeft <= 0) {
+            return reject(new Error('Too many redirects fetching calendar feed'));
+          }
+          let next;
+          try { next = new URL(res.headers.location, url).toString(); }
+          catch (_) { return reject(new Error('Invalid redirect from calendar feed')); }
+          return follow(next, redirectsLeft - 1).then(resolve, reject);
+        }
+        if (sc !== 200) {
+          res.resume();
+          return reject(new Error(`Calendar feed responded ${sc}`));
+        }
+        const chunks = [];
+        let total = 0;
+        res.on('data', (c) => {
+          total += c.length;
+          if (total > MAX_BODY_BYTES) {
+            res.destroy(new Error('Calendar feed exceeds size limit'));
+            return;
+          }
+          chunks.push(c);
+        });
+        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+        res.on('error', reject);
+      });
+      req.setTimeout(FETCH_TIMEOUT_MS, () => req.destroy(new Error('Calendar feed timed out')));
+      req.on('error', reject);
+      req.end();
+    }, reject);
+  });
+
+  return follow(raw, MAX_REDIRECTS);
+}
 
 /**
  * Fetch and parse an iCal feed from a URL or raw string.
@@ -20,8 +91,8 @@ const ical = require('node-ical');
  *   - lookahead_days: number (default 14)
  *   - max_events: number (default 10)
  *   - event_type: 'all' | 'timed' | 'allday' (default 'all')
- *   - filter_text: string (case-insensitive include keyword / regex)
- *   - exclude_text: string (case-insensitive exclude keyword / regex)
+ *   - filter_text: string (case-insensitive include keyword)
+ *   - exclude_text: string (case-insensitive exclude keyword)
  *   - hide_private: boolean (mask summary as 'Busy' / 'Belegt')
  * @param {Date} [nowRef] Reference timestamp for testing (default new Date())
  * @returns {Promise<object>} Structured data dictionary for template interpolation
@@ -35,19 +106,25 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
   const filterText = (config.filter_text || config.filter_include || '').trim();
   const excludeText = (config.exclude_text || config.filter_exclude || '').trim();
   const hidePrivate = !!config.hide_private;
+  // IANA timezone for display; defaults to the server's local zone when unset.
+  const timezone = (config.timezone || '').trim() || undefined;
 
   let parsedEvents = {};
 
   const inlineIcs = config.ics_data || config.raw_data || config.raw_ics;
   if (inlineIcs) {
-    parsedEvents = ical.sync.parseICS(inlineIcs);
+    try {
+      parsedEvents = ical.sync.parseICS(inlineIcs);
+    } catch (e) {
+      throw new Error(`Invalid inline calendar data: ${e.message}`);
+    }
   } else if (url) {
-    parsedEvents = await ical.async.fromURL(url, {
-      headers: {
-        'User-Agent': 'ScreenTinker-DataSource/2.0',
-        'Accept': 'text/calendar, application/json, text/plain',
-      },
-    });
+    const text = await fetchCalendar(url);
+    try {
+      parsedEvents = ical.sync.parseICS(text);
+    } catch (e) {
+      throw new Error(`Remote calendar data could not be parsed: ${e.message}`);
+    }
   } else {
     throw new Error('No valid iCal URL or data provided');
   }
@@ -67,24 +144,12 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
     const ev = parsedEvents[k];
     if (ev.type !== 'VEVENT') continue;
 
-    // Filter by text if configured
+    // Filter by text if configured (case-insensitive substring match; deliberately NOT a
+    // regular expression so user-supplied patterns cannot cause ReDoS on adversarial input).
     const rawSummary = ev.summary || '';
-    if (filterText) {
-      try {
-        const re = new RegExp(filterText, 'i');
-        if (!re.test(rawSummary)) continue;
-      } catch {
-        if (!rawSummary.toLowerCase().includes(filterText.toLowerCase())) continue;
-      }
-    }
-    if (excludeText) {
-      try {
-        const re = new RegExp(excludeText, 'i');
-        if (re.test(rawSummary)) continue;
-      } catch {
-        if (rawSummary.toLowerCase().includes(excludeText.toLowerCase())) continue;
-      }
-    }
+    const summaryLower = rawSummary.toLowerCase();
+    if (filterText && !summaryLower.includes(filterText.toLowerCase())) continue;
+    if (excludeText && summaryLower.includes(excludeText.toLowerCase())) continue;
 
     // Check if event is all-day (datetype === 'date' or 00:00 to 00:00 next day)
     const isAllDay = ev.datetype === 'date' || (ev.start && ev.end && (ev.end - ev.start >= 86400000));
@@ -153,21 +218,26 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
   // Determine next upcoming event (DTSTART > now)
   const nextEvent = flatEvents.find(e => e.start > now) || null;
 
-  // Format date and time helpers
-  const formatTime = (d) => d.toLocaleTimeString(locale === 'de' ? 'de-DE' : 'en-US', { hour: '2-digit', minute: '2-digit', hour12: locale !== 'de' });
-  const formatDate = (d) => {
-    const isToday = d.toDateString() === now.toDateString();
-    const tomorrow = new Date(now);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const isTomorrow = d.toDateString() === tomorrow.toDateString();
+  // Format date and time helpers (honour the configured IANA timezone, falling back to
+  // the server's local zone so times are never silently shifted for a different venue).
+  const tzOpts = timezone ? { timeZone: timezone } : {};
+  const dateKey = (d) => d.toLocaleDateString('en-CA', tzOpts); // YYYY-MM-DD in target zone
+  const todayKey = dateKey(now);
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowKey = dateKey(tomorrow);
 
-    if (isToday) return locale === 'de' ? 'Heute' : 'Today';
-    if (isTomorrow) return locale === 'de' ? 'Morgen' : 'Tomorrow';
+  const formatTime = (d) => d.toLocaleTimeString(locale === 'de' ? 'de-DE' : 'en-US', { hour: '2-digit', minute: '2-digit', hour12: locale !== 'de', ...tzOpts });
+  const formatDate = (d) => {
+    const key = dateKey(d);
+    if (key === todayKey) return locale === 'de' ? 'Heute' : 'Today';
+    if (key === tomorrowKey) return locale === 'de' ? 'Morgen' : 'Tomorrow';
 
     return d.toLocaleDateString(locale === 'de' ? 'de-DE' : 'en-US', {
       weekday: 'short',
       day: 'numeric',
       month: 'short',
+      ...tzOpts,
     });
   };
 
@@ -216,7 +286,7 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
 
     total_upcoming_count: selectedEvents.length,
     event_count: selectedEvents.length,
-    events_today_count: flatEvents.filter(e => e.start.toDateString() === now.toDateString()).length,
+    events_today_count: flatEvents.filter(e => dateKey(e.start) === todayKey).length,
   };
 
   // Populate indexed items (event_0_title, event_1_title, ...)

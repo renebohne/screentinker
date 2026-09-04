@@ -10,6 +10,27 @@ const crypto = require('crypto');
 const { db } = require('../../db/database');
 const { resolveIcalData } = require('./ical-resolver');
 
+// Bound how many remote calendar feeds may be in flight at once across the whole
+// process. Data source syncs (and `/test`) can fire several fetches near-simultaneously;
+// without a cap a single busy workspace could exhaust sockets/descriptors against
+// third-party calendar hosts.
+const FETCH_CONCURRENCY = 4;
+let activeFetches = 0;
+const fetchWaiters = [];
+async function withFetchSlot(fn) {
+  if (activeFetches >= FETCH_CONCURRENCY) {
+    await new Promise((resolve) => fetchWaiters.push(resolve));
+  }
+  activeFetches += 1;
+  try {
+    return await fn();
+  } finally {
+    activeFetches -= 1;
+    const next = fetchWaiters.shift();
+    if (next) next();
+  }
+}
+
 /**
  * Fetch and refresh a data source by ID or row object.
  *
@@ -46,7 +67,7 @@ async function syncDataSource(sourceOrId, force = false) {
     let resolvedData = null;
 
     if (row.type === 'ical') {
-      resolvedData = await resolveIcalData(config);
+      resolvedData = await withFetchSlot(() => resolveIcalData(config));
     } else {
       throw new Error(`Unsupported data source type: ${row.type}`);
     }
@@ -138,4 +159,5 @@ module.exports = {
   syncDataSource,
   getWorkspaceDataMap,
   getWorkspaceDataMapSync,
+  withFetchSlot,
 };

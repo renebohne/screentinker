@@ -715,6 +715,11 @@ const LIVE_SCRIPT = `<script>
 </script>`;
 
 function interpolateDataSources(text, resolveData) {
+  // ⚠️ CALL-SITE INVARIANT: this may ONLY be used to interpolate into field VALUES (never into
+  // raw HTML/template markup). The output is inserted via `escapeHtml(fields[slot])` at every
+  // point that touches the DOM, so a data-source value carrying markup is neutralised there.
+  // If you need to bring a value into markup in a new place, keep escaping it on the way out —
+  // do not use this function to build HTML.
   if (typeof text !== 'string' || !text.includes('{{ds:')) return text;
   return text.replace(/\{\{ds:([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_]+)\}\}/g, (match, slug, key) => {
     if (typeof resolveData === 'function') {

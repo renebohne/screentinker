@@ -164,3 +164,110 @@ test('renderSlideHtml integrates data source variables into rendered slide HTML'
   assert.ok(html.includes('Raum Berlin: FREI'), 'Rendered HTML contains interpolated status');
   assert.ok(html.includes('Frei bis 14:00 (Nächstes Meeting: Kunden-Präsentation)'), 'Rendered HTML contains interpolated status detail');
 });
+
+test('iCal resolver rejects SSRF targets (loopback / private ranges)', async () => {
+  const now = new Date('2026-09-04T09:30:00Z');
+  // Loopback and cloud-metadata endpoints must never be fetched.
+  for (const bad of [
+    'http://127.0.0.1:8080/feed.ics',
+    'http://127.0.0.1/private.ics',
+    'http://169.254.169.254/latest/meta-data/',
+    'http://[::1]/feed.ics',
+    'http://192.168.1.10/feed.ics',
+    'http://10.0.0.5/feed.ics',
+  ]) {
+    await assert.rejects(
+      () => resolveIcalData({ url: bad, timezone: 'UTC' }, now),
+      (e) => e instanceof Error,
+      `expected SSRF guard to reject ${bad}`,
+    );
+  }
+});
+
+test('iCal resolver rejects non-HTTP(S) URL schemes', async () => {
+  const now = new Date('2026-09-04T09:30:00Z');
+  await assert.rejects(
+    () => resolveIcalData({ url: 'file:///etc/passwd', timezone: 'UTC' }, now),
+    (e) => e instanceof Error,
+    'file:// scheme must be rejected',
+  );
+});
+
+test('iCal resolver tolerates malformed inline ICS without crashing', async () => {
+  const now = new Date('2026-09-04T09:30:00Z');
+  // node-ical is lenient: garbage fails gracefully as an empty feed rather than throwing.
+  // The contract is "no crash / no 500", not "reject".
+  const data = await resolveIcalData({ raw_data: 'this is not a valid calendar{', timezone: 'UTC' }, now);
+  assert.equal(typeof data, 'object');
+  assert.equal(data.event_count, 0);
+});
+
+test('iCal resolver treats empty config as a clean error (not a crash)', async () => {
+  const now = new Date('2026-09-04T09:30:00Z');
+  await assert.rejects(
+    () => resolveIcalData({}, now),
+    (e) => e instanceof Error,
+  );
+  await assert.rejects(
+    () => resolveIcalData(null, now),
+    (e) => e instanceof Error,
+  );
+});
+
+test('iCal resolver honours exclude_text and plain-substring (non-ReDoS) filtering', async () => {
+  const now = new Date('2026-09-04T07:00:00Z');
+  // exclude_text drops matching events.
+  const excluded = await resolveIcalData({
+    raw_data: SAMPLE_ICS,
+    exclude_text: 'Gelber Sack',
+    timezone: 'UTC',
+  }, now);
+  assert.equal(excluded.event_count, 2);
+  assert.notEqual(excluded.next_event_summary, 'Gelber Sack Abholung');
+
+  // A "regex-looking" filter pattern is treated as a literal substring, so a pathological
+  // pattern cannot trigger catastrophic backtracking (ReDoS) on hostile summaries.
+  const data = await resolveIcalData({
+    raw_data: SAMPLE_ICS,
+    filter_text: '(a+)+$',
+    timezone: 'UTC',
+  }, now);
+  assert.equal(data.event_count, 0);
+});
+
+test('iCal resolver formats times in the configured timezone', async () => {
+  const now = new Date('2026-09-04T09:30:00Z'); // 10:30 in Europe/Berlin (CEST), 09:30 in UTC
+  const utc = await resolveIcalData({ raw_data: SAMPLE_ICS, timezone: 'UTC', locale: 'de' }, now);
+  const berlin = await resolveIcalData({ raw_data: SAMPLE_ICS, timezone: 'Europe/Berlin', locale: 'de' }, now);
+
+  assert.ok(String(utc.current_time).startsWith('09:00'), `UTC expected 09:00, got ${utc.current_time}`);
+  assert.ok(String(berlin.current_time).startsWith('11:00'), `Berlin expected 11:00, got ${berlin.current_time}`);
+});
+
+test('data-source values are HTML-escaped when rendered into slide HTML (XSS invariant)', () => {
+  const slideConfig = {
+    template: {
+      aspect: '16:9',
+      background: '#000000',
+      elements: [
+        { id: 'el-1', kind: 'head', slot: 'headline', x: 5, y: 10, w: 90, h: 20, style: { color: '#ffffff', size: 5, weight: 700, align: 'left', font: 'f:inter' } },
+      ]
+    },
+    fields: {
+      headline: '{{ds:room.title}}',
+    }
+  };
+
+  // A hostile data-source value containing script/attribute-breaking markup must be escaped,
+  // never emitted verbatim into the rendered document.
+  const dataSources = {
+    room: {
+      title: '<script>alert(1)</script>" onmouseover="x',
+    }
+  };
+
+  const html = renderSlideHtml(slideConfig, { dataSources });
+  assert.ok(!html.includes('<script>alert(1)</script>'), 'raw script must not appear');
+  assert.ok(html.includes('&lt;script&gt;'), 'script tag must be HTML-escaped');
+  assert.ok(!html.includes('onmouseover="x'), 'attribute-breaking markup must be escaped');
+});
