@@ -714,6 +714,17 @@ const LIVE_SCRIPT = `<script>
 })();
 </script>`;
 
+function interpolateDataSources(text, resolveData) {
+  if (typeof text !== 'string' || !text.includes('{{ds:')) return text;
+  return text.replace(/\{\{ds:([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_]+)\}\}/g, (match, slug, key) => {
+    if (typeof resolveData === 'function') {
+      const val = resolveData(slug, key);
+      if (val !== undefined && val !== null) return String(val);
+    }
+    return '';
+  });
+}
+
 /**
  * Join the template to the record and emit a standalone document.
  *
@@ -723,6 +734,27 @@ const LIVE_SCRIPT = `<script>
 function renderSlideHtml(rawConfig, opts = {}) {
   const slide = normalizeSlide(rawConfig);
   const resolveImage = typeof opts.resolveImage === 'function' ? opts.resolveImage : () => null;
+
+  let resolveData = typeof opts.resolveData === 'function' ? opts.resolveData : null;
+  if (!resolveData && opts.dataSources && typeof opts.dataSources === 'object') {
+    resolveData = (slug, key) => {
+      const s = opts.dataSources[slug] || opts.dataSources[slug.toLowerCase()];
+      if (s && typeof s === 'object') {
+        const val = s[key] !== undefined ? s[key] : (s.data && s.data[key]);
+        return val;
+      }
+      return opts.dataSources[`${slug}.${key}`];
+    };
+  }
+
+  const fields = { ...slide.fields };
+  if (resolveData) {
+    for (const [k, v] of Object.entries(fields)) {
+      if (typeof v === 'string') {
+        fields[k] = interpolateDataSources(v, resolveData);
+      }
+    }
+  }
   /*
    * ⚠️ INJECTED, LIKE resolveImage, AND FOR THE SAME REASON. An uploaded font is a row scoped to a
    * workspace, and the lookup that enforces that belongs with the route that knows the workspace —
@@ -803,7 +835,7 @@ function renderSlideHtml(rawConfig, opts = {}) {
        * invisible to a screen reader, to a search, and to anybody reading this document as text —
        * and the one thing we reliably know about the picture is what it was asked to say.
        */
-      const words = escapeHtml(slide.fields[e.slot] || '');
+      const words = escapeHtml(fields[e.slot] || '');
       const inner = url
         ? `<img class="fit" src="${escapeHtml(url)}" alt="${words}">`
         : `<div class="ph"></div>`;
@@ -812,7 +844,7 @@ function renderSlideHtml(rawConfig, opts = {}) {
 
     if (e.kind === 'qr') {
       // cfg.fg, NOT s.color — see kindConfig for the white-on-white failure that caused.
-      const svg = qrSvg(slide.fields[e.slot] || '', e.cfg.ec, e.cfg.fg, e.cfg.bg);
+      const svg = qrSvg(fields[e.slot] || '', e.cfg.ec, e.cfg.fg, e.cfg.bg);
       css.push('overflow:hidden');
       // The same quiet placeholder a missing photo gets, for the same reason: an empty payload or
       // one too long to encode should leave a gap somebody notices, not break the slide.
@@ -838,7 +870,7 @@ function renderSlideHtml(rawConfig, opts = {}) {
       const attrs = [`data-live="${escapeHtml(live)}"`];
       if (live === 'countdown') {
         if (e.cfg.target != null) attrs.push(`data-to="${e.cfg.target}"`);
-        attrs.push(`data-done="${escapeHtml(slide.fields[e.slot] || '')}"`);
+        attrs.push(`data-done="${escapeHtml(fields[e.slot] || '')}"`);
       } else {
         attrs.push(`data-fmt="${escapeHtml(e.cfg.format)}"`);
         if (e.cfg.tz) attrs.push(`data-tz="${escapeHtml(e.cfg.tz)}"`);
@@ -847,7 +879,7 @@ function renderSlideHtml(rawConfig, opts = {}) {
       return `<div class="e t live" ${attrs.join(' ')} style="${css.filter(Boolean).join(';')}"></div>`;
     }
 
-    return `<div class="e t" style="${css.filter(Boolean).join(';')}">${escapeHtml(slide.fields[e.slot] || '')}</div>`;
+    return `<div class="e t" style="${css.filter(Boolean).join(';')}">${escapeHtml(fields[e.slot] || '')}</div>`;
   }).join('\n    ');
 
   /*
@@ -985,7 +1017,7 @@ module.exports = {
   ANIMATIONS, EASINGS, KINDS,
   CLOCK_FORMATS, DATE_FORMATS, QR_EC, IMAGE_FITS,
   MAX_ELEMENTS, MAX_FIELD_CHARS, MAX_FIELDS,
-  normalizeSlide, settleTime, renderSlideHtml,
+  normalizeSlide, settleTime, renderSlideHtml, interpolateDataSources,
   // Exported for tests: the QR matrix and the constant script are the two pieces whose properties
   // have to be asserted directly rather than inferred from a rendered document.
   qrSvg, LIVE_SCRIPT,

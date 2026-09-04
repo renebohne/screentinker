@@ -1332,7 +1332,7 @@ function updateFrontendHash() {
       'js/views/settings.js', 'js/views/login.js', 'js/views/billing.js',
       'js/views/layout-editor.js', 'js/views/schedule.js', 'js/views/widgets.js',
       'js/views/video-wall.js', 'js/views/reports.js', 'js/views/designer.js',
-      'js/views/activity.js', 'js/views/kiosk.js'].map(f => {
+      'js/views/activity.js', 'js/views/kiosk.js', 'js/views/data-sources.js'].map(f => {
       try { return fs.readFileSync(path.join(config.frontendDir, f)); } catch { return ''; }
     });
     // Include player files in hash so web players detect code updates
