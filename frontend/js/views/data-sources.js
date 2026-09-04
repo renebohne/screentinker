@@ -106,7 +106,7 @@ function renderDataSourcesList(container) {
       const id = e.currentTarget.dataset.id;
       const ds = dataSourcesList.find(x => x.id === id);
       if (!ds) return;
-      if (confirm(t('data_sources.confirm_delete', { name: ds.name }) || `Delete data source "${ds.name}"?`)) {
+      if (confirm(t('data_sources.confirm_delete', { name: ds.name }))) {
         try {
           await api.deleteDataSource(id);
           showToast(t('data_sources.deleted_ok'), 'success');
@@ -144,7 +144,7 @@ function renderDataSourceCard(ds) {
   const isOk = ds.last_status === 'ok';
   const isPending = ds.last_status === 'pending';
   const statusColor = isOk ? '#10b981' : isPending ? '#f59e0b' : '#ef4444';
-  const statusLabel = isOk ? 'OK' : isPending ? (t('common.pending') || 'Pending') : (t('common.error') || 'Error');
+  const statusLabel = isOk ? 'OK' : isPending ? t('common.pending') : t('common.error');
   const lastSync = ds.last_fetched_at ? new Date(ds.last_fetched_at * 1000).toLocaleString() : t('data_sources.never_synced');
   const urlSnippet = ds.config?.url ? ds.config.url.replace(/^https?:\/\//, '').slice(0, 38) + '...' : t('data_sources.inline_data');
 
@@ -226,10 +226,10 @@ function renderDataSourceCard(ds) {
         </button>
         <div style="display:flex;gap:6px">
           <button class="btn btn-sm btn-secondary" data-act="edit" data-id="${esc(ds.id)}">
-            ${esc(t('common.edit') || 'Edit')}
+            ${esc(t('common.edit'))}
           </button>
           <button class="btn btn-sm btn-danger" data-act="del" data-id="${esc(ds.id)}">
-            ${esc(t('common.delete') || 'Delete')}
+            ${esc(t('common.delete'))}
           </button>
         </div>
       </div>
@@ -347,8 +347,8 @@ function openEditModal(ds) {
       </div>
 
       <div class="modal-footer" style="padding:16px 24px;border-top:1px solid var(--border,#334155);display:flex;justify-content:flex-end;gap:10px">
-        <button type="button" id="cancelDsModalBtn" class="btn btn-secondary">${esc(t('common.cancel') || 'Cancel')}</button>
-        <button type="button" id="saveDsModalBtn" class="btn btn-primary">${isEdit ? esc(t('common.save') || 'Save Changes') : esc(t('common.create') || 'Create Data Source')}</button>
+        <button type="button" id="cancelDsModalBtn" class="btn btn-secondary">${esc(t('common.cancel'))}</button>
+        <button type="button" id="saveDsModalBtn" class="btn btn-primary">${isEdit ? esc(t('common.save')) : esc(t('common.create'))}</button>
       </div>
     </div>
   `;
@@ -404,7 +404,7 @@ function openEditModal(ds) {
             <span>${esc(t('data_sources.test_success', { n: prev.event_count || 0 }))}</span>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;background:var(--bg-card);padding:8px;border-radius:4px;color:var(--text-primary)">
-            <div><strong>${esc(t('common.status') || 'Status')}:</strong> ${esc(prev.status || '')}</div>
+            <div><strong>${esc(t('common.status'))}:</strong> ${esc(prev.status || '')}</div>
             <div><strong>${esc(t('data_sources.status_detail_label'))}:</strong> ${esc(prev.status_detail || '')}</div>
             <div><strong>${esc(t('data_sources.next_event_label'))}:</strong> ${esc(prev.next_title || prev.next_event_summary || '–')}</div>
             <div><strong>${esc(t('data_sources.next_time_label'))}:</strong> ${esc(prev.next_time || '')}</div>
@@ -468,7 +468,7 @@ function openEditModal(ds) {
     } catch (err) {
       alert(err.message || 'Failed to save data source');
       saveBtn.disabled = false;
-      saveBtn.textContent = isEdit ? (t('common.save') || 'Save') : (t('common.create') || 'Create');
+      saveBtn.textContent = isEdit ? t('common.save') : t('common.create');
     }
   };
 }

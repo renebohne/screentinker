@@ -386,7 +386,7 @@ async function openNewDeckModal(container) {
         </div>
       </div>
       <div class="modal-footer" style="padding:16px 24px;border-top:1px solid var(--border,#334155);display:flex;justify-content:flex-end;gap:10px">
-        <button type="button" id="cancelNewDeckBtn" class="btn btn-secondary">${esc(t('common.cancel') || 'Cancel')}</button>
+        <button type="button" id="cancelNewDeckBtn" class="btn btn-secondary">${esc(t('common.cancel'))}</button>
         <button type="button" id="submitNewDeckBtn" class="btn btn-primary">${esc(t('slides.create_deck_btn'))}</button>
       </div>
     </div>
@@ -505,30 +505,30 @@ async function openDeck(container, id) {
 function renderEditor(container) {
   const d = state.deck;
   const tabLabels = {
-    content: t('slides.tab_content') || 'Content',
-    style: t('slides.tab_style') || 'Style',
-    motion: t('slides.tab_motion') || 'Motion',
-    slide: t('slides.tab_slide') || 'Slide',
+    content: t('slides.tab_content'),
+    style: t('slides.tab_style'),
+    motion: t('slides.tab_motion'),
+    slide: t('slides.tab_slide'),
   };
 
   container.innerHTML = `
     <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
       <div>
         <div style="display:flex;align-items:center;gap:6px">
-          <input type="text" id="deckNameHeaderInput" class="input" style="font-size:22px;font-weight:700;padding:2px 8px;border:1px solid transparent;background:transparent;color:var(--text-primary);border-radius:6px;max-width:380px" value="${esc(d.name)}" title="${esc(t('slides.deck_name_label') || 'Deck Name')}">
+          <input type="text" id="deckNameHeaderInput" class="input" style="font-size:22px;font-weight:700;padding:2px 8px;border:1px solid transparent;background:transparent;color:var(--text-primary);border-radius:6px;max-width:380px" value="${esc(d.name)}" title="${esc(t('slides.deck_name_label'))}">
           <span style="font-size:14px;color:var(--text-muted);cursor:pointer" onclick="const i=document.getElementById('deckNameHeaderInput');i.focus();i.select()">✏️</span>
         </div>
         <div class="subtitle" id="deckStatus"></div>
       </div>
       <div style="display:flex;gap:8px">
-        <button class="btn btn-secondary" id="backBtn">← ${esc(t('slides.all_decks') || 'All decks')}</button>
-        <button class="btn btn-secondary" id="saveBtn">${esc(t('common.save') || 'Save')}</button>
+        <button class="btn btn-secondary" id="backBtn">← ${esc(t('slides.all_decks'))}</button>
+        <button class="btn btn-secondary" id="saveBtn">${esc(t('common.save'))}</button>
         <!--
           Preview opens the real player in preview mode against this deck's playlist, so what plays
           is the payload a screen would get — same renderer, same transitions, same audio.
         -->
-        <button class="btn btn-secondary" id="previewBtn">▶ ${esc(t('common.preview') || 'Preview')}</button>
-        <button class="btn btn-primary" id="pubBtn">${esc(t('common.publish') || 'Publish')}</button>
+        <button class="btn btn-secondary" id="previewBtn">▶ ${esc(t('common.preview'))}</button>
+        <button class="btn btn-primary" id="pubBtn">${esc(t('common.publish'))}</button>
       </div>
     </div>
     <div id="warnBox"></div>
@@ -1107,7 +1107,7 @@ function renderStrip(container) {
       const idx = +b.dataset.slide;
       const targetSlide = state.deck.doc.slides[idx];
       if (!targetSlide) return;
-      const newName = prompt(t('slides.prompt_rename_slide') || 'Rename slide:', targetSlide.name);
+      const newName = prompt(t('slides.prompt_rename_slide'), targetSlide.name);
       if (newName !== null && newName.trim()) {
         targetSlide.name = newName.trim();
         touch(container);
