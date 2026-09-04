@@ -211,9 +211,17 @@ Rate-limited and protected by `pairLockout`.
 ```
 
 > [!NOTE]
-> **Optional Browser Requirement for Widgets & HTML:**
-> Standard image content (PNG, JPEG, WebP, GIF, BMP) is rendered natively using `jimp` with zero external dependencies.
-> Rendering HTML widgets (Clock, Weather, RSS, Slides) or remote web pages requires installing `puppeteer-core` (`npm i puppeteer-core`) and having a local Chrome/Chromium browser installed (`CHROME_PATH`). If absent, the server returns an informative `BROWSER_NOT_FOUND` / `unsupported` response while image playback continues unaffected.
+> **Full Widget, Slide & Webpage Rendering on E-Paper Displays:**
+> - **Native Image Content:** Standard images (PNG, JPEG, WebP, GIF, BMP) are rendered natively using `jimp` with zero external dependencies.
+> - **Widgets, Slides & Webpages (via Docker):** Use the pre-configured [`docker-compose.embedded.yml`](file:///Users/rene/Documents/github/screentinker/docker-compose.embedded.yml) (built from [`Dockerfile.embedded`](file:///Users/rene/Documents/github/screentinker/Dockerfile.embedded)), which includes headless Chromium and fonts out-of-the-box:
+>   ```bash
+>   docker compose -f docker-compose.embedded.yml up -d --build
+>   ```
+> - **Widgets, Slides & Webpages (Bare-Metal Linux / VPS):** Simply install Chromium and fonts:
+>   ```bash
+>   sudo apt-get install -y chromium-browser fonts-liberation fonts-noto-color-emoji
+>   ```
+> - **Local Development (macOS / Windows):** Automatically detects your installed Google Chrome or Microsoft Edge.
 
 ---
 

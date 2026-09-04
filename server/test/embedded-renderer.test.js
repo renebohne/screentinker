@@ -274,6 +274,20 @@ describe('Embedded Renderer Native Image Path', () => {
     const res = await render(item, {}, { width: 800, height: 480 });
     assert.ok(res.unsupported);
   });
+
+  test('renders weather widget natively via Jimp without browser', async () => {
+    const item = {
+      id: 'item-weather-1',
+      widget_type: 'weather',
+      widget_config: JSON.stringify({ location: 'Berlin', units: 'metric' }),
+    };
+    const profile = { width: 800, height: 480 };
+
+    const res = await render(item, {}, profile);
+    assert.ok(res.png);
+    assert.ok(Buffer.isBuffer(res.png));
+    assert.ok(res.png.length > 5000);
+  });
 });
 
 describe('Embedded Pairing Security', () => {

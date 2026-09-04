@@ -1,0 +1,40 @@
+# ScreenTinker Server Image with Embedded E-Paper & Full Widget/Slide Rendering Support
+# Includes Chromium and system fonts for server-side rasterization to E-Paper displays
+# (Seeed Studio reTerminal Sticky, TRMNL, Inky, ESP32-S3 E-Paper displays).
+
+FROM node:20-slim AS builder
+WORKDIR /app/server
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 build-essential \
+    && rm -rf /var/lib/apt/lists/*
+COPY server/package.json server/package-lock.json ./
+RUN npm ci
+
+FROM node:20-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ffmpeg \
+       chromium \
+       fonts-liberation \
+       fonts-noto-color-emoji \
+       fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CHROME_PATH=/usr/bin/chromium
+ENV NODE_ENV=production
+ENV DATA_DIR=/data
+WORKDIR /app/server
+
+COPY server/ /app/server/
+COPY --from=builder /app/server/node_modules /app/server/node_modules
+COPY frontend/ /app/frontend/
+COPY shared/ /app/shared/
+COPY VERSION /app/VERSION
+COPY release-notes.json /app/release-notes.json
+COPY docs/openapi.yaml /app/docs/openapi.yaml
+COPY scripts/ /app/scripts/
+COPY brightsign/ /app/brightsign/
+
+VOLUME ["/data"]
+EXPOSE 3001
+CMD ["node", "server.js"]

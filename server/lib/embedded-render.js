@@ -200,12 +200,22 @@ async function renderRemoteImage(content, profile) {
   return img.getBuffer('image/png');
 }
 
-async function renderWidgetOrHtml(html, profile) {
+async function renderWidgetOrHtml(html, profile, widgetType = '') {
   const browser = await getBrowser();
   const page = await browser.newPage();
   try {
     await page.setViewport({ width: profile.width, height: profile.height });
-    await page.setContent(html, { waitUntil: 'load', timeout: 5000 });
+    await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 5000 });
+
+    // For dynamic widgets with async network requests (e.g. weather), wait for data to populate
+    if (widgetType === 'weather') {
+      await page.waitForFunction(() => {
+        const temp = document.getElementById('temp');
+        const desc = document.getElementById('desc');
+        return (temp && temp.textContent !== '--') || (desc && desc.textContent.length > 0);
+      }, { timeout: 3500 }).catch(() => {});
+    }
+
     const snap = await page.screenshot({ type: 'png' });
     return Buffer.from(snap);
   } finally {
@@ -235,7 +245,7 @@ async function render(item, content, profile) {
     try {
       const { renderWidgetHtml } = require('../routes/widgets');
       const html = renderWidgetHtml(type, config);
-      const png = await renderWidgetOrHtml(html, profile);
+      const png = await renderWidgetOrHtml(html, profile, type);
       return { png };
     } catch (e) {
       if (e.code === 'BROWSER_UNAVAILABLE' || e.code === 'BROWSER_NOT_FOUND') {
