@@ -39,10 +39,10 @@ const { db }                = require('../db/database');
 const { deviceTokenAuth }   = require('../middleware/deviceTokenAuth');
 const { bearerAuth }        = require('../middleware/apiToken');
 const { resolveTenancy }    = require('../lib/tenancy');
-const { resolveDevicePlaylist } = require('../lib/resolve-device-playlist');
+const { resolveDevicePlaylist, resolvedLayoutId } = require('../lib/resolve-device-playlist');
 const { parseProfile, listPresets } = require('../lib/embedded-profiles');
 const { cacheKey, toETag, isNotModified, get: cacheGet, set: cacheSet } = require('../lib/embedded-cache');
-const { render }            = require('../lib/embedded-render');
+const { render, renderLayout } = require('../lib/embedded-render');
 const { postprocess }       = require('../lib/embedded-postprocess');
 const pairLockout           = require('../lib/pair-lockout');
 const { sixDigitCode }      = require('../lib/numeric-code');
@@ -200,6 +200,113 @@ function resolveCurrentItem(deviceId, forceIndex) {
     itemIndex: idx,
     expiresIn,
     total: items.length,
+  };
+}
+
+const ZONE_CURSOR_GET = db.prepare(
+  'SELECT item_index, started_at FROM embedded_zone_cursor WHERE device_id = ? AND zone_id = ?'
+);
+const ZONE_CURSOR_UPSERT = db.prepare(`
+  INSERT INTO embedded_zone_cursor (device_id, zone_id, item_index, started_at)
+  VALUES (?, ?, ?, strftime('%s','now'))
+  ON CONFLICT(device_id, zone_id) DO UPDATE SET item_index = excluded.item_index,
+                                                 started_at = strftime('%s','now')
+`);
+
+/*
+ * Resolve all active items per zone for a device's assigned layout.
+ *
+ * @param {string} deviceId
+ * @returns {{ layout, zoneEntries, expiresIn, dynamicRev } | null}
+ *   null when device has no layout or layout has no zones.
+ */
+function resolveLayoutItems(deviceId) {
+  const { playlist_id } = resolveDevicePlaylist(deviceId);
+  const layoutId = resolvedLayoutId(deviceId);
+  if (!layoutId) return null;
+
+  const layout = db.prepare('SELECT * FROM layouts WHERE id = ?').get(layoutId);
+  if (!layout) return null;
+
+  const zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order ASC, id ASC').all(layoutId);
+  if (!zones || !zones.length) return null;
+
+  let allItems = [];
+  if (playlist_id) {
+    allItems = db.prepare(`
+      SELECT pi.*, pl.workspace_id, c.mime_type, c.filepath, c.remote_url, c.thumbnail_path,
+             c.updated_at AS content_updated_at, c.id AS content_id,
+             w.widget_type, w.config AS widget_config, w.name AS widget_name,
+             w.updated_at AS widget_updated_at
+      FROM playlist_items pi
+      JOIN playlists pl ON pl.id = pi.playlist_id
+      LEFT JOIN content c ON c.id = pi.content_id
+      LEFT JOIN widgets w ON pi.widget_id = w.id
+      WHERE pi.playlist_id = ?
+        AND (pl.status = 'published' OR pl.status IS NULL)
+        AND (c.id IS NULL OR c.is_active IS NULL OR c.is_active = 1)
+      ORDER BY pi.sort_order ASC, pi.id ASC
+    `).all(playlist_id);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const zoneEntries = [];
+  const expiresList = [];
+  const dynamicRevParts = [layout.updated_at || layout.id];
+
+  for (let i = 0; i < zones.length; i++) {
+    const zone = zones[i];
+    const isFirst = (i === 0);
+    const matchingItems = allItems.filter(item => item.zone_id === zone.id || (isFirst && !item.zone_id));
+
+    if (!matchingItems.length) {
+      zoneEntries.push({ zone, item: null, content: null });
+      dynamicRevParts.push(`z_${zone.id}_empty`);
+      continue;
+    }
+
+    let cursor = ZONE_CURSOR_GET.get(deviceId, zone.id);
+    if (!cursor) {
+      ZONE_CURSOR_UPSERT.run(deviceId, zone.id, 0);
+      cursor = { item_index: 0, started_at: now };
+    }
+
+    let idx = cursor.item_index % matchingItems.length;
+    let startedAt = cursor.started_at;
+    const currentItem = matchingItems[idx];
+    const duration = currentItem.duration_sec || 30;
+    const elapsed = now - startedAt;
+
+    if (elapsed >= duration) {
+      idx = (idx + 1) % matchingItems.length;
+      ZONE_CURSOR_UPSERT.run(deviceId, zone.id, idx);
+      startedAt = now;
+    }
+
+    const item = matchingItems[idx];
+    const itemDuration = item.duration_sec || 30;
+    const expiresIn = Math.max(1, itemDuration - (now - startedAt));
+    expiresList.push(expiresIn);
+
+    let dRev = item.widget_updated_at || item.content_updated_at || item.updated_at || 0;
+    if (item.widget_type === 'clock') {
+      dRev = `clock_${Math.floor(now / 60)}`;
+    } else if (item.widget_type === 'weather') {
+      dRev = `weather_${Math.floor(now / 600)}`;
+    } else if (item.widget_type === 'slide') {
+      dRev = `slide_${Math.floor(now / 60)}`;
+    }
+    dynamicRevParts.push(`z_${zone.id}_${item.id}_${dRev}`);
+
+    zoneEntries.push({ zone, item, content: item });
+  }
+
+  const expiresIn = expiresList.length ? Math.min(...expiresList) : 60;
+  return {
+    layout,
+    zoneEntries,
+    expiresIn,
+    dynamicRev: dynamicRevParts.join(';'),
   };
 }
 
@@ -373,6 +480,43 @@ router.get('/render', resolveAuth, async (req, res) => {
     }
   }
 
+  if (req.query.mode === 'layout') {
+    return handleRenderLayout(req, res, device, profile);
+  }
+  return handleRenderStandard(req, res, device, profile);
+});
+
+// ─── GET /api/embedded/render-layout ────────────────────────────────────────────
+
+router.get('/render-layout', resolveAuth, async (req, res) => {
+  const device = resolveDevice(req, res);
+  if (!device) return;
+
+  const profile = parseProfile(device.screen_profile);
+  if (!profile) {
+    return res.status(400).json({
+      error: 'Embedded rendering not configured for this device.',
+      hint: 'Set devices.screen_profile (use GET /api/embedded/presets for options).',
+    });
+  }
+
+  if (req.query.format) {
+    const fmt = String(req.query.format).toLowerCase();
+    if (fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed') {
+      profile.outputFormat = fmt;
+    }
+  }
+  if (req.query.dither) {
+    const d = String(req.query.dither).toLowerCase();
+    if (d === 'floyd-steinberg' || d === 'atkinson' || d === 'none') {
+      profile.dither = d;
+    }
+  }
+
+  return handleRenderLayout(req, res, device, profile);
+});
+
+async function handleRenderStandard(req, res, device, profile) {
   const forceIndex = req.query.item !== undefined ? req.query.item : null;
   const resolved = resolveCurrentItem(device.id, forceIndex);
   if (!resolved) {
@@ -473,7 +617,83 @@ router.get('/render', resolveAuth, async (req, res) => {
 
   res.set({ ...headers, 'Content-Type': processed.contentType });
   res.status(200).send(processed.buffer);
-});
+}
+
+async function handleRenderLayout(req, res, device, profile) {
+  const resolved = resolveLayoutItems(device.id);
+  // Fall back to standard single-item render if device has no multi-zone layout
+  if (!resolved) {
+    return handleRenderStandard(req, res, device, profile);
+  }
+
+  const clientIp = touchDeviceHeartbeat(device, req);
+  const { layout, zoneEntries, expiresIn, dynamicRev } = resolved;
+  const isPreview = req.query.preview === '1';
+
+  console.log(`[embedded] Device '${device.name}' (${device.id}) requested multi-zone frame [layout=${layout.name || layout.id}] from ${clientIp}`);
+
+  // ── Cache check ─────────────────────────────────────────────────────────────
+  const key = cacheKey(
+    device.id,
+    'layout_' + layout.id,
+    dynamicRev,
+    profile
+  );
+
+  const headers = {
+    'ETag': toETag(key),
+    'Cache-Control': 'no-store',
+    'X-ST-Device-Id': device.id,
+    'X-ST-Layout-Id': layout.id,
+    'X-ST-Expires-In': String(expiresIn),
+    'X-ST-Total-Zones': String(zoneEntries.length),
+  };
+
+  if (!isPreview && isNotModified(key, req.headers['if-none-match'])) {
+    res.set(headers).status(304).end();
+    return;
+  }
+
+  // ── Cache hit ───────────────────────────────────────────────────────────────
+  if (!isPreview) {
+    const cached = cacheGet(key);
+    if (cached.hit) {
+      res.set({ ...headers, 'Content-Type': detectContentType(profile) });
+      return res.status(200).send(cached.buffer);
+    }
+  }
+
+  // ── Render ──────────────────────────────────────────────────────────────────
+  let renderResult;
+  try {
+    renderResult = await renderLayout(layout, zoneEntries, profile);
+  } catch (e) {
+    console.error(`[embedded] multi-zone layout render error: ${e.message}`);
+  }
+
+  if (!renderResult || renderResult.unsupported) {
+    return res.status(501).json({
+      error: 'Multi-zone layout rendering failed or not supported.',
+      detail: renderResult?.reason || 'Browser unavailable for multi-zone rendering',
+    });
+  }
+
+  // ── Post-process ─────────────────────────────────────────────────────────────
+  let processed;
+  try {
+    processed = await postprocess(renderResult.png, profile);
+  } catch (e) {
+    console.error('[embedded] postprocess error:', e.message);
+    return res.status(500).json({ error: `Post-processing failed: ${e.message}` });
+  }
+
+  if (!isPreview) {
+    try { cacheSet(key, processed.buffer); } catch { /* best-effort */ }
+  }
+
+  res.set({ ...headers, 'Content-Type': processed.contentType });
+  res.status(200).send(processed.buffer);
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 

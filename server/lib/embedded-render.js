@@ -310,4 +310,120 @@ async function render(item, content, profile) {
   return { unsupported: true, reason: 'No renderable source found for this content item.' };
 }
 
-module.exports = { render, closeBrowser, getBrowser };
+function escapeHtmlAttr(str) {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Render a multi-zone layout composition into a composite PNG Buffer.
+ *
+ * @param {object} layout - Layout record
+ * @param {Array<{ zone: object, item: object|null, content: object|null }>} zoneEntries
+ * @param {object} profile - screen_profile
+ * @returns {Promise<{ png: Buffer } | { unsupported: true, reason: string }>}
+ */
+async function renderLayout(layout, zoneEntries, profile) {
+  const { renderWidgetHtml, imageResolverFor, dataResolverFor } = require('../routes/widgets');
+  const { fontResolverFor } = require('../routes/fonts');
+  const { db } = require('../db/database');
+
+  const zoneHtmls = [];
+
+  for (const entry of zoneEntries) {
+    const { zone, item, content } = entry;
+    const x = Number(zone.x_percent) || 0;
+    const y = Number(zone.y_percent) || 0;
+    const w = Number(zone.width_percent) || 100;
+    const h = Number(zone.height_percent) || 100;
+    const zIndex = Number(zone.z_index) || 1;
+
+    let innerHtml = '<div style="width:100%;height:100%;background:transparent;"></div>';
+
+    if (item && (item.widget_id || item.widget_type)) {
+      const type = item.widget_type || 'clock';
+      let config = {};
+      if (typeof item.widget_config === 'string') {
+        try { config = JSON.parse(item.widget_config); } catch (_) {}
+      } else if (typeof item.widget_config === 'object' && item.widget_config !== null) {
+        config = item.widget_config;
+      }
+
+      let wsId = item.workspace_id || layout?.workspace_id || profile?.workspace_id;
+      if (!wsId && item.widget_id) {
+        try {
+          const row = db.prepare('SELECT workspace_id FROM widgets WHERE id = ?').get(item.widget_id);
+          if (row) wsId = row.workspace_id;
+        } catch (_) {}
+      }
+
+      const widgetHtml = renderWidgetHtml(type, config, {
+        resolveImage: imageResolverFor ? imageResolverFor({ workspace_id: wsId }) : undefined,
+        resolveFont: fontResolverFor ? fontResolverFor({ workspace_id: wsId }) : undefined,
+        resolveData: typeof dataResolverFor === 'function' ? dataResolverFor(wsId) : undefined,
+      });
+
+      innerHtml = `<iframe srcdoc="${escapeHtmlAttr(widgetHtml)}" style="width:100%;height:100%;border:none;overflow:hidden;display:block;" scrolling="no"></iframe>`;
+    } else if (content && content.remote_url) {
+      innerHtml = `<img src="${escapeHtmlAttr(content.remote_url)}" style="width:100%;height:100%;object-fit:cover;display:block;" />`;
+    } else if (content && content.filepath) {
+      const safe = path.resolve(contentDir(), path.basename(content.filepath));
+      if (safe.startsWith(path.resolve(contentDir())) && fs.existsSync(safe)) {
+        try {
+          const buf = fs.readFileSync(safe);
+          const ext = path.extname(content.filepath).toLowerCase();
+          const mime = EXT_MIME[ext] || content.mime_type || 'image/png';
+          innerHtml = `<img src="data:${mime};base64,${buf.toString('base64')}" style="width:100%;height:100%;object-fit:cover;display:block;" />`;
+        } catch (_) {}
+      }
+    }
+
+    zoneHtmls.push(`
+      <div class="zone-slot" style="position:absolute;left:${x}%;top:${y}%;width:${w}%;height:${h}%;z-index:${zIndex};overflow:hidden;">
+        ${innerHtml}
+      </div>
+    `);
+  }
+
+  const compositeHtml = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    width: ${profile.width}px; height: ${profile.height}px;
+    background: #000000; overflow: hidden; position: relative;
+    box-sizing: border-box;
+  }
+  *, *:before, *:after { box-sizing: inherit; }
+  .zone-slot { position: absolute; overflow: hidden; }
+  .zone-slot iframe, .zone-slot img { width: 100%; height: 100%; display: block; border: 0; }
+</style>
+</head>
+<body>
+  ${zoneHtmls.join('\n')}
+</body>
+</html>`;
+
+  try {
+    const png = await renderWidgetOrHtml(compositeHtml, profile, 'layout');
+    return { png };
+  } catch (e) {
+    if (e.code === 'BROWSER_UNAVAILABLE' || e.code === 'BROWSER_NOT_FOUND') {
+      return {
+        unsupported: true,
+        reason: 'Multi-zone layout rendering requires a browser (set CHROME_PATH).',
+      };
+    }
+    throw e;
+  }
+}
+
+module.exports = { render, renderLayout, closeBrowser, getBrowser };
+

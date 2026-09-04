@@ -44,6 +44,17 @@ db.exec(`
   CREATE TABLE embedded_cursor (
     device_id TEXT PRIMARY KEY, item_index INTEGER DEFAULT 0, started_at INTEGER DEFAULT 0
   );
+  CREATE TABLE embedded_zone_cursor (
+    device_id TEXT, zone_id TEXT, item_index INTEGER DEFAULT 0, started_at INTEGER DEFAULT 0,
+    PRIMARY KEY(device_id, zone_id)
+  );
+  CREATE TABLE layouts (
+    id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, is_template INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0
+  );
+  CREATE TABLE layout_zones (
+    id TEXT PRIMARY KEY, layout_id TEXT, name TEXT, x_percent REAL, y_percent REAL,
+    width_percent REAL, height_percent REAL, z_index INTEGER DEFAULT 0, sort_order INTEGER DEFAULT 0
+  );
   CREATE VIEW device_resolved_playlist AS
   SELECT d.id AS device_id, d.playlist_id, 'device' AS source, NULL AS layout_id
   FROM devices d;
@@ -241,9 +252,9 @@ describe('Postprocessing & Dithering', () => {
   });
 });
 
-const { render, closeBrowser } = require('../lib/embedded-render');
+const { render, renderLayout, closeBrowser } = require('../lib/embedded-render');
 
-describe('Embedded Renderer Native Image Path', () => {
+describe('Embedded Renderer Native Image Path & Multi-Zone Layout', () => {
   after(async () => {
     await closeBrowser();
   });
@@ -287,6 +298,28 @@ describe('Embedded Renderer Native Image Path', () => {
     assert.ok(res.png);
     assert.ok(Buffer.isBuffer(res.png));
     assert.ok(res.png.length > 5000);
+  });
+
+  test('renders multi-zone layout composition via renderLayout', async () => {
+    const layout = { id: 'tpl-split-h', name: 'Split Horizontal' };
+    const zoneEntries = [
+      {
+        zone: { id: 'z1', x_percent: 0, y_percent: 0, width_percent: 50, height_percent: 100, z_index: 0 },
+        item: { widget_type: 'clock', widget_config: { timezone: 'Europe/Berlin' } },
+        content: null,
+      },
+      {
+        zone: { id: 'z2', x_percent: 50, y_percent: 0, width_percent: 50, height_percent: 100, z_index: 0 },
+        item: { widget_type: 'weather', widget_config: { location: 'Berlin', units: 'metric' } },
+        content: null,
+      },
+    ];
+    const profile = { width: 800, height: 480 };
+
+    const res = await renderLayout(layout, zoneEntries, profile);
+    assert.ok(res.png);
+    assert.ok(Buffer.isBuffer(res.png));
+    assert.ok(res.png.length > 1000);
   });
 });
 
