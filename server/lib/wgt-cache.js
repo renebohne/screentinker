@@ -8,8 +8,12 @@
 // /data/ScreenTinker.wgt. The in-repo tizen/ copy (usually unsigned, inspection-only) is a
 // last-resort fallback so a dev box still serves *something*.
 //
-// size is the load-bearing field — sssp_config.xml must report the EXACT byte length of the
-// file the panel then downloads, or the install fails. We always derive it from the real file.
+// size is the load-bearing field, and its UNIT is the thing that bites: sssp_config.xml reports
+// KILOBYTES, not bytes (#329). We stored and emitted the byte length, so a 126929-byte .wgt
+// advertised <size>126929</size> and an OM55B refused it with "Unable to install. Please try
+// again later." — no clue that a unit was the problem. Correcting the value by hand to 124 made
+// the same file install. cache.size stays in BYTES (the landing page renders MB from it); only
+// ssspConfigXml() converts, so there is exactly one place that knows the manifest's unit.
 
 const fs = require('fs');
 const path = require('path');
@@ -59,15 +63,24 @@ function start() {
 // The SSSP manifest the panel fetches at <entered-url>/sssp_config.xml. widgetname (no extension)
 // tells the panel to download <widgetname>.wgt from the same directory — we serve it at
 // /tizen/ScreenTinker.wgt. webtype=tizen marks it a Tizen web app.
+// Bytes -> kilobytes for the manifest, rounded UP. Rounding up rather than down on purpose: the
+// value tells the panel how much to expect, and under-reporting a partial last KB is what a
+// truncated download looks like. A file that exists always advertises at least 1.
+function sizeKb(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.ceil(n / 1024);
+}
+
 function ssspConfigXml(wgt = cache) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <widget>
 \t<ver>${wgt.version}</ver>
-\t<size>${wgt.size}</size>
+\t<size>${sizeKb(wgt.size)}</size>
 \t<widgetname>ScreenTinker</widgetname>
 \t<webtype>tizen</webtype>
 </widget>
 `;
 }
 
-module.exports = { start, refresh, get, ssspConfigXml, WIDGET_NAME: 'ScreenTinker' };
+module.exports = { start, refresh, get, ssspConfigXml, sizeKb, WIDGET_NAME: 'ScreenTinker' };

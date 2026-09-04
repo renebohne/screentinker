@@ -54,9 +54,15 @@ fi
 # URL in a Samsung panel's URL Launcher / Custom App to natively install (the panel fetches
 # <url>/sssp_config.xml, reads size+ver, downloads ScreenTinker.wgt). The ScreenTinker server
 # also generates this dynamically at /tizen/sssp_config.xml — this static copy is for hosting the
-# .wgt on a CDN/bucket instead. <size> must equal the FINAL (signed) .wgt's byte length, so
-# regenerate this whenever the .wgt is (re-)signed — the size changes.
-WGT_SIZE=$(wc -c < "$OUT" | tr -d ' ')
+# .wgt on a CDN/bucket instead.
+#
+# ⚠️ <size> IS IN KILOBYTES, NOT BYTES (#329). Writing the byte count here is what a panel reports
+# as "Unable to install. Please try again later." — an OM55B on Tizen 5.0 refused a 126929-byte
+# build advertised as <size>126929</size>, and installed the identical file once the value read
+# 124. Nothing in the failure names the size, let alone the unit. Rounded UP, and regenerate this
+# whenever the .wgt is (re-)signed, because the size changes.
+WGT_BYTES=$(wc -c < "$OUT" | tr -d ' ')
+WGT_SIZE=$(( (WGT_BYTES + 1023) / 1024 ))
 cat > sssp_config.xml <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <widget>
@@ -66,4 +72,4 @@ cat > sssp_config.xml <<EOF
 	<webtype>tizen</webtype>
 </widget>
 EOF
-echo "Wrote sssp_config.xml (ver ${VER:-1.0.0}, size ${WGT_SIZE} bytes)."
+echo "Wrote sssp_config.xml (ver ${VER:-1.0.0}, size ${WGT_SIZE} KB from ${WGT_BYTES} bytes)."
