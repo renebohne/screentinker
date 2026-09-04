@@ -14,6 +14,14 @@
   ],
   "releases": [
     {
+      "version": "2.0.7",
+      "date": "2026-09-04",
+      "notes": [
+        "Fixes a bug in 2.0.6 that left the dashboard blank and showing \"Disconnected\". Your screens were never affected — they kept playing normally throughout — but the dashboard itself would not load. Please update.",
+        "The dashboard no longer makes pointless background requests for the multi-server features on installs that do not use them, which were showing up as errors in the browser console."
+      ]
+    },
+    {
       "version": "2.0.6",
       "date": "2026-09-03",
       "notes": [

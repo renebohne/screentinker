@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.0.7
+
+### Fixed — 2.0.6 broke the dashboard for everyone
+
+`frontend/js/views/schedule.js` shipped with its new recurrence block inserted INSIDE an
+unterminated `import {`, so the file was a syntax error. `app.js` imports that module statically,
+which means the failure was never confined to the Schedule view: the whole dashboard module graph
+stopped evaluating, and every page rendered blank and reported "Disconnected". The player and the
+API were unaffected — screens carried on showing their playlists throughout — but nobody could
+open the dashboard to see that.
+
+The fix is a reordering; not a line of the recurrence logic changed.
+
+Nothing in this repo had ever parsed browser code. The server has its own tests and CI lints
+`docs/openapi.yaml`, but `frontend/` was only ever read by a browser, so a file that could not be
+parsed at all passed every gate we had. `test/frontend-parses.test.js` now parses every `.js` under
+`frontend/` and `tizen/` — accepting module or classic-script syntax, since the tree holds both —
+and asserts the static-import property that made this fatal rather than local.
+
+### Fixed — the dashboard no longer probes for a mesh it was told it does not have (#329)
+
+The mesh routers mount conditionally, and the client discovered whether they existed by calling them
+and reading the 404: `/mesh/capabilities` then `/mesh/nodes` on every sidebar render, `/mesh/orgs`
+on every `/me` refresh, and `/mesh/alerts` and `/mesh/uptime` whenever those views opened. On an
+install with no mesh — very nearly all of them — that is a steady trickle of 404s in the console for
+a question the server settled at boot.
+
+`/api/auth/me` now carries `mesh: { enroll, hub }`, recorded where the mount decision is actually
+made, mirroring the existing `hide_billing` flag. The two are separate because the routes are: the
+Servers nav turns on `enroll` (either half of a mesh), while the aggregate reads live in the hub
+router and turn on `hub`.
+
+An absent flag means UNKNOWN, not off. A server older than this field, or a user cached before it,
+falls through to the original probe-and-catch path, so an older install still lights up its Servers
+section correctly rather than silently hiding it.
+
 ## 2.0.6
 
 ### Added — e-paper and microcontroller displays
