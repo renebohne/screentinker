@@ -2,6 +2,11 @@ import { api, assertLocalCallAllowed } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { t } from '../i18n.js';
 import {
+  HOUR_PX, pxToMinutes, minutesToPx, rangeFromDrag, moveRange, resizeRange,
+  toLocalStamp, formatRange, canMoveAcrossDays, editsWholeSeries, isDrag,
+  splitAcrossMidnight, crossesMidnight, canDragEvent,
+  dragArmMode, LONG_PRESS_MS, DEFAULT_NEW_MIN,
+} from '../lib/schedule-grid.js';
 
 /*
  * #327: compose and parse the recurrence rule.
@@ -70,11 +75,6 @@ function syncRepeatUI() {
   if (daysRow) daysRow.style.display = sel.value === 'CUSTOM' ? '' : 'none';
   if (endRow) endRow.style.display = sel.value ? '' : 'none';
 }
-  HOUR_PX, pxToMinutes, minutesToPx, rangeFromDrag, moveRange, resizeRange,
-  toLocalStamp, formatRange, canMoveAcrossDays, editsWholeSeries, isDrag,
-  splitAcrossMidnight, crossesMidnight, canDragEvent,
-  dragArmMode, LONG_PRESS_MS, DEFAULT_NEW_MIN,
-} from '../lib/schedule-grid.js';
 
 // A refused request must reject, not resolve.
 //
