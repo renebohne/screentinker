@@ -81,7 +81,7 @@ function renderRemoteOrgBanner() {
   el.querySelector('#leaveRemoteOrg').onclick = () => { clearRemoteOrg(); window.location.reload(); };
 }
 import { showToast } from './components/toast.js';
-import { api } from './api.js';
+import { api, meshCapability } from './api.js';
 import { esc } from './utils.js';
 
 const app = document.getElementById('app');
@@ -300,11 +300,16 @@ async function refreshCurrentUser() {
     //
     // ⚠️ Remote orgs are fetched separately and FAIL SILENTLY. A server with no mesh has no such
     // endpoint, and an install that has never heard of the feature must not see an error about it.
+    // #329: /orgs is a HUB route. On a server that is not a hub it 404s, and this runs on every
+    // /me refresh, so the console filled up with them. `null` means the server did not say, and
+    // the old ask-and-shrug path stands.
     let remoteOrgs = [];
-    try {
-      const r = await fetch('/api/mesh/orgs', { headers: { Authorization: `Bearer ${token}` } });
-      if (r.ok) remoteOrgs = (await r.json()).orgs || [];
-    } catch (e) { remoteOrgs = []; }
+    if (meshCapability('hub') !== false) {
+      try {
+        const r = await fetch('/api/mesh/orgs', { headers: { Authorization: `Bearer ${token}` } });
+        if (r.ok) remoteOrgs = (await r.json()).orgs || [];
+      } catch (e) { remoteOrgs = []; }
+    }
     renderWorkspaceSwitcher(fresh, remoteOrgs);
     renderRemoteOrgBanner();
     window.dispatchEvent(new CustomEvent('user-refreshed', { detail: fresh }));
@@ -696,11 +701,21 @@ function updateSidebarUser() {
      * /mesh/capabilities is mounted when EITHER flag is on, or when an uplink already exists, so it
      * is the honest question to ask: "is this node part of a mesh in any way?"
      */
-    api.get('/mesh/capabilities')
-      .then(() => { serversNav.style.display = ''; })
-      .catch(() => api.get('/mesh/nodes')
+    /*
+     * #329: /me answers this now, so the common case costs no requests at all. The probe below is
+     * kept for when it does NOT answer — a server older than this field, or a cached user from
+     * before it — because a silent `false` there would hide the section on a real mesh node.
+     */
+    const meshEnroll = meshCapability('enroll');
+    if (meshEnroll !== null) {
+      serversNav.style.display = meshEnroll ? '' : 'none';
+    } else {
+      api.get('/mesh/capabilities')
         .then(() => { serversNav.style.display = ''; })
-        .catch(() => { serversNav.style.display = 'none'; }));
+        .catch(() => api.get('/mesh/nodes')
+          .then(() => { serversNav.style.display = ''; })
+          .catch(() => { serversNav.style.display = 'none'; }));
+    }
   }
 
   let userEl = document.getElementById('sidebarUser');

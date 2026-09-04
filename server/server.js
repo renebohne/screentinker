@@ -1195,7 +1195,25 @@ const { requireAuth } = require('./middleware/auth');
 const { activityLogger } = require('./services/activity');
 app.use(activityLogger);
 
-if (require('./config').meshAcceptEnrollment) {
+/*
+ * #329: whether either half of the mesh is mounted is decided HERE, once, at boot — so it is also
+ * recorded here for /api/auth/me to hand to the dashboard. The client used to discover it by
+ * probing (GET /mesh/capabilities, then /mesh/nodes, then /mesh/orgs on every /me refresh), which
+ * on an install with no mesh — very nearly all of them — is a handful of 404s in the console every
+ * time the sidebar renders. Asking the network a question the server already knows the answer to.
+ *
+ * ⚠️ These mirror the mount conditions immediately below and must move with them. They are the
+ * BOOT decision, deliberately, not a live recompute: hasUpEdges() can become true after boot, but
+ * the routes are not mounted retroactively, so a live answer would advertise routes that 404.
+ */
+const meshHubMounted = !!require('./config').meshAcceptEnrollment;
+const meshEnrollMounted = (() => {
+  const c = require('./config');
+  return !!(c.meshAcceptEnrollment || c.meshAllowUplink || hasUpEdges());
+})();
+app.locals.mesh = { hub: meshHubMounted, enroll: meshEnrollMounted };
+
+if (meshHubMounted) {
   try {
     app.use('/api/mesh',
       require('./routes/mesh')(require('./db/database').db, { requireAuth }));
@@ -1217,7 +1235,7 @@ if (require('./config').meshAcceptEnrollment) {
  */
 {
   const meshCfg = require('./config');
-  if (meshCfg.meshAcceptEnrollment || meshCfg.meshAllowUplink || hasUpEdges()) {
+  if (meshEnrollMounted) {
     try {
       app.use('/api/mesh', require('./routes/mesh-enroll')(require('./db/database').db, {
         requireAuth,

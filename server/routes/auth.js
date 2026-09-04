@@ -799,6 +799,14 @@ router.get('/me', requireAuth, resolveTenancy, (req, res) => {
     // reflects live state after reload. Fail-open to verified if somehow absent.
     email_verified: db.prepare('SELECT email_verified FROM users WHERE id = ?').get(req.user.id)?.email_verified ?? 1,
     hide_billing: config.hideBilling, // #116: client hides the Subscription nav + guards #/billing
+    // #329: same idea as hide_billing above — a capability the client cannot infer without asking.
+    // `enroll` decides whether the Servers nav appears (the honest "is this node part of a mesh in
+    // any way?"); `hub` gates the aggregate reads (/mesh/orgs, /alerts, /uptime, /devices), which
+    // live in the hub router and 404 on a node that only reports upward.
+    mesh: {
+      enroll: !!(req.app.locals.mesh && req.app.locals.mesh.enroll),
+      hub: !!(req.app.locals.mesh && req.app.locals.mesh.hub),
+    },
     current_workspace_id: req.workspaceId,
     current_workspace: req.workspace ? { id: req.workspace.id, name: req.workspace.name, organization_id: req.workspace.organization_id } : null,
     current_organization: currentOrg,

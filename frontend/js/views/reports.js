@@ -1,4 +1,4 @@
-import { api } from '../api.js';
+import { api, meshCapability } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { esc } from '../utils.js';
 import { t } from '../i18n.js';
@@ -224,6 +224,9 @@ export async function renderUptimeReport() {
 
   let list;
   // No mesh, or nothing visible: this section simply does not exist for that install.
+  // #329: /uptime is a hub route. When the server has already said it is not a hub, skip straight
+  // to the same empty outcome rather than spending a 404 to learn it.
+  if (meshCapability('hub') === false) { host.innerHTML = ''; return; }
   try { list = await api.get('/mesh/uptime'); } catch (e) { host.innerHTML = ''; return; }
   uptimeState.clients = list.clients || [];
   if (!uptimeState.clients.length) { host.innerHTML = ''; return; }

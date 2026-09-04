@@ -249,6 +249,24 @@ async function request(url, options = {}) {
   return res.json();
 }
 
+/*
+ * #329: is a mesh route worth calling at all?
+ *
+ * The mesh routers are mounted CONDITIONALLY, and the dashboard used to discover that by calling
+ * them and reading the 404 — on every sidebar render and every /me refresh. /me now states it
+ * outright (server/routes/auth.js), and this reads the cached answer.
+ *
+ * `undefined` is NOT `false`: a cached user from before this shipped, or a server that predates it,
+ * says nothing either way. Those fall through to `null`, and callers keep the old probe-and-catch
+ * path, so an older server still lights up its Servers nav correctly.
+ */
+export function meshCapability(which) {
+  let u;
+  try { u = JSON.parse(localStorage.getItem('user') || 'null'); } catch (_) { return null; }
+  if (!u || !u.mesh || typeof u.mesh[which] !== 'boolean') return null;
+  return u.mesh[which];
+}
+
 export const api = {
   /*
    * ⚠️ GENERIC VERBS. Everything else here is a named helper, which is the right shape for a
