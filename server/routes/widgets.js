@@ -1526,3 +1526,4 @@ function renderDiagSmoothness(config) {
 
 module.exports = router;
 module.exports.renderWidgetHtml = renderWidgetHtml;
+module.exports.imageResolverFor = imageResolverFor;

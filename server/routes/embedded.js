@@ -145,7 +145,7 @@ function resolveCurrentItem(deviceId, forceIndex) {
 
   // Fetch all active, published items in playlist order (joining content and widgets).
   const items = db.prepare(`
-    SELECT pi.*, c.mime_type, c.filepath, c.remote_url, c.thumbnail_path,
+    SELECT pi.*, pl.workspace_id, c.mime_type, c.filepath, c.remote_url, c.thumbnail_path,
            c.updated_at AS content_updated_at, c.id AS content_id,
            w.widget_type, w.config AS widget_config, w.name AS widget_name,
            w.updated_at AS widget_updated_at
@@ -391,6 +391,8 @@ router.get('/render', resolveAuth, async (req, res) => {
     dynamicRev = `clock_${Math.floor(Date.now() / 60000)}`; // invalidate every minute
   } else if (item.widget_type === 'weather') {
     dynamicRev = `weather_${Math.floor(Date.now() / 600000)}`; // invalidate every 10 min
+  } else if (item.widget_type === 'slide') {
+    dynamicRev = `slide_${Math.floor(Date.now() / 60000)}`; // invalidate every minute for dynamic content/clocks
   }
 
   const key = cacheKey(

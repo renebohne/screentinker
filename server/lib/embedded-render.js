@@ -243,8 +243,23 @@ async function render(item, content, profile) {
     }
 
     try {
-      const { renderWidgetHtml } = require('../routes/widgets');
-      const html = renderWidgetHtml(type, config);
+      const { renderWidgetHtml, imageResolverFor, dataResolverFor } = require('../routes/widgets');
+      const { fontResolverFor } = require('../routes/fonts');
+      const { db } = require('../db/database');
+
+      let wsId = item.workspace_id || content?.workspace_id || profile?.workspace_id;
+      if (!wsId && item.widget_id) {
+        try {
+          const w = db.prepare('SELECT workspace_id FROM widgets WHERE id = ?').get(item.widget_id);
+          if (w) wsId = w.workspace_id;
+        } catch (_) {}
+      }
+
+      const html = renderWidgetHtml(type, config, {
+        resolveImage: imageResolverFor ? imageResolverFor({ workspace_id: wsId }) : undefined,
+        resolveFont: fontResolverFor ? fontResolverFor({ workspace_id: wsId }) : undefined,
+        resolveData: typeof dataResolverFor === 'function' ? dataResolverFor(wsId) : undefined,
+      });
       const png = await renderWidgetOrHtml(html, profile, type);
       return { png };
     } catch (e) {
