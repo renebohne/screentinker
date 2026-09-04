@@ -286,6 +286,22 @@ describe('Embedded Renderer Native Image Path & Multi-Zone Layout', () => {
     assert.ok(res.unsupported);
   });
 
+  test('rejects a local image filepath that escapes the content directory', async () => {
+    const item = { id: 'item-traversal' };
+    // A `../` filepath must never be resolved outside the uploads content dir.
+    const content = { id: 'cnt-traversal', filepath: '../../../../etc/passwd' };
+    const profile = { width: 800, height: 480 };
+
+    // The renderer must NOT succeed in reading a file outside the content dir.
+    // It should reject (either because the basename-guarded path is absent, or because
+    // the escalation is denied) rather than return pixels from /etc/passwd.
+    await assert.rejects(
+      () => render(item, content, profile),
+      (e) => e.code === 'INVALID_PATH' || e.code === 'NOT_FOUND',
+      'expected a path-traversal filepath to be rejected, not read from disk',
+    );
+  });
+
   test('renders weather widget natively via Jimp without browser', async () => {
     const item = {
       id: 'item-weather-1',
@@ -320,6 +336,23 @@ describe('Embedded Renderer Native Image Path & Multi-Zone Layout', () => {
     assert.ok(res.png);
     assert.ok(Buffer.isBuffer(res.png));
     assert.ok(res.png.length > 1000);
+  });
+
+  test('renderLayout coerces a malicious profile dimension to a safe integer', async () => {
+    const layout = { id: 'tpl-split-h', name: 'Split Horizontal' };
+    const zoneEntries = [
+      {
+        zone: { id: 'z1', x_percent: 0, y_percent: 0, width_percent: 50, height_percent: 100, z_index: 0 },
+        item: { widget_type: 'clock', widget_config: { timezone: 'Europe/Berlin' } },
+        content: null,
+      },
+    ];
+    // A hostile/overflowing profile must not be interpolated into CSS.
+    const profile = { width: '800px; background:red', height: '480" onload=alert(1)' };
+
+    const res = await renderLayout(layout, zoneEntries, profile);
+    assert.ok(res.png);
+    assert.ok(Buffer.isBuffer(res.png));
   });
 });
 

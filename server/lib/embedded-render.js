@@ -36,6 +36,15 @@ function contentDir() {
   return config.contentDir;
 }
 
+// Coerce an untrusted dimension (from a screen_profile row) to a positive integer.
+// Returns `fallback` for anything non-numeric, non-finite, or out of range — so a
+// malformed profile can never inject arbitrary values into CSS or viewport dimensions.
+function safeDimension(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0 || n > 100000) return fallback;
+  return Math.floor(n);
+}
+
 // MIME types Jimp can decode natively
 const IMAGE_MIMES = new Set([
   'image/jpeg', 'image/jpg', 'image/png', 'image/gif',
@@ -156,11 +165,17 @@ process.on('SIGINT', () => { closeBrowser(); });
 // ─── Native Image Renderers (Jimp) ───────────────────────────────────────────
 
 async function renderLocalImage(content, profile) {
-  const filepath = path.join(contentDir(), content.filepath);
-  if (!fs.existsSync(filepath)) {
+  // Guard against a `filepath` escaping the content directory (mirrors the
+  // same path.basename() + startsWith() check used when rendering layout zones).
+  const base = path.resolve(contentDir());
+  const safe = path.resolve(base, path.basename(String(content.filepath || '')));
+  if (!safe.startsWith(base + path.sep) && safe !== base) {
+    throw Object.assign(new Error('Invalid content file path'), { code: 'INVALID_PATH' });
+  }
+  if (!fs.existsSync(safe)) {
     throw Object.assign(new Error('Content file not found on disk'), { code: 'NOT_FOUND' });
   }
-  const img = await Jimp.fromBuffer(fs.readFileSync(filepath));
+  const img = await Jimp.fromBuffer(fs.readFileSync(safe));
   img.cover({ w: profile.width, h: profile.height });
   return img.getBuffer('image/png');
 }
@@ -329,6 +344,13 @@ function escapeHtmlAttr(str) {
  * @returns {Promise<{ png: Buffer } | { unsupported: true, reason: string }>}
  */
 async function renderLayout(layout, zoneEntries, profile) {
+  // Safely coerce numeric dimensions we later interpolate into CSS/viewport
+  // (width/height come from the screen_profile row). Default on unparseable input
+  // so a malformed profile cannot inject into the composite HTML.
+  const width = safeDimension(profile.width, 800);
+  const height = safeDimension(profile.height, 480);
+  profile = { ...profile, width, height };
+
   const { renderWidgetHtml, imageResolverFor, dataResolverFor } = require('../routes/widgets');
   const { fontResolverFor } = require('../routes/fonts');
   const { db } = require('../db/database');

@@ -669,6 +669,10 @@ async function handleRenderLayout(req, res, device, profile) {
     renderResult = await renderLayout(layout, zoneEntries, profile);
   } catch (e) {
     console.error(`[embedded] multi-zone layout render error: ${e.message}`);
+    return res.status(500).json({
+      error: 'Multi-zone layout rendering failed.',
+      detail: 'An unexpected error occurred while rendering the layout.',
+    });
   }
 
   if (!renderResult || renderResult.unsupported) {
