@@ -126,8 +126,7 @@ Fetches the pre-rendered image for the current playlist item.
 - **`If-None-Match`** *(header, optional)*: ETag received in previous request.
 - **`format`** *(query, optional)*: Override output format (`x-epd-packed`, `png`, `jpeg`, `bmp`, `raw`).
 - **`dither`** *(query, optional)*: Override dithering algorithm (`floyd-steinberg`, `atkinson`, `none`).
-- **`item`** *(query, optional)*: Force a specific 0-based playlist item index.
-- **`preview`** *(query, optional)*: `1` = Bypass cache.
+- **`mode`** *(query, optional)*: `layout` (forces multi-zone layout rendering), `single` (forces single-item rendering). When omitted, automatically renders in multi-zone layout mode if the device's assigned playlist has a multi-zone layout (`zones.length > 1`), or single-item mode otherwise.
 
 #### Responses
 - **`200 OK`**: Binary image body formatted per the device's `screen_profile`.
@@ -135,19 +134,39 @@ Fetches the pre-rendered image for the current playlist item.
   - Response Headers:
     - `ETag`: `"sha256-hash..."`
     - `X-ST-Expires-In`: Seconds until the current item ends (sleep timer for MCU).
-    - `X-ST-Item-Index`: Current playlist item index (0-based).
+    - `X-ST-Item-Index`: Current playlist item index (0-based) or `X-ST-Total-Zones` (in layout mode).
     - `X-ST-Total-Items`: Total active items in playlist.
     - `X-ST-Device-Id`: Device UUID.
-    - `X-ST-Content-Id`: Content ID.
+    - `X-ST-Content-Id`: Content ID or `X-ST-Layout-Id`.
 - **`304 Not Modified`**: Sent when `If-None-Match` matches the current content digest. Body is empty.
 - **`400 Bad Request`**: Device lacks a configured `screen_profile`.
 - **`401 Unauthorized`**: Invalid or missing device token.
 - **`404 Not Found`**: Device not found or no playlist assigned.
-- **`501 Not Implemented`**: Sent only for unsupported media types (e.g. video files on monochrome e-paper). All HTML widgets (Clock, Weather, RSS, Text, Slides) and remote web pages are rendered server-side via headless Chrome.
 
 ---
 
-### 2.2 `GET /api/embedded/info`
+### 2.2 Multi-Zone Layout Rendering & Zero-Browser Fallback
+
+Devices assigned to multi-zone layouts are automatically composited on the server:
+- **Native Image-Only Layouts (Zero Browser):** When all zones contain static images (local uploads or remote image URLs), the multi-zone canvas is composited natively using Jimp with zero external browser dependencies.
+- **Dynamic Widgets & Webpage Zones:** When zones include clocks, weather, slides, or web pages, Headless Chromium renders the composite.
+
+> [!NOTE]
+> **Full Widget, Slide & Webpage Rendering on E-Paper Displays:**
+> - **Native Image Content:** Standard images (PNG, JPEG, WebP, GIF, BMP) and image-only multi-zone layouts are rendered natively using `jimp` with zero external dependencies.
+> - **Widgets, Slides & Webpages (via Docker):** Use the pre-configured [`docker-compose.embedded.yml`](../docker-compose.embedded.yml) (built from [`Dockerfile.embedded`](../Dockerfile.embedded)), which includes headless Chromium and fonts out-of-the-box:
+>   ```bash
+>   docker compose -f docker-compose.embedded.yml up -d --build
+>   ```
+> - **Widgets, Slides & Webpages (Bare-Metal Linux / VPS):** Simply install Chromium and fonts:
+>   ```bash
+>   sudo apt-get install -y chromium-browser fonts-liberation fonts-noto-color-emoji
+>   ```
+> - **Local Development (macOS / Windows):** Automatically detects your installed Google Chrome or Microsoft Edge.
+
+---
+
+### 2.3 `GET /api/embedded/info`
 
 Returns JSON metadata describing device status, screen profile, timing, and playlist configuration.
 
@@ -210,16 +229,6 @@ Rate-limited and protected by `pairLockout`.
 }
 ```
 
-> [!NOTE]
-> **Full Widget, Slide & Webpage Rendering on E-Paper Displays:**
-> - **Native Image Content:** Standard images (PNG, JPEG, WebP, GIF, BMP) are rendered natively using `jimp` with zero external dependencies.
-> - **Widgets, Slides & Webpages (via Docker):** Use the pre-configured [`docker-compose.embedded.yml`](file:///Users/rene/Documents/github/screentinker/docker-compose.embedded.yml) (built from [`Dockerfile.embedded`](file:///Users/rene/Documents/github/screentinker/Dockerfile.embedded)), which includes headless Chromium and fonts out-of-the-box:
->   ```bash
->   docker compose -f docker-compose.embedded.yml up -d --build
->   ```
-> - **Widgets, Slides & Webpages (Bare-Metal Linux / VPS):** Simply install Chromium and fonts:
->   ```bash
->   sudo apt-get install -y chromium-browser fonts-liberation fonts-noto-color-emoji
 >   ```
 > - **Local Development (macOS / Windows):** Automatically detects your installed Google Chrome or Microsoft Edge.
 

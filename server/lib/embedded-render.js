@@ -215,20 +215,64 @@ async function renderRemoteImage(content, profile) {
   return img.getBuffer('image/png');
 }
 
+const PORT = process.env.PORT || 3001;
+const BASE_URL = process.env.BASE_URL || `http://127.0.0.1:${PORT}`;
+
 async function renderWidgetOrHtml(html, profile, widgetType = '') {
   const browser = await getBrowser();
   const page = await browser.newPage();
   try {
     await page.setViewport({ width: profile.width, height: profile.height });
-    await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 5000 });
 
-    // For dynamic widgets with async network requests (e.g. weather), wait for data to populate
+    // Inject <base href> so origin-relative URLs (/uploads, /fonts) resolve correctly in about:blank
+    let finalHtml = html;
+    if (!/<base\s/i.test(finalHtml)) {
+      if (/<head>/i.test(finalHtml)) {
+        finalHtml = finalHtml.replace(/<head>/i, `<head><base href="${BASE_URL}/">`);
+      } else {
+        finalHtml = `<base href="${BASE_URL}/">\n` + finalHtml;
+      }
+    }
+
+    // Single-widget / slide / webpage items wait for 'load'
+    await page.setContent(finalHtml, { waitUntil: 'load', timeout: 8000 }).catch(async () => {
+      // Fallback if external resources or fonts take longer than timeout
+      await page.setContent(finalHtml, { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+    });
+
+    // Dynamic widgets with async network requests (e.g. weather)
     if (widgetType === 'weather') {
       await page.waitForFunction(() => {
         const temp = document.getElementById('temp');
         const desc = document.getElementById('desc');
         return (temp && temp.textContent !== '--') || (desc && desc.textContent.length > 0);
       }, { timeout: 3500 }).catch(() => {});
+    } else if (widgetType === 'layout') {
+      // Multi-zone layout: wait for all zone iframes and images to settle
+      await page.evaluate(async () => {
+        const imgs = Array.from(document.querySelectorAll('img'));
+        await Promise.all(imgs.map(img => {
+          if (img.complete && img.naturalHeight !== 0) return Promise.resolve();
+          return new Promise(resolve => {
+            img.addEventListener('load', resolve, { once: true });
+            img.addEventListener('error', resolve, { once: true });
+            setTimeout(resolve, 2500);
+          });
+        }));
+
+        const iframes = Array.from(document.querySelectorAll('iframe'));
+        await Promise.all(iframes.map(iframe => {
+          return new Promise(resolve => {
+            try {
+              const doc = iframe.contentDocument || iframe.contentWindow?.document;
+              if (doc && doc.readyState === 'complete') return resolve();
+            } catch (_) {}
+            iframe.addEventListener('load', resolve, { once: true });
+            iframe.addEventListener('error', resolve, { once: true });
+            setTimeout(resolve, 2500);
+          });
+        }));
+      }).catch(() => {});
     }
 
     const snap = await page.screenshot({ type: 'png' });
@@ -335,6 +379,72 @@ function escapeHtmlAttr(str) {
     .replace(/>/g, '&gt;');
 }
 
+function isLayoutImageOnly(zoneEntries) {
+  for (const entry of zoneEntries) {
+    const { item, content } = entry;
+    if (!item && !content) continue;
+    if (item && (item.widget_id || item.widget_type)) return false;
+    if (content && content.remote_url && !looksLikeImage(content.remote_url, content.mime_type)) return false;
+  }
+  return true;
+}
+
+/**
+ * Pure Jimp native composite for multi-zone layouts containing only images.
+ * Zero browser dependency — runs anywhere in production.
+ */
+async function renderLayoutNative(layout, zoneEntries, profile) {
+  const canvas = new Jimp({ width: profile.width, height: profile.height, color: 0x000000FF });
+
+  const sorted = [...zoneEntries].sort((a, b) => {
+    const za = Number.isFinite(Number(a.zone?.z_index)) ? Number(a.zone.z_index) : 0;
+    const zb = Number.isFinite(Number(b.zone?.z_index)) ? Number(b.zone.z_index) : 0;
+    return za - zb;
+  });
+
+  for (const entry of sorted) {
+    const { zone, content } = entry;
+    if (!content) continue;
+
+    const x = Number.isFinite(Number(zone.x_percent)) ? Math.max(0, Math.min(100, Number(zone.x_percent))) : 0;
+    const y = Number.isFinite(Number(zone.y_percent)) ? Math.max(0, Math.min(100, Number(zone.y_percent))) : 0;
+    const w = Number.isFinite(Number(zone.width_percent)) ? Math.max(0, Math.min(100, Number(zone.width_percent))) : 100;
+    const h = Number.isFinite(Number(zone.height_percent)) ? Math.max(0, Math.min(100, Number(zone.height_percent))) : 100;
+
+    const pixelX = Math.round((x / 100) * profile.width);
+    const pixelY = Math.round((y / 100) * profile.height);
+    const pixelW = Math.max(1, Math.round((w / 100) * profile.width));
+    const pixelH = Math.max(1, Math.round((h / 100) * profile.height));
+
+    let img = null;
+    if (content.filepath) {
+      const base = path.resolve(contentDir());
+      const safe = path.resolve(base, path.basename(String(content.filepath || '')));
+      if (safe.startsWith(base + path.sep) && fs.existsSync(safe)) {
+        try {
+          img = await Jimp.fromBuffer(fs.readFileSync(safe));
+        } catch (_) {}
+      }
+    } else if (content.remote_url) {
+      try {
+        const res = await fetch(content.remote_url, { signal: AbortSignal.timeout(10000) });
+        if (res.ok) {
+          const buf = Buffer.from(await res.arrayBuffer());
+          img = await Jimp.fromBuffer(buf);
+        }
+      } catch (_) {}
+    }
+
+    if (img) {
+      img.cover({ w: pixelW, h: pixelH });
+      canvas.composite(img, pixelX, pixelY);
+    }
+  }
+
+  const png = await canvas.getBuffer('image/png');
+  return { png };
+}
+
 /**
  * Render a multi-zone layout composition into a composite PNG Buffer.
  *
@@ -351,6 +461,12 @@ async function renderLayout(layout, zoneEntries, profile) {
   const height = safeDimension(profile.height, 480);
   profile = { ...profile, width, height };
 
+  // If the layout consists entirely of images, composite natively via Jimp
+  // with zero browser dependency.
+  if (isLayoutImageOnly(zoneEntries)) {
+    return renderLayoutNative(layout, zoneEntries, profile);
+  }
+
   const { renderWidgetHtml, imageResolverFor, dataResolverFor } = require('../routes/widgets');
   const { fontResolverFor } = require('../routes/fonts');
   const { db } = require('../db/database');
@@ -359,11 +475,11 @@ async function renderLayout(layout, zoneEntries, profile) {
 
   for (const entry of zoneEntries) {
     const { zone, item, content } = entry;
-    const x = Number(zone.x_percent) || 0;
-    const y = Number(zone.y_percent) || 0;
-    const w = Number(zone.width_percent) || 100;
-    const h = Number(zone.height_percent) || 100;
-    const zIndex = Number(zone.z_index) || 1;
+    const x = Number.isFinite(Number(zone.x_percent)) ? Math.max(0, Math.min(100, Number(zone.x_percent))) : 0;
+    const y = Number.isFinite(Number(zone.y_percent)) ? Math.max(0, Math.min(100, Number(zone.y_percent))) : 0;
+    const w = Number.isFinite(Number(zone.width_percent)) ? Math.max(0, Math.min(100, Number(zone.width_percent))) : 100;
+    const h = Number.isFinite(Number(zone.height_percent)) ? Math.max(0, Math.min(100, Number(zone.height_percent))) : 100;
+    const zIndex = Number.isFinite(Number(zone.z_index)) ? Math.floor(Number(zone.z_index)) : 0;
 
     let innerHtml = '<div style="width:100%;height:100%;background:transparent;"></div>';
 
@@ -392,17 +508,14 @@ async function renderLayout(layout, zoneEntries, profile) {
 
       innerHtml = `<iframe srcdoc="${escapeHtmlAttr(widgetHtml)}" style="width:100%;height:100%;border:none;overflow:hidden;display:block;" scrolling="no"></iframe>`;
     } else if (content && content.remote_url) {
-      innerHtml = `<img src="${escapeHtmlAttr(content.remote_url)}" style="width:100%;height:100%;object-fit:cover;display:block;" />`;
-    } else if (content && content.filepath) {
-      const safe = path.resolve(contentDir(), path.basename(content.filepath));
-      if (safe.startsWith(path.resolve(contentDir())) && fs.existsSync(safe)) {
-        try {
-          const buf = fs.readFileSync(safe);
-          const ext = path.extname(content.filepath).toLowerCase();
-          const mime = EXT_MIME[ext] || content.mime_type || 'image/png';
-          innerHtml = `<img src="data:${mime};base64,${buf.toString('base64')}" style="width:100%;height:100%;object-fit:cover;display:block;" />`;
-        } catch (_) {}
+      if (looksLikeImage(content.remote_url, content.mime_type)) {
+        innerHtml = `<img src="${escapeHtmlAttr(content.remote_url)}" style="width:100%;height:100%;object-fit:cover;display:block;" />`;
+      } else {
+        innerHtml = `<iframe src="${escapeHtmlAttr(content.remote_url)}" style="width:100%;height:100%;border:none;overflow:hidden;display:block;" scrolling="no"></iframe>`;
       }
+    } else if (content && content.filepath) {
+      const safeFilename = path.basename(content.filepath);
+      innerHtml = `<img src="/uploads/content/${encodeURIComponent(safeFilename)}" style="width:100%;height:100%;object-fit:cover;display:block;" />`;
     }
 
     zoneHtmls.push(`
@@ -416,6 +529,7 @@ async function renderLayout(layout, zoneEntries, profile) {
 <html>
 <head>
 <meta charset="utf-8">
+<base href="${BASE_URL}/">
 <style>
   html, body {
     margin: 0; padding: 0;
@@ -440,12 +554,12 @@ async function renderLayout(layout, zoneEntries, profile) {
     if (e.code === 'BROWSER_UNAVAILABLE' || e.code === 'BROWSER_NOT_FOUND') {
       return {
         unsupported: true,
-        reason: 'Multi-zone layout rendering requires a browser (set CHROME_PATH).',
+        reason: 'Multi-zone layout rendering with widgets or web pages requires a browser (set CHROME_PATH).',
       };
     }
     throw e;
   }
 }
 
-module.exports = { render, renderLayout, closeBrowser, getBrowser };
+module.exports = { render, renderLayout, renderLayoutNative, closeBrowser, getBrowser };
 

@@ -220,7 +220,7 @@ const ZONE_CURSOR_UPSERT = db.prepare(`
  * @returns {{ layout, zoneEntries, expiresIn, dynamicRev } | null}
  *   null when device has no layout or layout has no zones.
  */
-function resolveLayoutItems(deviceId) {
+function resolveLayoutItems(deviceId, forceIndex) {
   const { playlist_id } = resolveDevicePlaylist(deviceId);
   const layoutId = resolvedLayoutId(deviceId);
   if (!layoutId) return null;
@@ -249,6 +249,43 @@ function resolveLayoutItems(deviceId) {
     `).all(playlist_id);
   }
 
+  // Identify valid zones and find the largest zone by area for orphan assignment
+  const validZoneIds = new Set(zones.map(z => z.id));
+  let largestZone = zones[0];
+  let maxArea = 0;
+  for (const z of zones) {
+    const area = (Number(z.width_percent) || 100) * (Number(z.height_percent) || 100);
+    if (area > maxArea) {
+      maxArea = area;
+      largestZone = z;
+    }
+  }
+
+  // Bucket items per zone matching player parity (player/index.html:5767-5782)
+  const zoneBuckets = new Map(zones.map(z => [z.id, []]));
+  const unassigned = [];
+  const orphans = [];
+
+  for (const item of allItems) {
+    if (item.zone_id && validZoneIds.has(item.zone_id)) {
+      zoneBuckets.get(item.zone_id).push(item);
+    } else if (!item.zone_id) {
+      unassigned.push(item);
+    } else {
+      orphans.push(item);
+    }
+  }
+
+  for (const item of unassigned) {
+    const firstEmpty = zones.find(z => zoneBuckets.get(z.id).length === 0);
+    const target = firstEmpty || largestZone;
+    zoneBuckets.get(target.id).push(item);
+  }
+
+  for (const item of orphans) {
+    zoneBuckets.get(largestZone.id).push(item);
+  }
+
   const now = Math.floor(Date.now() / 1000);
   const zoneEntries = [];
   const expiresList = [];
@@ -256,8 +293,7 @@ function resolveLayoutItems(deviceId) {
 
   for (let i = 0; i < zones.length; i++) {
     const zone = zones[i];
-    const isFirst = (i === 0);
-    const matchingItems = allItems.filter(item => item.zone_id === zone.id || (isFirst && !item.zone_id));
+    const matchingItems = zoneBuckets.get(zone.id) || [];
 
     if (!matchingItems.length) {
       zoneEntries.push({ zone, item: null, content: null });
@@ -265,22 +301,30 @@ function resolveLayoutItems(deviceId) {
       continue;
     }
 
-    let cursor = ZONE_CURSOR_GET.get(deviceId, zone.id);
-    if (!cursor) {
-      ZONE_CURSOR_UPSERT.run(deviceId, zone.id, 0);
-      cursor = { item_index: 0, started_at: now };
-    }
+    let idx;
+    let startedAt;
 
-    let idx = cursor.item_index % matchingItems.length;
-    let startedAt = cursor.started_at;
-    const currentItem = matchingItems[idx];
-    const duration = currentItem.duration_sec || 30;
-    const elapsed = now - startedAt;
-
-    if (elapsed >= duration) {
-      idx = (idx + 1) % matchingItems.length;
-      ZONE_CURSOR_UPSERT.run(deviceId, zone.id, idx);
+    if (forceIndex !== undefined && forceIndex !== null) {
+      idx = Math.max(0, Math.min(Number(forceIndex), matchingItems.length - 1));
       startedAt = now;
+    } else {
+      let cursor = ZONE_CURSOR_GET.get(deviceId, zone.id);
+      if (!cursor) {
+        ZONE_CURSOR_UPSERT.run(deviceId, zone.id, 0);
+        cursor = { item_index: 0, started_at: now };
+      }
+
+      idx = cursor.item_index % matchingItems.length;
+      startedAt = cursor.started_at;
+      const currentItem = matchingItems[idx];
+      const duration = currentItem.duration_sec || 30;
+      const elapsed = now - startedAt;
+
+      if (elapsed >= duration) {
+        idx = (idx + 1) % matchingItems.length;
+        ZONE_CURSOR_UPSERT.run(deviceId, zone.id, idx);
+        startedAt = now;
+      }
     }
 
     const item = matchingItems[idx];
@@ -480,9 +524,23 @@ router.get('/render', resolveAuth, async (req, res) => {
     }
   }
 
+  // Query mode overrides
   if (req.query.mode === 'layout') {
     return handleRenderLayout(req, res, device, profile);
   }
+  if (req.query.mode === 'single') {
+    return handleRenderStandard(req, res, device, profile);
+  }
+
+  // Automatic multi-zone layout detection
+  const layoutId = resolvedLayoutId(device.id);
+  if (layoutId) {
+    const zoneCount = db.prepare('SELECT COUNT(*) AS count FROM layout_zones WHERE layout_id = ?').get(layoutId)?.count || 0;
+    if (zoneCount > 1) {
+      return handleRenderLayout(req, res, device, profile);
+    }
+  }
+
   return handleRenderStandard(req, res, device, profile);
 });
 
@@ -620,7 +678,8 @@ async function handleRenderStandard(req, res, device, profile) {
 }
 
 async function handleRenderLayout(req, res, device, profile) {
-  const resolved = resolveLayoutItems(device.id);
+  const forceIndex = req.query.item !== undefined ? req.query.item : null;
+  const resolved = resolveLayoutItems(device.id, forceIndex);
   // Fall back to standard single-item render if device has no multi-zone layout
   if (!resolved) {
     return handleRenderStandard(req, res, device, profile);

@@ -346,6 +346,40 @@ describe('Embedded Renderer Native Image Path & Multi-Zone Layout', () => {
     }
   });
 
+  test('renders image-only layout natively via Jimp without browser', async () => {
+    const tmpUpload = path.join(require('../config').contentDir);
+    fs.mkdirSync(tmpUpload, { recursive: true });
+    const imgPath1 = path.join(tmpUpload, 'layout-test-1.png');
+    const imgPath2 = path.join(tmpUpload, 'layout-test-2.png');
+    const img1 = new Jimp({ width: 200, height: 100, color: 0xFF0000FF });
+    const img2 = new Jimp({ width: 200, height: 100, color: 0x0000FFFF });
+    fs.writeFileSync(imgPath1, await img1.getBuffer('image/png'));
+    fs.writeFileSync(imgPath2, await img2.getBuffer('image/png'));
+
+    const layout = { id: 'tpl-split-img', name: 'Split Images' };
+    const zoneEntries = [
+      {
+        zone: { id: 'z1', x_percent: 0, y_percent: 0, width_percent: 50, height_percent: 100, z_index: 0 },
+        item: { id: 'item-img-1' },
+        content: { id: 'cnt-1', filepath: 'layout-test-1.png' },
+      },
+      {
+        zone: { id: 'z2', x_percent: 50, y_percent: 0, width_percent: 50, height_percent: 100, z_index: 0 },
+        item: { id: 'item-img-2' },
+        content: { id: 'cnt-2', filepath: 'layout-test-2.png' },
+      },
+    ];
+    const profile = { width: 800, height: 480 };
+
+    const res = await renderLayout(layout, zoneEntries, profile);
+    assert.ok(res.png, 'expected native Jimp composite to return PNG');
+    assert.ok(Buffer.isBuffer(res.png));
+    assert.ok(res.png.length > 500);
+
+    try { fs.unlinkSync(imgPath1); } catch (_) {}
+    try { fs.unlinkSync(imgPath2); } catch (_) {}
+  });
+
   test('renderLayout coerces a malicious profile dimension to a safe integer', async () => {
     const layout = { id: 'tpl-split-h', name: 'Split Horizontal' };
     const zoneEntries = [
