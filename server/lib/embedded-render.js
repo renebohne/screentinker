@@ -224,14 +224,14 @@ async function renderWidgetOrHtml(html, profile, widgetType = '') {
   try {
     await page.setViewport({ width: profile.width, height: profile.height });
 
-    // Inject <base href> so origin-relative URLs (/uploads, /fonts) resolve correctly in about:blank
+    // Inject static styles to disable animations/transitions for embedded screenshots
+    // and inject <base href> so origin-relative URLs (/uploads, /fonts) resolve correctly in about:blank
+    const staticStyle = '<style>*, *::before, *::after { animation: none !important; transition: none !important; }</style>';
     let finalHtml = html;
-    if (!/<base\s/i.test(finalHtml)) {
-      if (/<head>/i.test(finalHtml)) {
-        finalHtml = finalHtml.replace(/<head>/i, `<head><base href="${BASE_URL}/">`);
-      } else {
-        finalHtml = `<base href="${BASE_URL}/">\n` + finalHtml;
-      }
+    if (/<head>/i.test(finalHtml)) {
+      finalHtml = finalHtml.replace(/<head>/i, `<head><base href="${BASE_URL}/">\n${staticStyle}`);
+    } else {
+      finalHtml = `<base href="${BASE_URL}/">\n${staticStyle}\n` + finalHtml;
     }
 
     // Single-widget / slide / webpage items wait for 'load'
@@ -239,6 +239,16 @@ async function renderWidgetOrHtml(html, profile, widgetType = '') {
       // Fallback if external resources or fonts take longer than timeout
       await page.setContent(finalHtml, { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
     });
+
+    // Ensure all web fonts are loaded and any lingering animations are finished
+    await page.evaluate(async () => {
+      try {
+        if (document.fonts?.ready) await document.fonts.ready;
+      } catch (_) {}
+      try {
+        document.getAnimations().forEach(a => a.finish());
+      } catch (_) {}
+    }).catch(() => {});
 
     // Dynamic widgets with async network requests (e.g. weather)
     if (widgetType === 'weather') {
