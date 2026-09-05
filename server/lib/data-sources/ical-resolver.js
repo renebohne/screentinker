@@ -31,7 +31,14 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024; // refuse calendar feeds larger than 2 M
  */
 function fetchCalendar(urlString) {
   const raw = String(urlString || '').trim().replace(/^webcal:\/\//i, 'https://');
+  const deadline = Date.now() + FETCH_TIMEOUT_MS;
+
   const follow = (target, redirectsLeft) => new Promise((resolve, reject) => {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      return reject(new Error('Calendar feed timed out'));
+    }
+
     assertSafeUrl(target).then(({ url, addresses }) => {
       const mod = url.protocol === 'https:' ? https : http;
       const req = mod.request(url, {
@@ -71,7 +78,9 @@ function fetchCalendar(urlString) {
         res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
         res.on('error', reject);
       });
-      req.setTimeout(FETCH_TIMEOUT_MS, () => req.destroy(new Error('Calendar feed timed out')));
+
+      const reqTimeout = Math.min(FETCH_TIMEOUT_MS, Math.max(100, deadline - Date.now()));
+      req.setTimeout(reqTimeout, () => req.destroy(new Error('Calendar feed timed out')));
       req.on('error', reject);
       req.end();
     }, reject);
@@ -98,20 +107,20 @@ function fetchCalendar(urlString) {
  * @returns {Promise<object>} Structured data dictionary for template interpolation
  */
 async function resolveIcalData(config = {}, nowRef = new Date()) {
-  const url = (config.url || '').trim().replace(/^webcal:\/\//i, 'https://');
-  const locale = (config.locale || 'de').toLowerCase().startsWith('en') ? 'en' : 'de';
-  const lookaheadDays = Math.max(1, Math.min(365, parseInt(config.lookahead_days, 10) || 14));
-  const maxEvents = Math.max(1, Math.min(50, parseInt(config.max_events, 10) || 10));
-  const eventType = config.event_type || 'all';
-  const filterText = (config.filter_text || config.filter_include || '').trim();
-  const excludeText = (config.exclude_text || config.filter_exclude || '').trim();
-  const hidePrivate = !!config.hide_private;
+  const url = (config?.url || '').trim().replace(/^webcal:\/\//i, 'https://');
+  const locale = (config?.locale || 'de').toLowerCase().startsWith('en') ? 'en' : 'de';
+  const lookaheadDays = Math.max(1, Math.min(365, parseInt(config?.lookahead_days, 10) || 14));
+  const maxEvents = Math.max(1, Math.min(50, parseInt(config?.max_events, 10) || 10));
+  const eventType = config?.event_type || 'all';
+  const filterText = (config?.filter_text || config?.filter_include || '').trim();
+  const excludeText = (config?.exclude_text || config?.filter_exclude || '').trim();
+  const hidePrivate = !!config?.hide_private;
   // IANA timezone for display; defaults to the server's local zone when unset.
-  const timezone = (config.timezone || '').trim() || undefined;
+  const timezone = (config?.timezone || '').trim() || undefined;
 
   let parsedEvents = {};
 
-  const inlineIcs = config.ics_data || config.raw_data || config.raw_ics;
+  const inlineIcs = config?.ics_data || config?.raw_data || config?.raw_ics;
   if (inlineIcs) {
     try {
       parsedEvents = ical.sync.parseICS(inlineIcs);
@@ -151,8 +160,14 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
     if (filterText && !summaryLower.includes(filterText.toLowerCase())) continue;
     if (excludeText && summaryLower.includes(excludeText.toLowerCase())) continue;
 
-    // Check if event is all-day (datetype === 'date' or 00:00 to 00:00 next day)
-    const isAllDay = ev.datetype === 'date' || (ev.start && ev.end && (ev.end - ev.start >= 86400000));
+    // Check if event is all-day (datetype === 'date' or midnight-to-midnight whole days)
+    const isAllDay = ev.datetype === 'date' || (
+      ev.start instanceof Date && ev.end instanceof Date &&
+      ev.start.getHours() === 0 && ev.start.getMinutes() === 0 && ev.start.getSeconds() === 0 &&
+      ev.end.getHours() === 0 && ev.end.getMinutes() === 0 && ev.end.getSeconds() === 0 &&
+      (ev.end - ev.start) >= 86400000 &&
+      (ev.end - ev.start) % 86400000 === 0
+    );
     if (eventType === 'timed' && isAllDay) continue;
     if (eventType === 'allday' && !isAllDay) continue;
 
@@ -160,6 +175,19 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
     const organizer = hidePrivate ? '' : (ev.organizer?.val || ev.organizer || '');
     const location = ev.location || '';
     const description = hidePrivate ? '' : (ev.description || '');
+
+    // Collect EXDATE exclusions
+    const exdateKeys = new Set();
+    if (ev.exdate) {
+      const exList = Array.isArray(ev.exdate) ? ev.exdate : Object.values(ev.exdate);
+      for (const ex of exList) {
+        const d = new Date(ex);
+        if (!isNaN(d.getTime())) {
+          exdateKeys.add(d.toISOString().slice(0, 10));
+          exdateKeys.add(d.getTime());
+        }
+      }
+    }
 
     // Handle RRULE series
     if (ev.rrule) {
@@ -169,19 +197,32 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
 
         for (const date of dates) {
           const occStart = new Date(date);
+          const dateKey = occStart.toISOString().slice(0, 10);
+          if (exdateKeys.has(dateKey) || exdateKeys.has(occStart.getTime())) continue;
+
+          let occSummary = summary;
+          let occLocation = location;
+          let occDescription = description;
+          if (ev.recurrences && (ev.recurrences[dateKey] || ev.recurrences[occStart.toISOString()])) {
+            const rec = ev.recurrences[dateKey] || ev.recurrences[occStart.toISOString()];
+            if (rec.summary && !hidePrivate) occSummary = rec.summary;
+            if (rec.location) occLocation = rec.location;
+            if (rec.description && !hidePrivate) occDescription = rec.description;
+          }
+
           const occEnd = new Date(occStart.getTime() + durationMs);
 
           // Skip if occurrence has already ended before now
           if (occEnd < now && !isAllDay) continue;
 
           flatEvents.push({
-            summary,
+            summary: occSummary,
             start: occStart,
             end: occEnd,
             isAllDay,
             organizer,
-            location,
-            description,
+            location: occLocation,
+            description: occDescription,
           });
         }
       } catch (e) {

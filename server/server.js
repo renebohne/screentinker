@@ -775,6 +775,7 @@ const LIMIT_PATH_SHAPES = [
   [/^\/api\/organizations\/[^/]+\/sso\/[^/]+\/test$/, () => '/api/organizations/:id/sso/:id/test'],
   [/^\/api\/organizations\/[^/]+\/sso\/[^/]+$/, () => '/api/organizations/:id/sso/:id'],
   [/^\/api\/organizations\/[^/]+\/sso$/, () => '/api/organizations/:id/sso'],
+  [/^\/api\/data-sources\/[^/]+\/refresh$/, () => '/api/data-sources/:id/refresh'],
 ];
 
 function canonicalLimitPath(rawPath) {
@@ -1303,6 +1304,7 @@ app.use('/api/widgets/preview-session', rateLimit(60000, 30)); // preview sessio
 // `/test` triggers an outbound fetch of an arbitrary calendar feed; cap it so a single
 // workspace cannot fan out unbounded requests to third-party URLs.
 app.use('/api/data-sources/test', rateLimit(60000, 10));
+app.use('/api/data-sources', rateLimit(60000, 30));
 app.get('/api/kiosk/:id/render', (req, res, next) => { req._skipAuth = true; next(); });
 
 for (const r of PUBLIC_ROUTERS) {

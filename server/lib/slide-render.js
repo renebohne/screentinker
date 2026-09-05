@@ -724,7 +724,7 @@ function interpolateDataSources(text, resolveData) {
   return text.replace(/\{\{ds:([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_]+)\}\}/g, (match, slug, key) => {
     if (typeof resolveData === 'function') {
       const val = resolveData(slug, key);
-      if (val !== undefined && val !== null) return String(val);
+      if (val !== undefined && val !== null) return String(val).slice(0, MAX_FIELD_CHARS);
     }
     return '';
   });

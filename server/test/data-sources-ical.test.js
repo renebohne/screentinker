@@ -271,3 +271,41 @@ test('data-source values are HTML-escaped when rendered into slide HTML (XSS inv
   assert.ok(html.includes('&lt;script&gt;'), 'script tag must be HTML-escaped');
   assert.ok(!html.includes('onmouseover="x'), 'attribute-breaking markup must be escaped');
 });
+
+test('iCal resolver honours EXDATE for recurring RRULE events', async () => {
+  const EXDATE_ICS = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//ScreenTinker Test//DE
+BEGIN:VEVENT
+UID:evt-daily-standup-exdate
+SUMMARY:Daily Standup
+LOCATION:Raum 101
+DTSTART:20260901T080000Z
+DTEND:20260901T083000Z
+RRULE:FREQ=DAILY;COUNT=10
+EXDATE:20260904T080000Z
+END:VEVENT
+END:VCALENDAR`;
+
+  const now = new Date('2026-09-04T08:15:00Z');
+  const data = await resolveIcalData({ raw_data: EXDATE_ICS, timezone: 'UTC' }, now);
+
+  assert.equal(data.is_busy, false);
+  assert.notEqual(data.current_event_summary, 'Daily Standup');
+});
+
+test('interpolateDataSources caps long values to MAX_FIELD_CHARS', () => {
+  const longText = 'A'.repeat(5000);
+  const resolver = (slug, key) => (slug === 'test' && key === 'long' ? longText : null);
+  const interpolated = interpolateDataSources('{{ds:test.long}}', resolver);
+
+  assert.equal(interpolated.length, 2000);
+  assert.equal(interpolated, 'A'.repeat(2000));
+});
+
+test('background poller functions export cleanly', () => {
+  const { pollDueDataSources, startDataSourcesPoller, stopDataSourcesPoller } = require('../lib/data-sources/service');
+  assert.equal(typeof pollDueDataSources, 'function');
+  assert.equal(typeof startDataSourcesPoller, 'function');
+  assert.equal(typeof stopDataSourcesPoller, 'function');
+});

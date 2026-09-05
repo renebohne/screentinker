@@ -6,7 +6,6 @@
  * Handles fetching, caching, refreshing, and evaluating data sources.
  */
 
-const crypto = require('crypto');
 const { db } = require('../../db/database');
 const { resolveIcalData } = require('./ical-resolver');
 
@@ -29,6 +28,49 @@ async function withFetchSlot(fn) {
     const next = fetchWaiters.shift();
     if (next) next();
   }
+}
+
+let pollTimer = null;
+
+/**
+ * Periodically poll and sync all due data sources across all workspaces.
+ */
+function pollDueDataSources() {
+  try {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const rows = db.prepare('SELECT * FROM data_sources').all();
+    for (const row of rows) {
+      let config = {};
+      try { config = JSON.parse(row.config || '{}'); } catch (_) {}
+      const intervalMin = Math.max(1, parseInt(config.interval_min, 10) || 15);
+      const isDue = !row.last_fetched_at || (nowSec - row.last_fetched_at >= intervalMin * 60);
+      if (isDue) {
+        syncDataSource(row, true).catch(err => {
+          console.warn(`[data-sources] background sync error for '${row.slug}':`, err.message);
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('[data-sources] pollDueDataSources error:', e.message);
+  }
+}
+
+function startDataSourcesPoller(intervalMs = 60000) {
+  if (pollTimer) return;
+  setTimeout(pollDueDataSources, 5000);
+  pollTimer = setInterval(pollDueDataSources, intervalMs);
+  pollTimer.unref?.();
+}
+
+function stopDataSourcesPoller() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+if (process.env.NODE_ENV !== 'test') {
+  startDataSourcesPoller();
 }
 
 /**
@@ -160,4 +202,7 @@ module.exports = {
   getWorkspaceDataMap,
   getWorkspaceDataMapSync,
   withFetchSlot,
+  pollDueDataSources,
+  startDataSourcesPoller,
+  stopDataSourcesPoller,
 };

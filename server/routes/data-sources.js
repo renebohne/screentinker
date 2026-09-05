@@ -10,14 +10,7 @@ const crypto = require('crypto');
 const { db } = require('../db/database');
 const { syncDataSource, withFetchSlot } = require('../lib/data-sources/service');
 const { resolveIcalData } = require('../lib/data-sources/ical-resolver');
-
-// Helper to gate write operations on workspace role
-function requireWriteAccess(req, res, next) {
-  if (req.workspaceRole === 'workspace_viewer') {
-    return res.status(403).json({ error: 'Read-only access' });
-  }
-  next();
-}
+const { requireWorkspaceWrite } = require('../lib/permissions');
 
 // Helper to generate a clean URL-friendly slug
 function toSlug(str) {
@@ -33,7 +26,7 @@ function toSlug(str) {
 router.get('/', (req, res) => {
   const wsId = req.workspaceId;
   const rows = db.prepare(`
-    SELECT id, workspace_id, slug, name, type, config, last_fetched_at, last_status, last_error, created_at, updated_at
+    SELECT id, workspace_id, slug, name, type, config, cached_data, last_fetched_at, last_status, last_error, created_at, updated_at
     FROM data_sources
     WHERE workspace_id = ?
     ORDER BY name ASC
@@ -42,9 +35,12 @@ router.get('/', (req, res) => {
   const parsed = rows.map(r => {
     let cfg = {};
     try { cfg = JSON.parse(r.config); } catch (_) {}
+    let data = null;
+    try { data = JSON.parse(r.cached_data || 'null'); } catch (_) {}
     return {
       ...r,
       config: cfg,
+      data,
     };
   });
 
@@ -104,7 +100,7 @@ router.post('/test', async (req, res) => {
 });
 
 // ─── POST /api/data-sources (Create new data source) ───────────────────────────
-router.post('/', requireWriteAccess, async (req, res) => {
+router.post('/', requireWorkspaceWrite, (req, res) => {
   const wsId = req.workspaceId;
   const { name, type, config, slug: customSlug } = req.body || {};
 
@@ -131,9 +127,11 @@ router.post('/', requireWriteAccess, async (req, res) => {
     VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?)
   `).run(id, wsId, uniqueSlug, cleanName, type, configJson, nowSec, nowSec);
 
-  // Run initial sync asynchronously
+  // Trigger initial sync in background
   const newRow = db.prepare('SELECT * FROM data_sources WHERE id = ?').get(id);
-  const synced = await syncDataSource(newRow, true);
+  syncDataSource(newRow, true).catch(err => {
+    console.warn(`[data-sources] background initial sync failed for ${id}:`, err.message);
+  });
 
   res.status(201).json({
     status: 'ok',
@@ -142,12 +140,12 @@ router.post('/', requireWriteAccess, async (req, res) => {
     name: cleanName,
     type,
     config: typeof config === 'object' ? config : JSON.parse(configJson),
-    data: synced.data,
+    data: null,
   });
 });
 
 // ─── PUT /api/data-sources/:id (Update data source) ────────────────────────────
-router.put('/:id', requireWriteAccess, async (req, res) => {
+router.put('/:id', requireWorkspaceWrite, (req, res) => {
   const wsId = req.workspaceId;
   const { name, config, slug: customSlug } = req.body || {};
 
@@ -175,9 +173,14 @@ router.put('/:id', requireWriteAccess, async (req, res) => {
     WHERE id = ? AND workspace_id = ?
   `).run(cleanName, cleanSlug, configJson, nowSec, req.params.id, wsId);
 
-  // Refresh with new config
+  // Trigger refresh with new config in background
   const updatedRow = db.prepare('SELECT * FROM data_sources WHERE id = ?').get(req.params.id);
-  const synced = await syncDataSource(updatedRow, true);
+  syncDataSource(updatedRow, true).catch(err => {
+    console.warn(`[data-sources] background update sync failed for ${req.params.id}:`, err.message);
+  });
+
+  let existingData = null;
+  try { existingData = JSON.parse(existing.cached_data || 'null'); } catch (_) {}
 
   res.json({
     status: 'ok',
@@ -186,12 +189,12 @@ router.put('/:id', requireWriteAccess, async (req, res) => {
     name: cleanName,
     type: existing.type,
     config: JSON.parse(configJson),
-    data: synced.data,
+    data: existingData,
   });
 });
 
 // ─── POST /api/data-sources/:id/refresh (Force refresh) ─────────────────────────
-router.post('/:id/refresh', async (req, res) => {
+router.post('/:id/refresh', requireWorkspaceWrite, async (req, res) => {
   const wsId = req.workspaceId;
   const row = db.prepare('SELECT * FROM data_sources WHERE id = ? AND workspace_id = ?').get(req.params.id, wsId);
   if (!row) {
@@ -209,7 +212,7 @@ router.post('/:id/refresh', async (req, res) => {
 });
 
 // ─── DELETE /api/data-sources/:id (Delete data source) ─────────────────────────
-router.delete('/:id', requireWriteAccess, (req, res) => {
+router.delete('/:id', requireWorkspaceWrite, (req, res) => {
   const wsId = req.workspaceId;
   const result = db.prepare('DELETE FROM data_sources WHERE id = ? AND workspace_id = ?').run(req.params.id, wsId);
   if (result.changes === 0) {

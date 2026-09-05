@@ -88,7 +88,7 @@ function resolveInterpolatedText(str) {
         } catch (_) {}
       }
     }
-    return match;
+    return '';
   });
 }
 
@@ -2031,6 +2031,7 @@ const ASPECT_CHOICES = [
   ['16:9', 'Landscape 16:9'], ['9:16', 'Portrait 9:16'],
   ['4:3', 'Landscape 4:3'], ['3:4', 'Portrait 3:4'],
   ['1:1', 'Square'], ['21:9', 'Ultrawide 21:9'],
+  ['5:3', 'E-Paper 5:3'],
 ];
 
 function deckAspect() {

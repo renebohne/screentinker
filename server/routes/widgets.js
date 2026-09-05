@@ -358,10 +358,15 @@ router.get('/:id/render', (req, res) => {
 function dataResolverFor(widgetOrWorkspaceId) {
   const wsId = typeof widgetOrWorkspaceId === 'string' ? widgetOrWorkspaceId : (widgetOrWorkspaceId?.workspace_id || null);
   if (!wsId) return () => null;
+  let dataMap = null;
+  let loaded = false;
   return (slug, key) => {
     try {
-      const dataMap = require('../lib/data-sources/service').getWorkspaceDataMapSync(wsId);
-      const dsData = dataMap[slug] || dataMap[slug.toLowerCase()];
+      if (!loaded) {
+        dataMap = require('../lib/data-sources/service').getWorkspaceDataMapSync(wsId);
+        loaded = true;
+      }
+      const dsData = dataMap ? (dataMap[slug] || dataMap[slug.toLowerCase()]) : null;
       if (dsData && dsData[key] !== undefined && dsData[key] !== null) {
         return dsData[key];
       }

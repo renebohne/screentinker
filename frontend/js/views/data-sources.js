@@ -291,10 +291,10 @@ function openEditModal(ds) {
               <div>
                 <label style="display:block;font-size:12px;margin-bottom:4px;color:var(--text-muted)">${esc(t('data_sources.interval_label'))}</label>
                 <select id="dsIntervalInput" class="input" style="width:100%">
-                  <option value="60" ${cfg.interval_sec == 60 ? 'selected' : ''}>${esc(t('data_sources.interval_1min'))}</option>
-                  <option value="300" ${!cfg.interval_sec || cfg.interval_sec == 300 ? 'selected' : ''}>${esc(t('data_sources.interval_5min'))}</option>
-                  <option value="900" ${cfg.interval_sec == 900 ? 'selected' : ''}>${esc(t('data_sources.interval_15min'))}</option>
-                  <option value="3600" ${cfg.interval_sec == 3600 ? 'selected' : ''}>${esc(t('data_sources.interval_1hr'))}</option>
+                  <option value="1" ${(cfg.interval_min == 1 || cfg.interval_sec == 60) ? 'selected' : ''}>${esc(t('data_sources.interval_1min'))}</option>
+                  <option value="5" ${(cfg.interval_min == 5 || cfg.interval_sec == 300) ? 'selected' : ''}>${esc(t('data_sources.interval_5min'))}</option>
+                  <option value="15" ${(!cfg.interval_min && !cfg.interval_sec || cfg.interval_min == 15 || cfg.interval_sec == 900) ? 'selected' : ''}>${esc(t('data_sources.interval_15min'))}</option>
+                  <option value="60" ${(cfg.interval_min == 60 || cfg.interval_sec == 3600) ? 'selected' : ''}>${esc(t('data_sources.interval_1hr'))}</option>
                 </select>
               </div>
               <div>
@@ -385,7 +385,7 @@ function openEditModal(ds) {
 
     const testConfig = {
       url,
-      interval_sec: parseInt(overlay.querySelector('#dsIntervalInput').value, 10) || 300,
+      interval_min: parseInt(overlay.querySelector('#dsIntervalInput').value, 10) || 15,
       lookahead_days: parseInt(overlay.querySelector('#dsLookaheadInput').value, 10) || 14,
       filter_include: overlay.querySelector('#dsFilterIncludeInput').value.trim(),
       filter_exclude: overlay.querySelector('#dsFilterExcludeInput').value.trim(),
@@ -441,7 +441,7 @@ function openEditModal(ds) {
       type: 'ical',
       config: {
         url,
-        interval_sec: parseInt(overlay.querySelector('#dsIntervalInput').value, 10) || 300,
+        interval_min: parseInt(overlay.querySelector('#dsIntervalInput').value, 10) || 15,
         lookahead_days: parseInt(overlay.querySelector('#dsLookaheadInput').value, 10) || 14,
         filter_include: overlay.querySelector('#dsFilterIncludeInput').value.trim(),
         filter_exclude: overlay.querySelector('#dsFilterExcludeInput').value.trim(),
