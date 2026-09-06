@@ -401,8 +401,14 @@ const widgetFactsOf = db.prepare(`
   LEFT JOIN organizations o ON o.id = ws.organization_id
   WHERE w.id = ?
 `);
+
+const maxDataSourceUpdatedAt = db.prepare(`
+  SELECT MAX(updated_at) AS max_ds FROM data_sources WHERE workspace_id = ?
+`);
+
 function refreshWidgetRevs(assignments) {
   if (!Array.isArray(assignments)) return;
+  const dsMaxCache = new Map();
   for (const a of assignments) {
     if (!a || !a.widget_id) continue;
     try {
@@ -410,9 +416,14 @@ function refreshWidgetRevs(assignments) {
       if (!facts) continue;
       let rev = facts.rev ?? a.widget_rev ?? 0;
       if (facts.config && facts.config.includes('{{ds:') && facts.workspace_id) {
-        const dsRow = db.prepare('SELECT MAX(updated_at) AS max_ds FROM data_sources WHERE workspace_id = ?').get(facts.workspace_id);
-        if (dsRow && dsRow.max_ds && dsRow.max_ds > rev) {
-          rev = dsRow.max_ds;
+        let maxDs = dsMaxCache.get(facts.workspace_id);
+        if (maxDs === undefined) {
+          const dsRow = maxDataSourceUpdatedAt.get(facts.workspace_id);
+          maxDs = dsRow?.max_ds || 0;
+          dsMaxCache.set(facts.workspace_id, maxDs);
+        }
+        if (maxDs > rev) {
+          rev = maxDs;
         }
       }
       a.widget_rev = rev;

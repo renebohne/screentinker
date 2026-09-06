@@ -41,6 +41,14 @@ function fetchCalendar(urlString) {
 
     assertSafeUrl(target).then(({ url, addresses }) => {
       const mod = url.protocol === 'https:' ? https : http;
+      let timer = null;
+      const clearReqTimer = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      };
+
       const req = mod.request(url, {
         method: 'GET',
         lookup: pinnedLookup(addresses),
@@ -53,6 +61,7 @@ function fetchCalendar(urlString) {
         const sc = res.statusCode;
         if (sc >= 300 && sc < 400 && res.headers.location) {
           res.resume();
+          clearReqTimer();
           if (redirectsLeft <= 0) {
             return reject(new Error('Too many redirects fetching calendar feed'));
           }
@@ -63,6 +72,7 @@ function fetchCalendar(urlString) {
         }
         if (sc !== 200) {
           res.resume();
+          clearReqTimer();
           return reject(new Error(`Calendar feed responded ${sc}`));
         }
         const chunks = [];
@@ -70,18 +80,32 @@ function fetchCalendar(urlString) {
         res.on('data', (c) => {
           total += c.length;
           if (total > MAX_BODY_BYTES) {
+            clearReqTimer();
             res.destroy(new Error('Calendar feed exceeds size limit'));
             return;
           }
           chunks.push(c);
         });
-        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-        res.on('error', reject);
+        res.on('end', () => {
+          clearReqTimer();
+          resolve(Buffer.concat(chunks).toString('utf8'));
+        });
+        res.on('error', (err) => {
+          clearReqTimer();
+          reject(err);
+        });
       });
 
-      const reqTimeout = Math.min(FETCH_TIMEOUT_MS, Math.max(100, deadline - Date.now()));
-      req.setTimeout(reqTimeout, () => req.destroy(new Error('Calendar feed timed out')));
-      req.on('error', reject);
+      const timeRemaining = Math.max(100, deadline - Date.now());
+      timer = setTimeout(() => {
+        req.destroy(new Error('Calendar feed timed out'));
+      }, timeRemaining);
+      timer.unref?.();
+
+      req.on('error', (err) => {
+        clearReqTimer();
+        reject(err);
+      });
       req.end();
     }, reject);
   });
@@ -112,8 +136,8 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
   const lookaheadDays = Math.max(1, Math.min(365, parseInt(config?.lookahead_days, 10) || 14));
   const maxEvents = Math.max(1, Math.min(50, parseInt(config?.max_events, 10) || 10));
   const eventType = config?.event_type || 'all';
-  const filterText = (config?.filter_text || config?.filter_include || '').trim();
-  const excludeText = (config?.exclude_text || config?.filter_exclude || '').trim();
+  const filterText = (config?.filter_include || config?.filter_text || '').trim();
+  const excludeText = (config?.filter_exclude || config?.exclude_text || '').trim();
   const hidePrivate = !!config?.hide_private;
   // IANA timezone for display; defaults to the server's local zone when unset.
   const timezone = (config?.timezone || '').trim() || undefined;
@@ -189,28 +213,35 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
       }
     }
 
-    // Handle RRULE series
+    // Handle RRULE series (bounded iterator expansion to prevent unbounded memory allocation)
     if (ev.rrule) {
       try {
-        const dates = ev.rrule.between(startWindow, endWindow, true);
+        const maxRruleExpansion = Math.max(50, maxEvents * 5);
+        const dates = ev.rrule.between(startWindow, endWindow, true, (date, len) => {
+          if (len >= maxRruleExpansion) return false;
+          return date;
+        }) || [];
+
         const durationMs = ev.end ? (new Date(ev.end).getTime() - new Date(ev.start).getTime()) : 3600000;
 
         for (const date of dates) {
-          const occStart = new Date(date);
-          const dateKey = occStart.toISOString().slice(0, 10);
-          if (exdateKeys.has(dateKey) || exdateKeys.has(occStart.getTime())) continue;
+          let occStart = new Date(date);
+          let occEnd = new Date(occStart.getTime() + durationMs);
+          const dateKeyIso = occStart.toISOString().slice(0, 10);
+          if (exdateKeys.has(dateKeyIso) || exdateKeys.has(occStart.getTime())) continue;
 
           let occSummary = summary;
           let occLocation = location;
           let occDescription = description;
-          if (ev.recurrences && (ev.recurrences[dateKey] || ev.recurrences[occStart.toISOString()])) {
-            const rec = ev.recurrences[dateKey] || ev.recurrences[occStart.toISOString()];
+          if (ev.recurrences && (ev.recurrences[dateKeyIso] || ev.recurrences[occStart.toISOString()])) {
+            const rec = ev.recurrences[dateKeyIso] || ev.recurrences[occStart.toISOString()];
             if (rec.summary && !hidePrivate) occSummary = rec.summary;
             if (rec.location) occLocation = rec.location;
             if (rec.description && !hidePrivate) occDescription = rec.description;
+            if (rec.start) occStart = new Date(rec.start);
+            if (rec.end) occEnd = new Date(rec.end);
+            else if (rec.start) occEnd = new Date(occStart.getTime() + durationMs);
           }
-
-          const occEnd = new Date(occStart.getTime() + durationMs);
 
           // Skip if occurrence has already ended before now
           if (occEnd < now && !isAllDay) continue;
@@ -268,8 +299,34 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowKey = dateKey(tomorrow);
 
+  const formatAllDayKey = (d) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+
+  const formatAllDayDate = (d) => {
+    const key = formatAllDayKey(d);
+    if (key === todayKey) return locale === 'de' ? 'Heute' : 'Today';
+    if (key === tomorrowKey) return locale === 'de' ? 'Morgen' : 'Tomorrow';
+
+    // Format calendar date using midday UTC representation to avoid timezone shifts across day boundaries
+    const y = d.getFullYear();
+    const m = d.getMonth();
+    const day = d.getDate();
+    const noonUtc = new Date(Date.UTC(y, m, day, 12, 0, 0));
+    return noonUtc.toLocaleDateString(locale === 'de' ? 'de-DE' : 'en-US', {
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+      timeZone: 'UTC',
+    });
+  };
+
   const formatTime = (d) => d.toLocaleTimeString(locale === 'de' ? 'de-DE' : 'en-US', { hour: '2-digit', minute: '2-digit', hour12: locale !== 'de', ...tzOpts });
-  const formatDate = (d) => {
+  const formatDate = (d, isAllDay = false) => {
+    if (isAllDay) return formatAllDayDate(d);
     const key = dateKey(d);
     if (key === todayKey) return locale === 'de' ? 'Heute' : 'Today';
     if (key === tomorrowKey) return locale === 'de' ? 'Morgen' : 'Tomorrow';
@@ -293,9 +350,15 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
       ? `Belegt bis ${formatTime(currentEvent.end)}`
       : `Busy until ${formatTime(currentEvent.end)}`;
   } else if (nextEvent) {
-    statusDetail = locale === 'de'
-      ? `Frei bis ${formatTime(nextEvent.start)}`
-      : `Free until ${formatTime(nextEvent.start)}`;
+    const nextEventKey = nextEvent.isAllDay ? formatAllDayKey(nextEvent.start) : dateKey(nextEvent.start);
+    const nextIsToday = nextEventKey === todayKey;
+    if (nextIsToday) {
+      statusDetail = locale === 'de'
+        ? `Frei bis ${formatTime(nextEvent.start)}`
+        : `Free until ${formatTime(nextEvent.start)}`;
+    } else {
+      statusDetail = locale === 'de' ? 'Ganztägig frei' : 'Free all day';
+    }
   } else {
     statusDetail = locale === 'de' ? 'Ganztägig frei' : 'Free all day';
   }
@@ -320,21 +383,21 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
     next_title: nextEvent ? nextEvent.summary : '',
     next_summary: nextEvent ? nextEvent.summary : '',
     next_event_summary: nextEvent ? nextEvent.summary : '',
-    next_time: nextEvent ? (nextEvent.isAllDay ? formatDate(nextEvent.start) : `${formatDate(nextEvent.start)}, ${formatTime(nextEvent.start)}`) : '',
-    next_event_time: nextEvent ? (nextEvent.isAllDay ? formatDate(nextEvent.start) : `${formatDate(nextEvent.start)}, ${formatTime(nextEvent.start)}`) : '',
-    next_date: nextEvent ? formatDate(nextEvent.start) : '',
+    next_time: nextEvent ? (nextEvent.isAllDay ? formatDate(nextEvent.start, true) : `${formatDate(nextEvent.start)}, ${formatTime(nextEvent.start)}`) : '',
+    next_event_time: nextEvent ? (nextEvent.isAllDay ? formatDate(nextEvent.start, true) : `${formatDate(nextEvent.start)}, ${formatTime(nextEvent.start)}`) : '',
+    next_date: nextEvent ? formatDate(nextEvent.start, nextEvent.isAllDay) : '',
     next_organizer: nextEvent ? nextEvent.organizer : '',
 
     total_upcoming_count: selectedEvents.length,
     event_count: selectedEvents.length,
-    events_today_count: flatEvents.filter(e => dateKey(e.start) === todayKey).length,
+    events_today_count: flatEvents.filter(e => (e.isAllDay ? formatAllDayKey(e.start) : dateKey(e.start)) === todayKey).length,
   };
 
   // Populate indexed items (event_0_title, event_1_title, ...)
   selectedEvents.forEach((ev, idx) => {
     payload[`event_${idx}_title`] = ev.summary;
     payload[`event_${idx}_summary`] = ev.summary;
-    payload[`event_${idx}_date`] = ev.isAllDay ? formatDate(ev.start) : `${formatDate(ev.start)}, ${formatTime(ev.start)}`;
+    payload[`event_${idx}_date`] = ev.isAllDay ? formatDate(ev.start, true) : `${formatDate(ev.start)}, ${formatTime(ev.start)}`;
     payload[`event_${idx}_time`] = ev.isAllDay ? (locale === 'de' ? 'Ganztägig' : 'All day') : `${formatTime(ev.start)} – ${formatTime(ev.end)}`;
     payload[`event_${idx}_location`] = ev.location || '';
     payload[`event_${idx}_organizer`] = ev.organizer || '';
@@ -342,7 +405,7 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
 
   // Multi-line formatted agenda text
   payload.agenda_text = selectedEvents
-    .map(ev => `${ev.isAllDay ? formatDate(ev.start) : formatTime(ev.start)}: ${ev.summary}`)
+    .map(ev => `${ev.isAllDay ? formatDate(ev.start, true) : formatTime(ev.start)}: ${ev.summary}`)
     .join('\n');
 
   return payload;

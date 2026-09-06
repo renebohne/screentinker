@@ -10,7 +10,9 @@ const crypto = require('crypto');
 const { db } = require('../db/database');
 const { syncDataSource, withFetchSlot } = require('../lib/data-sources/service');
 const { resolveIcalData } = require('../lib/data-sources/ical-resolver');
-const { requireWorkspaceWrite } = require('../lib/permissions');
+const { requireWorkspaceWrite, canWrite } = require('../lib/permissions');
+
+const SUPPORTED_TYPES = new Set(['ical']);
 
 // Helper to generate a clean URL-friendly slug
 function toSlug(str) {
@@ -20,6 +22,27 @@ function toSlug(str) {
     .replace(/[^\w\s-]/g, '')
     .replace(/[\s_-]+/g, '_')
     .replace(/^_|_$/g, '') || 'source';
+}
+
+function sanitizeConfigForRole(cfg, req) {
+  if (!cfg || typeof cfg !== 'object') return {};
+  if (canWrite(req)) return cfg;
+  const safe = { ...cfg };
+  if (safe.url) {
+    try {
+      const u = new URL(safe.url);
+      if (u.search) u.search = '?***';
+      if (u.username) u.username = '***';
+      if (u.password) u.password = '***';
+      safe.url = u.toString();
+    } catch (_) {
+      safe.url = '***';
+    }
+  }
+  if (safe.ics_data) safe.ics_data = '[redacted]';
+  if (safe.raw_data) safe.raw_data = '[redacted]';
+  if (safe.raw_ics) safe.raw_ics = '[redacted]';
+  return safe;
 }
 
 // ─── GET /api/data-sources (List all in current workspace) ─────────────────────
@@ -39,7 +62,7 @@ router.get('/', (req, res) => {
     try { data = JSON.parse(r.cached_data || 'null'); } catch (_) {}
     return {
       ...r,
-      config: cfg,
+      config: sanitizeConfigForRole(cfg, req),
       data,
     };
   });
@@ -48,7 +71,7 @@ router.get('/', (req, res) => {
 });
 
 // ─── GET /api/data-sources/:id (Get single data source with live preview) ──────
-router.get('/:id', async (req, res) => {
+router.get('/:id', (req, res) => {
   const wsId = req.workspaceId;
   const row = db.prepare('SELECT * FROM data_sources WHERE id = ? AND workspace_id = ?').get(req.params.id, wsId);
   if (!row) {
@@ -63,24 +86,35 @@ router.get('/:id', async (req, res) => {
 
   res.json({
     ...row,
-    config,
+    config: sanitizeConfigForRole(config, req),
     data,
   });
 });
 
 // ─── POST /api/data-sources/test (Test connection & preview live data) ─────────
-router.post('/test', async (req, res) => {
+router.post('/test', requireWorkspaceWrite, async (req, res, next) => {
   const { type, config } = req.body || {};
   if (!type || !config) {
     return res.status(400).json({ error: 'Type and config are required' });
   }
 
+  if (!SUPPORTED_TYPES.has(type)) {
+    return res.status(400).json({ error: `Unsupported data source type: ${type}` });
+  }
+
+  let parsedConfig = config;
+  if (typeof config === 'string') {
+    try { parsedConfig = JSON.parse(config); }
+    catch (_) { return res.status(400).json({ error: 'Config must be valid JSON' }); }
+  }
+  if (!parsedConfig || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) {
+    return res.status(400).json({ error: 'Config must be an object' });
+  }
+
   try {
     let previewData = null;
     if (type === 'ical') {
-      previewData = await withFetchSlot(() => resolveIcalData(config));
-    } else {
-      return res.status(400).json({ error: `Unsupported data source type: ${type}` });
+      previewData = await withFetchSlot(() => resolveIcalData(parsedConfig));
     }
 
     res.json({
@@ -108,6 +142,19 @@ router.post('/', requireWorkspaceWrite, (req, res) => {
     return res.status(400).json({ error: 'Name, type, and config are required' });
   }
 
+  if (!SUPPORTED_TYPES.has(type)) {
+    return res.status(400).json({ error: `Unsupported data source type: ${type}` });
+  }
+
+  let parsedConfig = config;
+  if (typeof config === 'string') {
+    try { parsedConfig = JSON.parse(config); }
+    catch (_) { return res.status(400).json({ error: 'Config must be valid JSON' }); }
+  }
+  if (!parsedConfig || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) {
+    return res.status(400).json({ error: 'Config must be an object' });
+  }
+
   const cleanName = String(name).trim();
   let cleanSlug = customSlug ? toSlug(customSlug) : toSlug(cleanName);
 
@@ -119,7 +166,7 @@ router.post('/', requireWorkspaceWrite, (req, res) => {
   }
 
   const id = `ds_${crypto.randomUUID()}`;
-  const configJson = typeof config === 'string' ? config : JSON.stringify(config);
+  const configJson = JSON.stringify(parsedConfig);
   const nowSec = Math.floor(Date.now() / 1000);
 
   db.prepare(`
@@ -139,7 +186,7 @@ router.post('/', requireWorkspaceWrite, (req, res) => {
     slug: uniqueSlug,
     name: cleanName,
     type,
-    config: typeof config === 'object' ? config : JSON.parse(configJson),
+    config: parsedConfig,
     data: null,
   });
 });
@@ -164,7 +211,22 @@ router.put('/:id', requireWorkspaceWrite, (req, res) => {
     }
   }
 
-  const configJson = config ? (typeof config === 'string' ? config : JSON.stringify(config)) : existing.config;
+  let configJson = existing.config;
+  let parsedConfig = null;
+  if (config !== undefined) {
+    parsedConfig = config;
+    if (typeof config === 'string') {
+      try { parsedConfig = JSON.parse(config); }
+      catch (_) { return res.status(400).json({ error: 'Config must be valid JSON' }); }
+    }
+    if (!parsedConfig || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) {
+      return res.status(400).json({ error: 'Config must be an object' });
+    }
+    configJson = JSON.stringify(parsedConfig);
+  } else {
+    try { parsedConfig = JSON.parse(configJson); } catch (_) {}
+  }
+
   const nowSec = Math.floor(Date.now() / 1000);
 
   db.prepare(`
@@ -188,27 +250,31 @@ router.put('/:id', requireWorkspaceWrite, (req, res) => {
     slug: cleanSlug,
     name: cleanName,
     type: existing.type,
-    config: JSON.parse(configJson),
+    config: parsedConfig,
     data: existingData,
   });
 });
 
 // ─── POST /api/data-sources/:id/refresh (Force refresh) ─────────────────────────
-router.post('/:id/refresh', requireWorkspaceWrite, async (req, res) => {
-  const wsId = req.workspaceId;
-  const row = db.prepare('SELECT * FROM data_sources WHERE id = ? AND workspace_id = ?').get(req.params.id, wsId);
-  if (!row) {
-    return res.status(404).json({ error: 'Data source not found' });
-  }
+router.post('/:id/refresh', requireWorkspaceWrite, async (req, res, next) => {
+  try {
+    const wsId = req.workspaceId;
+    const row = db.prepare('SELECT * FROM data_sources WHERE id = ? AND workspace_id = ?').get(req.params.id, wsId);
+    if (!row) {
+      return res.status(404).json({ error: 'Data source not found' });
+    }
 
-  const synced = await syncDataSource(row, true);
-  res.json({
-    status: 'ok',
-    last_status: synced.last_status,
-    last_error: synced.last_error,
-    last_fetched_at: synced.last_fetched_at,
-    data: synced.data,
-  });
+    const synced = await syncDataSource(row, true);
+    res.json({
+      status: 'ok',
+      last_status: synced.last_status,
+      last_error: synced.last_error,
+      last_fetched_at: synced.last_fetched_at,
+      data: synced.data,
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ─── DELETE /api/data-sources/:id (Delete data source) ─────────────────────────

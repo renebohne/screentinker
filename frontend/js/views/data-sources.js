@@ -299,7 +299,7 @@ function openEditModal(ds) {
               </div>
               <div>
                 <label style="display:block;font-size:12px;margin-bottom:4px;color:var(--text-muted)">${esc(t('data_sources.lookahead_label'))}</label>
-                <input type="number" id="dsLookaheadInput" class="input" style="width:100%" value="${cfg.lookahead_days || 14}" min="1" max="90">
+                <input type="number" id="dsLookaheadInput" class="input" style="width:100%" value="${esc(cfg.lookahead_days || 14)}" min="1" max="90">
               </div>
             </div>
 

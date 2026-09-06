@@ -80,11 +80,11 @@ function resolveInterpolatedText(str) {
   return str.replace(/\{\{ds:([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_]+)\}\}/g, (match, slug, key) => {
     const ds = DATA_SOURCES_LIST.find((x) => x.slug === slug || x.slug === slug.toLowerCase());
     if (ds) {
-      if (ds.data && ds.data[key] !== undefined && ds.data[key] !== null) return String(ds.data[key]);
+      if (ds.data && ds.data[key] !== undefined && ds.data[key] !== null) return String(ds.data[key]).slice(0, 2000);
       if (ds.cached_data) {
         try {
           const parsed = typeof ds.cached_data === 'string' ? JSON.parse(ds.cached_data) : ds.cached_data;
-          if (parsed && parsed[key] !== undefined && parsed[key] !== null) return String(parsed[key]);
+          if (parsed && parsed[key] !== undefined && parsed[key] !== null) return String(parsed[key]).slice(0, 2000);
         } catch (_) {}
       }
     }

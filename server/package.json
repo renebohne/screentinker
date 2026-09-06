@@ -3,10 +3,6 @@
   "version": "2.0.7",
   "license": "MIT",
   "description": "ScreenTinker - Digital Signage Management Server",
-  "main": "server.js",
-  "engines": {
-    "node": ">=20"
-  },
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
     "dev": "node --watch --env-file-if-exists=.env server.js",

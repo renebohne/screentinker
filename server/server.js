@@ -1304,7 +1304,6 @@ app.use('/api/widgets/preview-session', rateLimit(60000, 30)); // preview sessio
 // `/test` triggers an outbound fetch of an arbitrary calendar feed; cap it so a single
 // workspace cannot fan out unbounded requests to third-party URLs.
 app.use('/api/data-sources/test', rateLimit(60000, 10));
-app.use('/api/data-sources', rateLimit(60000, 30));
 app.get('/api/kiosk/:id/render', (req, res, next) => { req._skipAuth = true; next(); });
 
 for (const r of PUBLIC_ROUTERS) {
@@ -1706,6 +1705,10 @@ startContentExpiry(io);
 // Start alert service
 const { startAlertService } = require('./services/alerts');
 startAlertService(io);
+
+// Start universal data sources background poller
+const { startDataSourcesPoller } = require('./lib/data-sources/service');
+startDataSourcesPoller(io);
 
 /*
  * A2 — threshold alerts. Safe to start unconditionally: with no rules configured the sweep reads an

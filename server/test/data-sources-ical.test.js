@@ -178,7 +178,7 @@ test('iCal resolver rejects SSRF targets (loopback / private ranges)', async () 
   ]) {
     await assert.rejects(
       () => resolveIcalData({ url: bad, timezone: 'UTC' }, now),
-      (e) => e instanceof Error,
+      /blocked-ip|SSRF|loopback|private/i,
       `expected SSRF guard to reject ${bad}`,
     );
   }
@@ -188,7 +188,7 @@ test('iCal resolver rejects non-HTTP(S) URL schemes', async () => {
   const now = new Date('2026-09-04T09:30:00Z');
   await assert.rejects(
     () => resolveIcalData({ url: 'file:///etc/passwd', timezone: 'UTC' }, now),
-    (e) => e instanceof Error,
+    /disallowed-scheme|protocol|SSRF/i,
     'file:// scheme must be rejected',
   );
 });
@@ -206,11 +206,11 @@ test('iCal resolver treats empty config as a clean error (not a crash)', async (
   const now = new Date('2026-09-04T09:30:00Z');
   await assert.rejects(
     () => resolveIcalData({}, now),
-    (e) => e instanceof Error,
+    /No valid iCal URL or data provided/,
   );
   await assert.rejects(
     () => resolveIcalData(null, now),
-    (e) => e instanceof Error,
+    /No valid iCal URL or data provided/,
   );
 });
 
@@ -308,4 +308,134 @@ test('background poller functions export cleanly', () => {
   assert.equal(typeof pollDueDataSources, 'function');
   assert.equal(typeof startDataSourcesPoller, 'function');
   assert.equal(typeof stopDataSourcesPoller, 'function');
+});
+
+test('iCal resolver honours RECURRENCE-ID time overrides', async () => {
+  const RECURRENCE_OVERRIDE_ICS = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//ScreenTinker Test//DE
+BEGIN:VEVENT
+UID:evt-recurring-override
+SUMMARY:Team Meeting
+LOCATION:Room A
+DTSTART:20260904T100000Z
+DTEND:20260904T110000Z
+RRULE:FREQ=DAILY;COUNT=5
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-recurring-override
+RECURRENCE-ID:20260904T100000Z
+SUMMARY:Team Meeting (Moved)
+LOCATION:Room B
+DTSTART:20260904T140000Z
+DTEND:20260904T150000Z
+END:VEVENT
+END:VCALENDAR`;
+
+  // At 10:30 (the original time), the room should be FREE because the meeting moved to 14:00
+  const nowMorning = new Date('2026-09-04T10:30:00Z');
+  const dataMorning = await resolveIcalData({ raw_data: RECURRENCE_OVERRIDE_ICS, timezone: 'UTC' }, nowMorning);
+  assert.equal(dataMorning.is_busy, false);
+  assert.equal(dataMorning.next_event_summary, 'Team Meeting (Moved)');
+
+  // At 14:30 (the moved time), the room should be BUSY
+  const nowAfternoon = new Date('2026-09-04T14:30:00Z');
+  const dataAfternoon = await resolveIcalData({ raw_data: RECURRENCE_OVERRIDE_ICS, timezone: 'UTC' }, nowAfternoon);
+  assert.equal(dataAfternoon.is_busy, true);
+  assert.equal(dataAfternoon.current_event_summary, 'Team Meeting (Moved)');
+  assert.equal(dataAfternoon.current_event_location, 'Room B');
+});
+
+test('all-day events format consistently without shifting days across timezones', async () => {
+  const ALLDAY_ICS = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//ScreenTinker Test//DE
+BEGIN:VEVENT
+UID:evt-allday-holiday
+SUMMARY:Tag der Arbeit
+DTSTART;VALUE=DATE:20260501
+DTEND;VALUE=DATE:20260502
+END:VEVENT
+END:VCALENDAR`;
+
+  const now = new Date('2026-04-20T10:00:00Z');
+  const dataUtc = await resolveIcalData({ raw_data: ALLDAY_ICS, timezone: 'UTC', locale: 'de' }, now);
+  const dataNy = await resolveIcalData({ raw_data: ALLDAY_ICS, timezone: 'America/New_York', locale: 'de' }, now);
+
+  assert.ok(dataUtc.next_date.includes('1. Mai') || dataUtc.next_date.includes('1. May'), `UTC next_date: ${dataUtc.next_date}`);
+  assert.ok(dataNy.next_date.includes('1. Mai') || dataNy.next_date.includes('1. May'), `NY next_date: ${dataNy.next_date}`);
+});
+
+test('status_detail reports "Ganztägig frei" when the next meeting is on a subsequent day', async () => {
+  const MONDAY_ICS = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//ScreenTinker Test//DE
+BEGIN:VEVENT
+UID:evt-monday-standup
+SUMMARY:Monday Standup
+DTSTART:20260907T090000Z
+DTEND:20260907T100000Z
+END:VEVENT
+END:VCALENDAR`;
+
+  // Friday at 17:00
+  const nowFriday = new Date('2026-09-04T17:00:00Z');
+  const data = await resolveIcalData({ raw_data: MONDAY_ICS, timezone: 'UTC', locale: 'de' }, nowFriday);
+
+  assert.equal(data.is_busy, false);
+  assert.equal(data.status_detail, 'Ganztägig frei');
+});
+
+test('iCal resolver bounds high-frequency RRULE series (e.g. FREQ=MINUTELY)', async () => {
+  const HIGH_FREQ_ICS = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//ScreenTinker Test//DE
+BEGIN:VEVENT
+UID:evt-high-freq
+SUMMARY:Minutely Pulse
+DTSTART:20260904T000000Z
+DTEND:20260904T000100Z
+RRULE:FREQ=MINUTELY;INTERVAL=1
+END:VEVENT
+END:VCALENDAR`;
+
+  const now = new Date('2026-09-04T08:00:00Z');
+  const data = await resolveIcalData({ raw_data: HIGH_FREQ_ICS, max_events: 10, timezone: 'UTC' }, now);
+  assert.ok(data.event_count <= 10);
+});
+
+test('pinnedLookup returns full array when options.all is true', (t, done) => {
+  const { pinnedLookup } = require('../lib/ssrf-guard');
+  const lookup = pinnedLookup(['93.184.216.34', '2606:2800:220:1:248:1893:25c8:1946']);
+
+  lookup('example.com', { all: true }, (err, addresses) => {
+    assert.ifError(err);
+    assert.ok(Array.isArray(addresses));
+    assert.equal(addresses.length, 2);
+    assert.equal(addresses[0].address, '93.184.216.34');
+    assert.equal(addresses[0].family, 4);
+    assert.equal(addresses[1].address, '2606:2800:220:1:248:1893:25c8:1946');
+    assert.equal(addresses[1].family, 6);
+    done();
+  });
+});
+
+test('withFetchSlot limits concurrent executions and hands slot to waiter', async () => {
+  const { withFetchSlot } = require('../lib/data-sources/service');
+  let running = 0;
+  let maxConcurrent = 0;
+
+  const tasks = Array.from({ length: 10 }).map((_, i) =>
+    withFetchSlot(async () => {
+      running += 1;
+      maxConcurrent = Math.max(maxConcurrent, running);
+      await new Promise(r => setTimeout(r, 20));
+      running -= 1;
+      return i;
+    })
+  );
+
+  const results = await Promise.all(tasks);
+  assert.equal(results.length, 10);
+  assert.ok(maxConcurrent <= 4, `expected max concurrency <= 4, was ${maxConcurrent}`);
 });
