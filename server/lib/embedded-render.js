@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const { Jimp } = require('jimp');
 const config = require('../config');
+const { assertSafeUrl, SsrfError } = require('./ssrf-guard');
 
 /*
  * ⚠️ ASK config, DO NOT RE-DERIVE THIS.
@@ -36,6 +37,15 @@ function contentDir() {
   return config.contentDir;
 }
 
+// Coerce an untrusted dimension (from a screen_profile row) to a positive integer.
+// Returns `fallback` for anything non-numeric, non-finite, or out of range — so a
+// malformed profile can never inject arbitrary values into CSS or viewport dimensions.
+function safeDimension(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0 || n > 100000) return fallback;
+  return Math.floor(n);
+}
+
 // MIME types Jimp can decode natively
 const IMAGE_MIMES = new Set([
   'image/jpeg', 'image/jpg', 'image/png', 'image/gif',
@@ -47,13 +57,18 @@ const EXT_MIME = {
   '.gif': 'image/gif',  '.webp': 'image/webp',  '.bmp': 'image/bmp',
 };
 
-function looksLikeImage(url, contentType) {
+function looksLikeImage(urlOrPath, contentType) {
   if (contentType) {
     const base = contentType.split(';')[0].trim().toLowerCase();
     if (IMAGE_MIMES.has(base)) return true;
   }
+  if (typeof urlOrPath !== 'string' || !urlOrPath) return false;
   try {
-    const ext = path.extname(new URL(url).pathname).toLowerCase();
+    let pathname = urlOrPath;
+    if (urlOrPath.includes('://')) {
+      pathname = new URL(urlOrPath).pathname;
+    }
+    const ext = path.extname(pathname).toLowerCase();
     return !!EXT_MIME[ext];
   } catch {
     return false;
@@ -87,6 +102,23 @@ function findChromePath() {
 }
 
 let browserInstance = null;
+// The launch in flight, so three devices polling a cold server share ONE Chromium instead of
+// starting three and keeping the last (the other two lived on, unreferenced, until exit).
+let browserLaunching = null;
+let browserAvailableCached = null;
+let lastBrowserProbe = 0;
+
+function isBrowserAvailable() {
+  const now = Date.now();
+  if (browserAvailableCached !== null && (now - lastBrowserProbe < 30000)) {
+    return browserAvailableCached;
+  }
+  const puppeteer = getPuppeteer();
+  const chromePath = findChromePath();
+  browserAvailableCached = Boolean(puppeteer && chromePath);
+  lastBrowserProbe = now;
+  return browserAvailableCached;
+}
 
 function getPuppeteer() {
   try {
@@ -99,6 +131,9 @@ function getPuppeteer() {
 async function getBrowser() {
   if (browserInstance && browserInstance.connected) {
     return browserInstance;
+  }
+  if (browserLaunching) {
+    return browserLaunching;
   }
 
   const puppeteer = getPuppeteer();
@@ -115,7 +150,7 @@ async function getBrowser() {
     throw err;
   }
 
-  browserInstance = await puppeteer.launch({
+  browserLaunching = puppeteer.launch({
     executablePath: chromePath,
     headless: true,
     args: [
@@ -126,13 +161,17 @@ async function getBrowser() {
       '--disable-extensions',
       '--hide-scrollbars',
     ],
+  }).then((b) => {
+    browserInstance = b;
+    b.on('disconnected', () => {
+      if (browserInstance === b) browserInstance = null;
+    });
+    return b;
+  }).finally(() => {
+    browserLaunching = null;
   });
 
-  browserInstance.on('disconnected', () => {
-    browserInstance = null;
-  });
-
-  return browserInstance;
+  return browserLaunching;
 }
 
 async function closeBrowser() {
@@ -156,18 +195,58 @@ process.on('SIGINT', () => { closeBrowser(); });
 // ─── Native Image Renderers (Jimp) ───────────────────────────────────────────
 
 async function renderLocalImage(content, profile) {
-  const filepath = path.join(contentDir(), content.filepath);
-  if (!fs.existsSync(filepath)) {
+  // Guard against a `filepath` escaping the content directory (mirrors the
+  // same path.basename() + startsWith() check used when rendering layout zones).
+  const base = path.resolve(contentDir());
+  const safe = path.resolve(base, path.basename(String(content.filepath || '')));
+  if (!safe.startsWith(base + path.sep) && safe !== base) {
+    throw Object.assign(new Error('Invalid content file path'), { code: 'INVALID_PATH' });
+  }
+  if (!fs.existsSync(safe)) {
     throw Object.assign(new Error('Content file not found on disk'), { code: 'NOT_FOUND' });
   }
-  const img = await Jimp.fromBuffer(fs.readFileSync(filepath));
+  const img = await Jimp.fromBuffer(fs.readFileSync(safe));
   img.cover({ w: profile.width, h: profile.height });
   return img.getBuffer('image/png');
+}
+
+const MAX_CONCURRENT_PAGES = 3;
+let activePages = 0;
+const pageWaiters = [];
+
+function acquirePageSlot() {
+  if (activePages < MAX_CONCURRENT_PAGES) {
+    activePages++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    pageWaiters.push(resolve);
+  });
+}
+
+function releasePageSlot() {
+  activePages--;
+  if (pageWaiters.length > 0) {
+    activePages++;
+    const next = pageWaiters.shift();
+    next();
+  }
 }
 
 async function renderRemoteImage(content, profile) {
   const url = content.remote_url;
   if (!url) return null;
+
+  // Same vetting as the page path below: this fetch runs on the server, against a URL a
+  // workspace editor typed. Private ranges and the metadata endpoint are not content.
+  try {
+    await assertSafeUrl(url);
+  } catch (e) {
+    if (e instanceof SsrfError) {
+      throw Object.assign(new Error(`Remote content refused: ${e.message}`), { code: 'BLOCKED_URL' });
+    }
+    throw Object.assign(new Error(`Invalid remote URL: ${e.message}`), { code: 'FETCH_ERROR' });
+  }
 
   let response;
   try {
@@ -200,29 +279,167 @@ async function renderRemoteImage(content, profile) {
   return img.getBuffer('image/png');
 }
 
-async function renderWidgetOrHtml(html, profile) {
-  const browser = await getBrowser();
-  const page = await browser.newPage();
+function localBaseUrl() {
+  return global.__localApiOrigin || process.env.BASE_URL || `http://127.0.0.1:${process.env.PORT || config.port || 3001}`;
+}
+
+async function renderWidgetOrHtml(html, profile, widgetType = '') {
+  await acquirePageSlot();
+  let browser = null;
+  let page = null;
   try {
+    browser = await getBrowser();
+    page = await browser.newPage();
     await page.setViewport({ width: profile.width, height: profile.height });
-    await page.setContent(html, { waitUntil: 'load', timeout: 5000 });
+
+    const baseUrl = localBaseUrl();
+    const staticStyle = '<style>*, *::before, *::after { animation: none !important; transition: none !important; }</style>';
+    let finalHtml = html;
+    if (/<head[^>]*>/i.test(finalHtml)) {
+      finalHtml = finalHtml.replace(/(<head[^>]*>)/i, `$1\n<base href="${baseUrl}/">\n${staticStyle}`);
+    } else if (/<html[^>]*>/i.test(finalHtml)) {
+      finalHtml = finalHtml.replace(/(<html[^>]*>)/i, `$1\n<head><base href="${baseUrl}/">\n${staticStyle}</head>`);
+    } else {
+      finalHtml = `<!DOCTYPE html><html><head><base href="${baseUrl}/">\n${staticStyle}</head><body>${finalHtml}</body></html>`;
+    }
+
+    // For layout compositions, wait for domcontentloaded so slow/hung zones don't abort whole layout.
+    // Single-widget / slide / webpage items wait for 'load'.
+    const waitUntil = widgetType === 'layout' ? 'domcontentloaded' : 'load';
+    await page.setContent(finalHtml, { waitUntil, timeout: 8000 });
+
+    // Wait for any async network fetches to settle if present
+    if (widgetType === 'weather' || widgetType === 'rss' || widgetType === 'layout') {
+      await page.waitForNetworkIdle({ idleTime: 200, timeout: 2500 }).catch(() => {});
+    }
+
+    // Template-agnostic settlement: fonts, animations, images, and videos (including inside srcdoc iframes)
+    await page.evaluate(async (isLayout) => {
+      try { if (document.fonts?.ready) await document.fonts.ready; } catch (_) {}
+      try { document.getAnimations().forEach(a => { try { a.finish(); } catch (_) {} }); } catch (_) {}
+
+      // Settle iframes with individual bounded wait (so a hung remote iframe never blocks whole layout)
+      const iframes = Array.from(document.querySelectorAll('iframe'));
+      await Promise.all(iframes.map(iframe => {
+        return new Promise((resolve) => {
+          // Listeners and the timer FIRST. Reading contentDocument on a cross-origin zone throws
+          // SecurityError, and a catch that resolved there let a remote dashboard be captured
+          // blank at ~3s while it was still painting. A remote zone now waits for its load
+          // event or the bounded timer, whichever comes first.
+          setTimeout(resolve, isLayout ? 3000 : 5000);
+          iframe.addEventListener('load', resolve, { once: true });
+          iframe.addEventListener('error', resolve, { once: true });
+          try {
+            const doc = iframe.contentDocument || iframe.contentWindow?.document;
+            if (doc && (doc.readyState === 'complete' || doc.readyState === 'interactive')) {
+              try { doc.getAnimations().forEach(a => { try { a.finish(); } catch (_) {} }); } catch (_) {}
+              const fonts = doc.fonts && doc.fonts.ready;
+              if (fonts && typeof fonts.then === 'function') fonts.then(resolve, resolve); else resolve();
+            }
+          } catch (_) { /* cross-origin: the load event or the timer settles it */ }
+        });
+      }));
+
+      // Settle images across root and iframes
+      const getNestedImages = (root) => {
+        let imgs = Array.from(root.querySelectorAll('img'));
+        const fList = Array.from(root.querySelectorAll('iframe'));
+        for (const f of fList) {
+          try {
+            const doc = f.contentDocument || f.contentWindow?.document;
+            if (doc) {
+              imgs = imgs.concat(Array.from(doc.querySelectorAll('img')));
+            }
+          } catch (_) {}
+        }
+        return imgs;
+      };
+
+      const imgs = getNestedImages(document);
+      await Promise.all(imgs.map(img => {
+        if (img.complete && img.naturalHeight !== 0) return Promise.resolve();
+        return new Promise(resolve => {
+          img.addEventListener('load', resolve, { once: true });
+          img.addEventListener('error', resolve, { once: true });
+          setTimeout(resolve, 1500);
+        });
+      }));
+
+      // Settle videos
+      const videos = Array.from(document.querySelectorAll('video'));
+      await Promise.all(videos.map(v => {
+        if (v.readyState >= 2) return Promise.resolve();
+        return new Promise(resolve => {
+          v.addEventListener('loadeddata', resolve, { once: true });
+          v.addEventListener('canplay', resolve, { once: true });
+          v.addEventListener('error', resolve, { once: true });
+          setTimeout(resolve, 2000);
+        });
+      }));
+    }, widgetType === 'layout').catch(() => {});
+
     const snap = await page.screenshot({ type: 'png' });
     return Buffer.from(snap);
   } finally {
-    await page.close().catch(() => {});
+    if (page) {
+      try { await page.close(); } catch (_) {}
+    }
+    releasePageSlot();
   }
 }
 
-/**
- * Render the current playlist item to a PNG Buffer.
+/*
+ * A remote WEB PAGE is navigated to, not pasted into a document. #331's last round folded the
+ * remote-page branch into renderWidgetOrHtml(), whose only way of loading anything is
+ * page.setContent(html) — so the URL string itself became the document, and a panel pointed at
+ * https://example.com/board received a white frame with that address printed on it, cached for
+ * five minutes. This is the page.goto() path main had before, behind the same slot and lifecycle
+ * the HTML path uses.
  *
- * @param {object} item     Playlist item row (joined by the route).
- * @param {object} content  Content row (joined by the route).
- * @param {object} profile  Validated screen_profile from embedded-profiles.js.
- * @returns {Promise<{ png: Buffer } | { unsupported: true, reason: string }>}
+ * The URL is vetted first. Chromium is a full client running on the server: pointed at
+ * 127.0.0.1, 169.254.169.254, or a LAN address it renders whatever is there into a frame any
+ * device on that workspace can pull. The media proxy and the data-source fetcher already refuse
+ * those through lib/ssrf-guard; this path never did.
  */
-async function render(item, content, profile) {
-  // ── Widget / Slide Path ──────────────────────────────────────────────────
+async function renderRemotePage(url, profile) {
+  try {
+    await assertSafeUrl(url);
+  } catch (e) {
+    if (e instanceof SsrfError) {
+      throw Object.assign(new Error(`Remote page refused: ${e.message}`), { code: 'BLOCKED_URL' });
+    }
+    throw Object.assign(new Error(`Invalid remote URL: ${e.message}`), { code: 'FETCH_ERROR' });
+  }
+  await acquirePageSlot();
+  let page = null;
+  try {
+    const browser = await getBrowser();
+    page = await browser.newPage();
+    await page.setViewport({ width: profile.width, height: profile.height });
+    await page.goto(url, { waitUntil: 'load', timeout: 10000 });
+    // Dashboards and boards usually paint from a fetch after load; give that a bounded chance.
+    await page.waitForNetworkIdle({ idleTime: 200, timeout: 2500 }).catch(() => {});
+    const snap = await page.screenshot({ type: 'png' });
+    return Buffer.from(snap);
+  } finally {
+    if (page) {
+      try { await page.close(); } catch (_) {}
+    }
+    releasePageSlot();
+  }
+}
+
+async function render(item, content, screenProfile) {
+  const profile = {
+    width: safeDimension(screenProfile?.width, 800),
+    height: safeDimension(screenProfile?.height, 480),
+    rotation: [0, 90, 180, 270].includes(Number(screenProfile?.rotation)) ? Number(screenProfile.rotation) : 0,
+    colorDepth: screenProfile?.colorDepth || '1bit',
+    dither: screenProfile?.dither || 'floyd-steinberg',
+    outputFormat: screenProfile?.outputFormat || 'x-epd-packed',
+  };
+
+  // ── Widget rendering (Clock, Weather, Slide Deck, RSS, etc.) ─────────────
   if (item && (item.widget_id || item.widget_type)) {
     const type = item.widget_type || 'clock';
     let config = {};
@@ -233,9 +450,30 @@ async function render(item, content, profile) {
     }
 
     try {
-      const { renderWidgetHtml } = require('../routes/widgets');
-      const html = renderWidgetHtml(type, config);
-      const png = await renderWidgetOrHtml(html, profile);
+      const { renderWidgetHtml, imageResolverFor, dataResolverFor, widgetIframeSandboxForWorkspace } = require('../routes/widgets');
+      const { fontResolverFor } = require('../routes/fonts');
+      const { db } = require('../db/database');
+
+      let wsId;
+      if (item.widget_id) {
+        wsId = item.widget_workspace_id !== undefined ? item.widget_workspace_id : null;
+        if (wsId === undefined) {
+          try {
+            const w = db.prepare('SELECT workspace_id FROM widgets WHERE id = ?').get(item.widget_id);
+            wsId = w ? w.workspace_id : null;
+          } catch (_) {}
+        }
+      } else {
+        wsId = item.workspace_id || content?.workspace_id || profile?.workspace_id;
+      }
+
+      const html = renderWidgetHtml(type, config, {
+        iframeSandbox: widgetIframeSandboxForWorkspace ? widgetIframeSandboxForWorkspace(wsId) : 'allow-scripts',
+        resolveImage: imageResolverFor ? imageResolverFor({ workspace_id: wsId }) : undefined,
+        resolveFont: fontResolverFor ? fontResolverFor({ workspace_id: wsId }) : undefined,
+        resolveData: typeof dataResolverFor === 'function' ? dataResolverFor(wsId) : undefined,
+      });
+      const png = await renderWidgetOrHtml(html, profile, type);
       return { png };
     } catch (e) {
       if (e.code === 'BROWSER_UNAVAILABLE' || e.code === 'BROWSER_NOT_FOUND') {
@@ -253,36 +491,305 @@ async function render(item, content, profile) {
     const png = await renderRemoteImage(content, profile);
     if (png) return { png };
 
-    // Remote web page fallback via optional browser
     try {
-      const browser = await getBrowser();
-      const page = await browser.newPage();
-      try {
-        await page.setViewport({ width: profile.width, height: profile.height });
-        await page.goto(content.remote_url, { waitUntil: 'load', timeout: 10000 });
-        const snap = await page.screenshot({ type: 'png' });
-        return { png: Buffer.from(snap) };
-      } finally {
-        await page.close().catch(() => {});
-      }
+      const p = await renderRemotePage(content.remote_url, profile);
+      return { png: p };
     } catch (e) {
       if (e.code === 'BROWSER_UNAVAILABLE' || e.code === 'BROWSER_NOT_FOUND') {
         return {
           unsupported: true,
-          reason: 'Web page rendering requires a browser (set CHROME_PATH). Direct images work natively.',
+          reason: 'Rendering remote web pages requires a browser (set CHROME_PATH).',
         };
       }
       throw e;
     }
   }
 
-  // ── Local Image (Primary native path) ────────────────────────────────────
-  if (content && content.filepath) {
-    const png = await renderLocalImage(content, profile);
-    return { png };
+  // ── Local Image / File (Native Jimp Execution) ──────────────────────────
+  if (content && (content.filepath || content.thumbnail_path)) {
+    const fileToLoad = (content.filepath && looksLikeImage(content.filepath, content.mime_type))
+      ? content.filepath
+      : (content.thumbnail_path || content.filepath);
+
+    if (fileToLoad) {
+      const base = path.resolve(contentDir());
+      const safe = path.resolve(base, path.basename(String(fileToLoad)));
+      if (!safe.startsWith(base + path.sep) && safe !== base) {
+        throw Object.assign(
+          new Error('Invalid content file path'),
+          { code: 'INVALID_PATH' }
+        );
+      }
+
+      if (!fs.existsSync(safe)) {
+        throw Object.assign(
+          new Error('Content file not found on disk'),
+          { code: 'NOT_FOUND' }
+        );
+      }
+
+      try {
+        const fileBuffer = fs.readFileSync(safe);
+        const img = await Jimp.fromBuffer(fileBuffer);
+        img.cover({ w: profile.width, h: profile.height });
+        const png = await img.getBuffer('image/png');
+        return { png };
+      } catch (e) {
+        throw Object.assign(
+          new Error(`Failed to decode image with Jimp: ${e.message}`),
+          { code: 'DECODE_ERROR' }
+        );
+      }
+    }
   }
 
-  return { unsupported: true, reason: 'No renderable source found for this content item.' };
+  return { unsupported: true, reason: 'No renderable content' };
 }
 
-module.exports = { render, closeBrowser, getBrowser };
+function escapeHtmlAttr(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function isLayoutImageOnly(zoneEntries) {
+  if (!Array.isArray(zoneEntries) || !zoneEntries.length) return false;
+  for (const entry of zoneEntries) {
+    if (!entry || !entry.item) continue;
+    const c = entry.content;
+    if (!c) {
+      if (entry.item.widget_type || entry.item.widget_id) return false;
+      continue;
+    }
+    if (c.remote_url) {
+      if (!looksLikeImage(c.remote_url, c.mime_type)) return false;
+    } else if (c.filepath) {
+      if (!looksLikeImage(c.filepath, c.mime_type) && !c.thumbnail_path) return false;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function renderLayoutNative(layout, zoneEntries, screenProfile) {
+  const profile = {
+    width: safeDimension(screenProfile?.width, 800),
+    height: safeDimension(screenProfile?.height, 480),
+  };
+
+  const sorted = [...zoneEntries].sort((a, b) => {
+    const za = Number.isFinite(Number(a.zone?.z_index)) ? Number(a.zone.z_index) : 0;
+    const zb = Number.isFinite(Number(b.zone?.z_index)) ? Number(b.zone.z_index) : 0;
+    return za - zb;
+  });
+
+  const canvas = new Jimp({ width: profile.width, height: profile.height, color: 0x000000FF });
+
+  for (const entry of sorted) {
+    const { zone, content } = entry;
+    if (!zone || !content) continue;
+
+    const x = Number.isFinite(Number(zone.x_percent)) ? Math.max(0, Math.min(100, Number(zone.x_percent))) : 0;
+    const y = Number.isFinite(Number(zone.y_percent)) ? Math.max(0, Math.min(100, Number(zone.y_percent))) : 0;
+    const w = Number.isFinite(Number(zone.width_percent)) ? Math.max(0, Math.min(100, Number(zone.width_percent))) : 100;
+    const h = Number.isFinite(Number(zone.height_percent)) ? Math.max(0, Math.min(100, Number(zone.height_percent))) : 100;
+
+    const pixelX = Math.round((x / 100) * profile.width);
+    const pixelY = Math.round((y / 100) * profile.height);
+    const pixelW = Math.max(1, Math.round((w / 100) * profile.width));
+    const pixelH = Math.max(1, Math.round((h / 100) * profile.height));
+
+    let img = null;
+    if (content.remote_url) {
+      let res;
+      try {
+        res = await fetch(content.remote_url, {
+          signal: AbortSignal.timeout(10000),
+          headers: { 'User-Agent': 'ScreenTinker-EmbeddedRenderer/1.0' },
+        });
+      } catch (e) {
+        throw Object.assign(new Error(`Failed to fetch remote content: ${e.message}`), { code: 'FETCH_ERROR' });
+      }
+      if (!res.ok) {
+        throw Object.assign(new Error(`Remote content returned HTTP ${res.status}`), { code: 'FETCH_ERROR' });
+      }
+      const contentType = res.headers.get('content-type') || '';
+      if (!looksLikeImage(content.remote_url, contentType)) {
+        throw Object.assign(new Error('Remote content is not an image'), { code: 'FETCH_ERROR' });
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      img = await Jimp.fromBuffer(buf);
+    } else {
+      const fileToLoad = content.filepath || content.thumbnail_path;
+      if (fileToLoad) {
+        const base = path.resolve(contentDir());
+        const safe = path.resolve(base, path.basename(String(fileToLoad)));
+        if (!safe.startsWith(base + path.sep) && safe !== base) {
+          throw Object.assign(new Error('Invalid content file path'), { code: 'INVALID_PATH' });
+        }
+        if (!fs.existsSync(safe)) {
+          throw Object.assign(new Error('Content file not found on disk'), { code: 'NOT_FOUND' });
+        }
+        img = await Jimp.fromBuffer(fs.readFileSync(safe));
+      }
+    }
+
+    if (img) {
+      img.cover({ w: pixelW, h: pixelH });
+      canvas.composite(img, pixelX, pixelY);
+    }
+  }
+
+  const png = await canvas.getBuffer('image/png');
+  return { png };
+}
+
+async function renderLayout(layout, zoneEntries, screenProfile) {
+  const profile = {
+    width: safeDimension(screenProfile?.width, 800),
+    height: safeDimension(screenProfile?.height, 480),
+    rotation: [0, 90, 180, 270].includes(Number(screenProfile?.rotation)) ? Number(screenProfile.rotation) : 0,
+    colorDepth: screenProfile?.colorDepth || '1bit',
+    dither: screenProfile?.dither || 'floyd-steinberg',
+    outputFormat: screenProfile?.outputFormat || 'x-epd-packed',
+  };
+
+  if (isLayoutImageOnly(zoneEntries)) {
+    try {
+      return await renderLayoutNative(layout, zoneEntries, profile);
+    } catch (e) {
+      console.warn(`[embedded] native image layout render failed, falling back to browser: ${e.message}`);
+    }
+  }
+
+  const { renderWidgetHtml, imageResolverFor, dataResolverFor, widgetIframeSandboxForWorkspace } = require('../routes/widgets');
+  const { fontResolverFor } = require('../routes/fonts');
+  const { db } = require('../db/database');
+
+  const zoneHtmls = [];
+  for (const entry of zoneEntries) {
+    const { zone, item, content } = entry;
+    if (!zone) continue;
+
+    const x = Number.isFinite(Number(zone.x_percent)) ? Math.max(0, Math.min(100, Number(zone.x_percent))) : 0;
+    const y = Number.isFinite(Number(zone.y_percent)) ? Math.max(0, Math.min(100, Number(zone.y_percent))) : 0;
+    const w = Number.isFinite(Number(zone.width_percent)) ? Math.max(0, Math.min(100, Number(zone.width_percent))) : 100;
+    const h = Number.isFinite(Number(zone.height_percent)) ? Math.max(0, Math.min(100, Number(zone.height_percent))) : 100;
+    const zIndex = Number.isFinite(Number(zone.z_index)) ? Math.floor(Number(zone.z_index)) : 0;
+
+    let innerHtml = '<div style="width:100%;height:100%;background:transparent;"></div>';
+
+    if (item && (item.widget_id || item.widget_type)) {
+      const type = item.widget_type || 'clock';
+      let config = {};
+      if (typeof item.widget_config === 'string') {
+        try { config = JSON.parse(item.widget_config); } catch (_) {}
+      } else if (typeof item.widget_config === 'object' && item.widget_config !== null) {
+        config = item.widget_config;
+      }
+
+      let wsId;
+      if (item.widget_id) {
+        wsId = item.widget_workspace_id !== undefined ? item.widget_workspace_id : null;
+        if (wsId === undefined) {
+          try {
+            const row = db.prepare('SELECT workspace_id FROM widgets WHERE id = ?').get(item.widget_id);
+            wsId = row ? row.workspace_id : null;
+          } catch (_) {}
+        }
+      } else {
+        wsId = item.workspace_id || layout?.workspace_id || profile?.workspace_id;
+      }
+
+      try {
+        const widgetHtml = renderWidgetHtml(type, config, {
+          iframeSandbox: widgetIframeSandboxForWorkspace ? widgetIframeSandboxForWorkspace(wsId) : 'allow-scripts',
+          resolveImage: imageResolverFor ? imageResolverFor({ workspace_id: wsId }) : undefined,
+          resolveFont: fontResolverFor ? fontResolverFor({ workspace_id: wsId }) : undefined,
+          resolveData: typeof dataResolverFor === 'function' ? dataResolverFor(wsId) : undefined,
+        });
+
+        innerHtml = `<iframe srcdoc="${escapeHtmlAttr(widgetHtml)}" style="width:100%;height:100%;border:none;overflow:hidden;display:block;" scrolling="no"></iframe>`;
+      } catch (zoneErr) {
+        console.warn(`[embedded] zone widget render error for ${type}:`, zoneErr.message);
+        innerHtml = `<div style="width:100%;height:100%;background:transparent;"></div>`;
+      }
+    } else if (content && content.remote_url) {
+      if (looksLikeImage(content.remote_url, content.mime_type)) {
+        innerHtml = `<img src="${escapeHtmlAttr(content.remote_url)}" style="width:100%;height:100%;object-fit:cover;display:block;" />`;
+      } else {
+        innerHtml = `<iframe src="${escapeHtmlAttr(content.remote_url)}" style="width:100%;height:100%;border:none;overflow:hidden;display:block;" scrolling="no"></iframe>`;
+      }
+    } else if (content && content.filepath) {
+      if (looksLikeImage(content.filepath, content.mime_type)) {
+        const safeFilename = path.basename(content.filepath);
+        innerHtml = `<img src="/uploads/content/${encodeURIComponent(safeFilename)}" style="width:100%;height:100%;object-fit:cover;display:block;" />`;
+      } else if (content.thumbnail_path) {
+        const safeThumb = path.basename(content.thumbnail_path);
+        innerHtml = `<img src="/uploads/content/${encodeURIComponent(safeThumb)}" style="width:100%;height:100%;object-fit:cover;display:block;" />`;
+      } else {
+        const safeFilename = path.basename(content.filepath);
+        innerHtml = `<video src="/uploads/content/${encodeURIComponent(safeFilename)}" style="width:100%;height:100%;object-fit:cover;display:block;" autoplay muted playsinline preload="auto"></video>`;
+      }
+    }
+
+    zoneHtmls.push(`
+      <div class="zone-slot" style="position:absolute;left:${x}%;top:${y}%;width:${w}%;height:${h}%;z-index:${zIndex};overflow:hidden;">
+        ${innerHtml}
+      </div>
+    `);
+  }
+
+  const baseUrl = localBaseUrl();
+  const compositeHtml = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<base href="${baseUrl}/">
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    width: ${profile.width}px; height: ${profile.height}px;
+    background: #000000; overflow: hidden; position: relative;
+    box-sizing: border-box;
+  }
+  *, *:before, *:after { box-sizing: inherit; }
+  .zone-slot { position: absolute; overflow: hidden; }
+  .zone-slot iframe, .zone-slot img, .zone-slot video { width: 100%; height: 100%; display: block; border: 0; }
+</style>
+</head>
+<body>
+  ${zoneHtmls.join('\n')}
+</body>
+</html>`;
+
+  try {
+    const png = await renderWidgetOrHtml(compositeHtml, profile, 'layout');
+    return { png };
+  } catch (e) {
+    if (e.code === 'BROWSER_UNAVAILABLE' || e.code === 'BROWSER_NOT_FOUND') {
+      return {
+        unsupported: true,
+        reason: 'Multi-zone layout rendering with widgets or web pages requires a browser (set CHROME_PATH).',
+      };
+    }
+    throw e;
+  }
+}
+
+module.exports = {
+  render,
+  renderRemotePage,
+  renderLayout,
+  renderLayoutNative,
+  closeBrowser,
+  getBrowser,
+  looksLikeImage,
+  isLayoutImageOnly,
+  isBrowserAvailable,
+  safeDimension,
+};

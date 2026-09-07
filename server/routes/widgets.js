@@ -1565,3 +1565,4 @@ module.exports = router;
 module.exports.renderWidgetHtml = renderWidgetHtml;
 module.exports.dataResolverFor = dataResolverFor;
 module.exports.imageResolverFor = imageResolverFor;
+module.exports.widgetIframeSandboxForWorkspace = widgetIframeSandboxForWorkspace;
