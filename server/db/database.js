@@ -1620,7 +1620,6 @@ const migrations = [
      item_index  INTEGER NOT NULL DEFAULT 0,
      started_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
    )`,
-
   `CREATE TABLE IF NOT EXISTS embedded_zone_cursor (
      device_id   TEXT REFERENCES devices(id) ON DELETE CASCADE,
      zone_id     TEXT NOT NULL,
@@ -1628,6 +1627,25 @@ const migrations = [
      started_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
      PRIMARY KEY (device_id, zone_id)
    )`,
+
+  // Universal data sources & integrations engine (iCal, REST APIs, Google Sheets, SQL)
+  `CREATE TABLE IF NOT EXISTS data_sources (
+     id              TEXT PRIMARY KEY,
+     workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+     slug            TEXT NOT NULL,
+     name            TEXT NOT NULL,
+     type            TEXT NOT NULL,
+     config          TEXT NOT NULL,
+     cached_data     TEXT,
+     last_fetched_at INTEGER DEFAULT 0,
+     last_status     TEXT DEFAULT 'ok',
+     last_error      TEXT,
+     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     UNIQUE(workspace_id, slug)
+   )`,
+  "CREATE INDEX IF NOT EXISTS idx_data_sources_workspace ON data_sources(workspace_id)",
+  "CREATE INDEX IF NOT EXISTS idx_data_sources_slug ON data_sources(workspace_id, slug)",
 ];
 // Apply each ALTER idempotently. A "duplicate column name" / "already exists"
 // error means the column is already present (expected on a migrated DB) - benign.

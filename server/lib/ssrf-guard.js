@@ -123,14 +123,22 @@ async function assertSafeUrl(urlString) {
   return { url, addresses: resolved.map((a) => a.address) };
 }
 
-// Build a `lookup` for http.request that pins to a pre-vetted address, so the socket connects to the
-// IP we checked — not a value a rebinding DNS server hands back a second time.
 function pinnedLookup(vettedAddresses) {
-  const addr = vettedAddresses[0];
-  const family = net.isIP(addr);
+  const addrs = Array.isArray(vettedAddresses) ? vettedAddresses : [vettedAddresses];
+  const list = addrs.map((a) => ({ address: a, family: net.isIP(a) }));
+  const first = list[0] || { address: '127.0.0.1', family: 4 };
+
   return (hostname, options, cb) => {
-    if (typeof options === 'function') { cb = options; }
-    process.nextTick(() => cb(null, addr, family));
+    if (typeof options === 'function') {
+      cb = options;
+      options = {};
+    }
+    const isAll = Boolean(options && options.all);
+    if (isAll) {
+      process.nextTick(() => cb(null, list));
+    } else {
+      process.nextTick(() => cb(null, first.address, first.family));
+    }
   };
 }
 

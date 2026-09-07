@@ -97,7 +97,7 @@ const seed = (db) => {
 const tech = { id: 'u-tech', role: 'user' };
 const admin = { id: 'u-admin', role: 'platform_admin' };
 
-test('⚠️ SCOPING: a tech named on Acme sees Acme and NOT Contoso', () => {
+test('⚠️ SCOPING: a tech named on Acme sees Acme and NOT Contoso', async () => {
   /*
    * The property a client's security review actually asks about. Note this is enforced by never
    * SELECTING the other client's rows — a route that fetched everything and filtered afterwards
@@ -108,16 +108,19 @@ test('⚠️ SCOPING: a tech named on Acme sees Acme and NOT Contoso', () => {
   try {
     seed(db);
     db.prepare("INSERT INTO mesh_client_access VALUES ('acme','u-tech','viewer',?,NULL)").run(NOW);
-    return serve(db, tech).then(async ({ base, close }) => {
-      try {
-        const r = await fetch(`${base}/api/mesh/devices`).then((x) => x.json());
-        assert.equal(r.total, 1, 'exactly one client\'s screens');
-        assert.equal(r.devices[0].originNodeId, 'node-acme');
-        assert.ok(!JSON.stringify(r).includes('Contoso'),
-          'no trace of the other client anywhere in the response, including counts');
-      } finally { await close(); }
-    });
-  } finally { setTimeout(() => cleanup(db), 100); }
+    const { base, close } = await serve(db, tech);
+    try {
+      const r = await fetch(`${base}/api/mesh/devices`).then((x) => x.json());
+      assert.equal(r.total, 1, 'exactly one client\'s screens');
+      assert.equal(r.devices[0].originNodeId, 'node-acme');
+      assert.ok(!JSON.stringify(r).includes('Contoso'),
+        'no trace of the other client anywhere in the response, including counts');
+    } finally {
+      await close();
+    }
+  } finally {
+    cleanup(db);
+  }
 });
 
 test('⚠️ an UNFILED edge is visible to platform_admin only', async () => {

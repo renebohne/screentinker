@@ -393,20 +393,40 @@ function resolveGroupSync(device, deviceId) {
 // and only then, so the anti-flash reuse still holds for widgets nobody has touched.
 const widgetFactsOf = db.prepare(`
   SELECT w.updated_at AS rev,
+         w.config,
+         w.workspace_id,
          COALESCE(o.widget_sandbox_isolation_disabled, 0) AS same_origin
   FROM widgets w
   LEFT JOIN workspaces ws ON ws.id = w.workspace_id
   LEFT JOIN organizations o ON o.id = ws.organization_id
   WHERE w.id = ?
 `);
+
+const maxDataSourceUpdatedAt = db.prepare(`
+  SELECT MAX(updated_at) AS max_ds FROM data_sources WHERE workspace_id = ?
+`);
+
 function refreshWidgetRevs(assignments) {
   if (!Array.isArray(assignments)) return;
+  const dsMaxCache = new Map();
   for (const a of assignments) {
     if (!a || !a.widget_id) continue;
     try {
       const facts = widgetFactsOf.get(a.widget_id);
       if (!facts) continue;
-      a.widget_rev = facts.rev ?? a.widget_rev ?? 0;
+      let rev = facts.rev ?? a.widget_rev ?? 0;
+      if (facts.config && facts.config.includes('{{ds:') && facts.workspace_id) {
+        let maxDs = dsMaxCache.get(facts.workspace_id);
+        if (maxDs === undefined) {
+          const dsRow = maxDataSourceUpdatedAt.get(facts.workspace_id);
+          maxDs = dsRow?.max_ds || 0;
+          dsMaxCache.set(facts.workspace_id, maxDs);
+        }
+        if (maxDs > rev) {
+          rev = maxDs;
+        }
+      }
+      a.widget_rev = rev;
       a.widget_allow_same_origin = Number(facts.same_origin || 0) === 1;
     } catch (_) { /* keep published */ }
   }
