@@ -518,7 +518,7 @@ describe('Embedded Edge Cases & Robustness', () => {
 describe('Embedded HTTP Route & Fallback Handling', () => {
   const http = require('node:http');
   const express = require('express');
-  const { isBrowserAvailable } = require('../lib/embedded-render');
+  const { isBrowserAvailable, closeBrowser } = require('../lib/embedded-render');
   let app, server, baseUrl;
 
   before(async () => {
@@ -534,6 +534,7 @@ describe('Embedded HTTP Route & Fallback Handling', () => {
     if (server) {
       await new Promise((resolve) => server.close(resolve));
     }
+    await closeBrowser();
   });
 
   test('GET /api/embedded/render returns single-item image for device with single playlist', async () => {
