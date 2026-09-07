@@ -8,7 +8,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const { db } = require('../db/database');
-const { syncDataSource, withFetchSlot } = require('../lib/data-sources/service');
+const { syncDataSource, withFetchSlot, bumpDependentWidgets } = require('../lib/data-sources/service');
 const { resolveIcalData } = require('../lib/data-sources/ical-resolver');
 const { requireWorkspaceWrite, canWrite } = require('../lib/permissions');
 
@@ -280,10 +280,14 @@ router.post('/:id/refresh', requireWorkspaceWrite, async (req, res, next) => {
 // ─── DELETE /api/data-sources/:id (Delete data source) ─────────────────────────
 router.delete('/:id', requireWorkspaceWrite, (req, res) => {
   const wsId = req.workspaceId;
-  const result = db.prepare('DELETE FROM data_sources WHERE id = ? AND workspace_id = ?').run(req.params.id, wsId);
-  if (result.changes === 0) {
+  const row = db.prepare('SELECT id, workspace_id, slug FROM data_sources WHERE id = ? AND workspace_id = ?').get(req.params.id, wsId);
+  if (!row) {
     return res.status(404).json({ error: 'Data source not found' });
   }
+  db.prepare('DELETE FROM data_sources WHERE id = ?').run(row.id);
+  // The bound widgets now resolve to '' and their rev must move, or every player keeps the
+  // deleted source's last values in the year-long immutable render cache.
+  bumpDependentWidgets(row, Math.floor(Date.now() / 1000));
 
   res.json({ success: true, message: 'Data source deleted' });
 });

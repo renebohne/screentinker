@@ -1368,8 +1368,8 @@ function renderProps(container) {
         if (!val) return;
         const textEl = host.querySelector('#pText');
         if (textEl) {
-          const start = textEl.selectionStart || textEl.value.length;
-          const end = textEl.selectionEnd || textEl.value.length;
+          const start = textEl.selectionStart ?? textEl.value.length;   // 0 is a caret, not "none"
+          const end = textEl.selectionEnd ?? textEl.value.length;
           const old = textEl.value;
           textEl.value = old.substring(0, start) + val + old.substring(end);
           s.fields[e.slot] = textEl.value;

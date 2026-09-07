@@ -1,5 +1,8 @@
 'use strict';
 
+// CI runs in UTC; the resolver's day window uses server-local midnight, so pin the process to
+// UTC and every window-edge case below means the same thing on a laptop as on the runner.
+process.env.TZ = 'UTC';
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { resolveIcalData } = require('../lib/data-sources/ical-resolver');
@@ -438,4 +441,92 @@ test('withFetchSlot limits concurrent executions and hands slot to waiter', asyn
   const results = await Promise.all(tasks);
   assert.equal(results.length, 10);
   assert.ok(maxConcurrent <= 4, `expected max concurrency <= 4, was ${maxConcurrent}`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Follow-ups to #332, fixed on main after the merge.
+
+const { describeSyncError } = require('../lib/data-sources/service');
+const { pinnedLookup } = require('../lib/ssrf-guard');
+
+test('THE BUG: a recurring meeting that began before local midnight and is still running is BUSY', async () => {
+  // Daily 23:30-01:30 UTC. At 00:30 the occurrence that started at 23:30 yesterday is live, but
+  // the expansion window used to start at today's midnight, so the room read as free.
+  const ICS = `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:evt-overnight
+SUMMARY:Night Shift Standup
+DTSTART:20260101T233000Z
+DTEND:20260102T013000Z
+RRULE:FREQ=DAILY
+END:VEVENT
+END:VCALENDAR`;
+  const data = await resolveIcalData({ raw_data: ICS, timezone: 'UTC', locale: 'en' }, new Date('2026-09-07T00:30:00Z'));
+  assert.equal(data.current_title, 'Night Shift Standup');
+  assert.equal(data.status, 'BUSY');
+});
+
+test('THE BUG: a FREQ=MINUTELY series with the default lookahead is expanded, not dropped', async () => {
+  // node-ical ignores the iterator argument, so the old "bound" never ran and the library's
+  // 10,000-iteration throw dropped the whole series as FREE.
+  const ICS = `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:evt-minutely
+SUMMARY:Minutely Pulse
+DTSTART:20260904T000000Z
+DTEND:20260904T000100Z
+RRULE:FREQ=MINUTELY
+END:VEVENT
+END:VCALENDAR`;
+  const data = await resolveIcalData({ raw_data: ICS, timezone: 'UTC' }, new Date('2026-09-10T08:00:30Z'));
+  assert.equal(data.current_title, 'Minutely Pulse', 'the live occurrence must be found');
+  assert.ok(data.event_count > 0);
+  assert.ok(data.event_count <= 50, 'and the result is bounded to what a sign can show');
+});
+
+test('a FREQ=SECONDLY series is bounded the same way', async () => {
+  const ICS = `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:evt-secondly
+SUMMARY:Tick
+DTSTART:20260904T000000Z
+DTEND:20260904T000010Z
+RRULE:FREQ=SECONDLY
+END:VEVENT
+END:VCALENDAR`;
+  const data = await resolveIcalData({ raw_data: ICS, timezone: 'UTC' }, new Date('2026-09-10T08:00:05Z'));
+  assert.equal(data.current_title, 'Tick');
+  assert.ok(data.event_count <= 50);
+});
+
+test('last_error never carries an address, a port, or a raw upstream string', () => {
+  const ssrf = Object.assign(new Error('blocked: blocked-ip:10.0.0.5'), { name: 'SsrfError' });
+  assert.doesNotMatch(describeSyncError(ssrf), /10\.0\.0\.5|blocked-ip/);
+  assert.doesNotMatch(describeSyncError(new Error('connect ECONNREFUSED 203.0.113.5:443')), /203|443|ECONNREFUSED/);
+  assert.match(describeSyncError(new Error('Calendar feed responded 401')), /401/);
+  assert.match(describeSyncError(new Error('Calendar feed timed out')), /did not respond/);
+  assert.equal(describeSyncError(new Error('something internal: /srv/x')), 'Sync failed');
+});
+
+test('THE BUG: pinnedLookup with no vetted address fails closed, never to loopback', (t, done) => {
+  const lookup = pinnedLookup([]);
+  lookup('example.com', {}, (err, addr) => {
+    assert.ok(err, 'an empty vetted list must be an error');
+    assert.notEqual(addr, '127.0.0.1');
+    assert.equal(addr, undefined);
+    done();
+  });
+});
+
+test('THE BUG: the assembled field is re-capped after interpolation, not only each token', () => {
+  const tokens = '{{ds:cal.agenda}}'.repeat(90);                   // 90 x 17 = 1530 chars, under the field cap
+  const html = renderSlideHtml(
+    { fields: { body: tokens }, elements: [{ id: 'e', kind: 'body', slot: 'body', box: { x: 0, y: 0, w: 100, h: 50 } }] },
+    { resolveData: () => '§'.repeat(2000) },
+  );
+  const emitted = (html.match(/§/g) || []).length;
+  assert.ok(emitted <= 2000, `field expanded to ${emitted} chars; the renderer promises MAX_FIELD_CHARS`);
 });

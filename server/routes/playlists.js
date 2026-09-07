@@ -128,16 +128,10 @@ function buildSnapshotItems(playlistId) {
       )
     ORDER BY pi.sort_order ASC
   `).all(playlistId);
-  const dsMax = db.prepare(`
-    SELECT MAX(updated_at) AS max_ds
-    FROM data_sources
-    WHERE workspace_id = (SELECT workspace_id FROM playlists WHERE id = ?)
-  `).get(playlistId)?.max_ds || 0;
-
+  // widget_rev is widgets.updated_at, and a data-source change bumps that for the widgets bound
+  // to the changed slug (lib/data-sources/service.js bumpDependentWidgets); no workspace-wide
+  // MAX(data_sources.updated_at) here, which re-revved unrelated widgets on any rename.
   for (const it of items) {
-    if (it.widget_id && it.widget_config && it.widget_config.includes('{{ds:') && dsMax > (it.widget_rev || 0)) {
-      it.widget_rev = dsMax;
-    }
     const blocks = schedulesForItem(it._iid);
     if (blocks.length) it.schedules = blocks;
     delete it._iid;

@@ -402,30 +402,19 @@ const widgetFactsOf = db.prepare(`
   WHERE w.id = ?
 `);
 
-const maxDataSourceUpdatedAt = db.prepare(`
-  SELECT MAX(updated_at) AS max_ds FROM data_sources WHERE workspace_id = ?
-`);
-
+// Data-source changes reach here through widgets.updated_at: a sync that changed data bumps the
+// widgets bound to that slug (lib/data-sources/service.js bumpDependentWidgets). An earlier cut
+// also max'd every '{{ds:' widget against the workspace-wide MAX(data_sources.updated_at), which
+// re-revved twenty unrelated room signs, and reloaded their WebViews, whenever one source was
+// renamed. The targeted bump is the whole mechanism now.
 function refreshWidgetRevs(assignments) {
   if (!Array.isArray(assignments)) return;
-  const dsMaxCache = new Map();
   for (const a of assignments) {
     if (!a || !a.widget_id) continue;
     try {
       const facts = widgetFactsOf.get(a.widget_id);
       if (!facts) continue;
-      let rev = facts.rev ?? a.widget_rev ?? 0;
-      if (facts.config && facts.config.includes('{{ds:') && facts.workspace_id) {
-        let maxDs = dsMaxCache.get(facts.workspace_id);
-        if (maxDs === undefined) {
-          const dsRow = maxDataSourceUpdatedAt.get(facts.workspace_id);
-          maxDs = dsRow?.max_ds || 0;
-          dsMaxCache.set(facts.workspace_id, maxDs);
-        }
-        if (maxDs > rev) {
-          rev = maxDs;
-        }
-      }
+      const rev = facts.rev ?? a.widget_rev ?? 0;
       a.widget_rev = rev;
       a.widget_allow_same_origin = Number(facts.same_origin || 0) === 1;
     } catch (_) { /* keep published */ }

@@ -756,7 +756,10 @@ function renderSlideHtml(rawConfig, opts = {}) {
   if (resolveData) {
     for (const [k, v] of Object.entries(fields)) {
       if (typeof v === 'string') {
-        fields[k] = interpolateDataSources(v, resolveData);
+        // Re-capped AFTER interpolation. Each token is capped on its own, but ninety tokens in a
+        // 2000-char field expanded to ~180KB, ~10MB a slide, served immutable to every player.
+        // MAX_FIELD_CHARS is the bound the renderer promises; it holds for the assembled value.
+        fields[k] = interpolateDataSources(v, resolveData).slice(0, MAX_FIELD_CHARS);
       }
     }
   }

@@ -42,11 +42,17 @@ let ioInstance = null;
 /**
  * Periodically poll and sync all due data sources across all workspaces.
  */
+// Sources with a sync in flight. The poller re-selected every stale row on each tick, so fifty
+// black-holing feeds (10s each, four at a time) queued fifty MORE waiters every minute behind
+// the ones still waiting; an operator's own refresh then sat minutes behind background retries.
+const inFlight = new Set();
+
 function pollDueDataSources() {
   try {
     const nowSec = Math.floor(Date.now() / 1000);
     const rows = db.prepare('SELECT id, workspace_id, slug, name, type, config, last_fetched_at, last_status FROM data_sources').all();
     for (const row of rows) {
+      if (inFlight.has(row.id)) continue;
       let config = {};
       try { config = JSON.parse(row.config || '{}'); } catch (_) {}
       const intervalMin = Math.max(1, parseInt(config.interval_min, 10) || 15);
@@ -112,6 +118,7 @@ async function syncDataSource(sourceOrId, force = false) {
     };
   }
 
+  inFlight.add(row.id);
   try {
     let resolvedData = null;
 
@@ -121,6 +128,9 @@ async function syncDataSource(sourceOrId, force = false) {
       throw new Error(`Unsupported data source type: ${row.type}`);
     }
 
+    // Stamped when the fetch FINISHED. The pre-queue timestamp made a source that waited
+    // minutes for a slot look due again on the very next tick.
+    const doneSec = Math.floor(Date.now() / 1000);
     const cachedJson = JSON.stringify(resolvedData);
     const dataChanged = !row.cached_data || cachedJson !== row.cached_data;
 
@@ -130,60 +140,16 @@ async function syncDataSource(sourceOrId, force = false) {
         UPDATE data_sources
         SET cached_data = ?, last_fetched_at = ?, last_status = 'ok', last_error = NULL, updated_at = ?
         WHERE id = ?
-      `).run(cachedJson, nowSec, nowSec, row.id);
+      `).run(cachedJson, doneSec, doneSec, row.id);
 
-      // Find dependent widgets in this workspace and advance their updated_at revision
-      try {
-        const slugLower = (row.slug || '').toLowerCase();
-        const candidateWidgets = db.prepare(`
-          SELECT id, config FROM widgets
-          WHERE workspace_id = ?
-        `).all(row.workspace_id);
-
-        const dependentWidgets = candidateWidgets.filter(w => {
-          if (!w.config) return false;
-          const cfg = w.config.toLowerCase();
-          return (
-            cfg.includes(`{{ds:${slugLower}`) ||
-            cfg.includes(`"slug":"${slugLower}"`)
-          );
-        });
-
-        if (dependentWidgets.length > 0) {
-          const widgetIds = dependentWidgets.map(w => w.id);
-          const placeholders = widgetIds.map(() => '?').join(',');
-          db.prepare(`UPDATE widgets SET updated_at = ? WHERE id IN (${placeholders})`).run(nowSec, ...widgetIds);
-
-          // Push the revision change to all displays currently playing any of these widgets
-          const io = ioInstance || global.__deviceIo;
-          const deviceNs = io?.of?.('/device');
-          if (deviceNs) {
-            const { buildPlaylistPayload } = require('../../ws/deviceSocket');
-            const commandQueue = require('../command-queue');
-            const { devicesPlayingWidget } = require('../devices-playing');
-
-            const affectedDeviceIds = new Set();
-            for (const wId of widgetIds) {
-              for (const dId of devicesPlayingWidget(wId)) {
-                affectedDeviceIds.add(dId);
-              }
-            }
-
-            for (const devId of affectedDeviceIds) {
-              commandQueue.queueOrEmitPlaylistUpdate(deviceNs, devId, buildPlaylistPayload);
-            }
-          }
-        }
-      } catch (bumpErr) {
-        console.warn(`[data-sources] Could not push updates for dependent widgets: ${bumpErr.message}`);
-      }
+      bumpDependentWidgets(row, doneSec);
     } else {
       // Data did not change: update heartbeat/fetch timestamp only, do not defeat immutable cache
       db.prepare(`
         UPDATE data_sources
         SET last_fetched_at = ?, last_status = 'ok', last_error = NULL
         WHERE id = ?
-      `).run(nowSec, row.id);
+      `).run(doneSec, row.id);
     }
 
     return {
@@ -192,18 +158,20 @@ async function syncDataSource(sourceOrId, force = false) {
       last_fetched_at: nowSec,
       last_status: 'ok',
       last_error: null,
-      updated_at: dataChanged ? nowSec : row.updated_at,
+      updated_at: dataChanged ? doneSec : row.updated_at,
       data: resolvedData,
     };
   } catch (err) {
     console.warn(`[data-sources] Sync failed for "${row.name}" (${row.id}): ${err.message}`);
+    const publicError = describeSyncError(err);
+    const doneSec = Math.floor(Date.now() / 1000);
 
     // Never update updated_at on error: an upstream outage must not defeat the player's immutable cache
     db.prepare(`
       UPDATE data_sources
       SET last_status = 'error', last_error = ?, last_fetched_at = ?
       WHERE id = ?
-    `).run(err.message, nowSec, row.id);
+    `).run(publicError, doneSec, row.id);
 
     // If we have stale cached data, return it with error status so displays keep showing something
     let staleData = null;
@@ -214,9 +182,91 @@ async function syncDataSource(sourceOrId, force = false) {
     return {
       ...row,
       last_status: 'error',
-      last_error: err.message,
+      last_error: publicError,
       data: staleData,
     };
+  } finally {
+    inFlight.delete(row.id);
+  }
+}
+
+/*
+ * What a sync failure looks like to the dashboard. The raw message is for the server log:
+ * `blocked: blocked-ip:10.0.0.5` names the internal address a hostname resolved to,
+ * `connect ECONNREFUSED 203.0.113.5:443` names a port, and both were stored in last_error and
+ * shown to every workspace member, viewers included, while /test deliberately answers with a
+ * fixed string for exactly that reason. One vocabulary, no addresses.
+ */
+function describeSyncError(err) {
+  const m = String((err && err.message) || '');
+  if (err && err.name === 'SsrfError') return 'The calendar address is not allowed';
+  if (/^blocked:/i.test(m)) return 'The calendar address is not allowed';
+  if (/No valid iCal URL/i.test(m)) return 'No calendar URL or data configured';
+  if (/timed out/i.test(m)) return 'The calendar host did not respond in time';
+  if (/size limit/i.test(m)) return 'The calendar feed is too large';
+  if (/responded (\d{3})|HTTP (\d{3})/i.test(m)) {
+    const code = (m.match(/(\d{3})/) || [])[1];
+    return code ? `The calendar host responded with HTTP ${code}` : 'The calendar host responded with an error';
+  }
+  if (/could not be parsed|parse/i.test(m)) return 'The calendar data could not be parsed';
+  if (/ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|ENETUNREACH|certificate/i.test(m)) {
+    return 'The calendar host could not be reached';
+  }
+  if (/Unsupported data source type/i.test(m)) return 'Unsupported data source type';
+  return 'Sync failed';
+}
+
+/*
+ * Advance the revision of every widget bound to this source's slug, and push to the displays
+ * playing them. widgets.updated_at IS the player's widget_rev (the snapshot copies it, the
+ * device socket refreshes it at send time, the embedded cache keys on it), so this one write is
+ * what makes a data change reach a screen through the immutable render cache. Used by a sync
+ * that changed data and by DELETE, which used to leave players on the deleted source's last
+ * values indefinitely.
+ */
+function bumpDependentWidgets(row, nowSec) {
+  try {
+    const slugLower = (row.slug || '').toLowerCase();
+    if (!slugLower || !row.workspace_id) return [];
+    const candidateWidgets = db.prepare(`
+      SELECT id, config FROM widgets
+      WHERE workspace_id = ?
+    `).all(row.workspace_id);
+
+    // `{{ds:slug.` and not `{{ds:slug`: 'room' must not bump the widgets bound to 'room-b'.
+    const dependentWidgets = candidateWidgets.filter(w => {
+      if (!w.config) return false;
+      const cfg = w.config.toLowerCase();
+      return cfg.includes(`{{ds:${slugLower}.`) || cfg.includes(`"slug":"${slugLower}"`);
+    });
+    if (dependentWidgets.length === 0) return [];
+
+    const widgetIds = dependentWidgets.map(w => w.id);
+    const placeholders = widgetIds.map(() => '?').join(',');
+    db.prepare(`UPDATE widgets SET updated_at = ? WHERE id IN (${placeholders})`).run(nowSec, ...widgetIds);
+
+    // Push the revision change to all displays currently playing any of these widgets
+    const io = ioInstance || global.__deviceIo;
+    const deviceNs = io?.of?.('/device');
+    if (deviceNs) {
+      const { buildPlaylistPayload } = require('../../ws/deviceSocket');
+      const commandQueue = require('../command-queue');
+      const { devicesPlayingWidget } = require('../devices-playing');
+
+      const affectedDeviceIds = new Set();
+      for (const wId of widgetIds) {
+        for (const dId of devicesPlayingWidget(wId)) {
+          affectedDeviceIds.add(dId);
+        }
+      }
+      for (const devId of affectedDeviceIds) {
+        commandQueue.queueOrEmitPlaylistUpdate(deviceNs, devId, buildPlaylistPayload);
+      }
+    }
+    return widgetIds;
+  } catch (bumpErr) {
+    console.warn(`[data-sources] Could not push updates for dependent widgets: ${bumpErr.message}`);
+    return [];
   }
 }
 
@@ -269,6 +319,8 @@ async function getWorkspaceDataMap(workspaceId) {
 
 module.exports = {
   syncDataSource,
+  bumpDependentWidgets,
+  describeSyncError,
   getWorkspaceDataMap,
   getWorkspaceDataMapSync,
   withFetchSlot,

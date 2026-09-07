@@ -213,16 +213,59 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
       }
     }
 
-    // Handle RRULE series (bounded iterator expansion to prevent unbounded memory allocation)
+    // Handle RRULE series.
     if (ev.rrule) {
       try {
         const maxRruleExpansion = Math.max(50, maxEvents * 5);
-        const dates = ev.rrule.between(startWindow, endWindow, true, (date, len) => {
-          if (len >= maxRruleExpansion) return false;
-          return date;
-        }) || [];
-
         const durationMs = ev.end ? (new Date(ev.end).getTime() - new Date(ev.start).getTime()) : 3600000;
+
+        /*
+         * ⚠️ THE WINDOW STARTS BEFORE NOW BY ONE OCCURRENCE, NOT AT MIDNIGHT. A series occurrence
+         * that began before the server's local midnight and is still running was not in
+         * [startOfToday, end], so a daily 16:30-18:30 meeting read as FREE at 17:30 on a UTC host
+         * serving a Pacific room. Only the `occEnd < now` filter below decides what is over.
+         *
+         * ⚠️ AND IT IS NARROWED BY FREQUENCY, BECAUSE THE ITERATOR ARGUMENT WAS NEVER CALLED.
+         * node-ical's rrule wrapper takes between(after, before, inclusive) and ignores a fourth
+         * argument, so the "bounded iterator" the first version passed ran zero times; a
+         * FREQ=MINUTELY series then hit the library's 10,000-iteration throw and the whole series
+         * was dropped, silently, as FREE. The library expands a two-day MINUTELY window in a few
+         * milliseconds; it is the fourteen-day default that overflowed. So the window is capped
+         * per frequency to stay under that limit, the result is sliced to what the sign can show,
+         * and a throw narrows to one day around now before giving up.
+         */
+        const FREQ_NAMES = { 4: 'HOURLY', 5: 'MINUTELY', 6: 'SECONDLY' };
+        const rawFreq = ev.rrule.options?.freq ?? ev.rrule.origOptions?.freq;
+        const freq = String(FREQ_NAMES[rawFreq] || rawFreq || '').toUpperCase();
+        const SPAN_MS = { HOURLY: 60 * 86400000, MINUTELY: 2 * 86400000, SECONDLY: 2 * 3600000 };
+        // A high-frequency series gets a short window anchored on NOW (a two-hour SECONDLY
+        // window that starts at midnight does not contain 08:00); everything else keeps the
+        // day window, extended back by one occurrence so a running one is included.
+        const seriesStart = SPAN_MS[freq]
+          ? new Date(now.getTime() - durationMs)
+          : new Date(Math.min(startWindow.getTime(), now.getTime() - durationMs));
+        const seriesEnd = SPAN_MS[freq]
+          ? new Date(Math.min(endWindow.getTime(), seriesStart.getTime() + SPAN_MS[freq]))
+          : endWindow;
+        let dates;
+        try {
+          dates = ev.rrule.between(seriesStart, seriesEnd, true) || [];
+        } catch (capErr) {
+          const narrowEnd = new Date(Math.min(seriesEnd.getTime(), now.getTime() + 86400000));
+          dates = ev.rrule.between(seriesStart, narrowEnd, true) || [];
+        }
+        // Drop what is already over BEFORE bounding the list: the bound keeps the EARLIEST
+        // occurrences, and for a minutely series from midnight those are all in the past, which
+        // left the live one outside the cut and the room reading FREE at 08:00.
+        // An occurrence with a RECURRENCE-ID override is kept regardless: the override may move
+        // it later than its series slot, and only the loop below knows the moved time.
+        const hasOverride = (d) => {
+          if (!ev.recurrences) return false;
+          const dt = new Date(d);
+          return Boolean(ev.recurrences[dt.toISOString().slice(0, 10)] || ev.recurrences[dt.toISOString()]);
+        };
+        dates = dates.filter((d) => isAllDay || hasOverride(d) || (new Date(d).getTime() + durationMs) >= now.getTime());
+        if (dates.length > maxRruleExpansion) dates = dates.slice(0, maxRruleExpansion);
 
         for (const date of dates) {
           let occStart = new Date(date);
