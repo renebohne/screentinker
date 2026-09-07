@@ -111,8 +111,8 @@ function parseProfile(raw) {
     obj = { ...PRESETS[obj.preset], ...obj };
   }
 
-  const width  = Number.isInteger(obj.width)  && obj.width  > 0 ? obj.width  : null;
-  const height = Number.isInteger(obj.height) && obj.height > 0 ? obj.height : null;
+  const width  = Number.isInteger(obj.width)  && obj.width  > 0 && obj.width  <= 10000 ? obj.width  : null;
+  const height = Number.isInteger(obj.height) && obj.height > 0 && obj.height <= 10000 ? obj.height : null;
   if (!width || !height) return null;
 
   return {

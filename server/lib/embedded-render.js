@@ -42,7 +42,7 @@ function contentDir() {
 // malformed profile can never inject arbitrary values into CSS or viewport dimensions.
 function safeDimension(value, fallback) {
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0 || n > 100000) return fallback;
+  if (!Number.isFinite(n) || n <= 0 || n > 10000) return fallback;
   return Math.floor(n);
 }
 
@@ -91,6 +91,8 @@ function findChromePath() {
     '/snap/bin/chromium',
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   ].filter(Boolean);
 
   for (const candidate of candidates) {
@@ -194,17 +196,55 @@ process.on('SIGINT', () => { closeBrowser(); });
 
 // ─── Native Image Renderers (Jimp) ───────────────────────────────────────────
 
-async function renderLocalImage(content, profile) {
-  // Guard against a `filepath` escaping the content directory (mirrors the
-  // same path.basename() + startsWith() check used when rendering layout zones).
+function safeLocalImagePath(filepath) {
+  if (!filepath) return null;
   const base = path.resolve(contentDir());
-  const safe = path.resolve(base, path.basename(String(content.filepath || '')));
+  const safe = path.resolve(base, path.basename(String(filepath)));
   if (!safe.startsWith(base + path.sep) && safe !== base) {
     throw Object.assign(new Error('Invalid content file path'), { code: 'INVALID_PATH' });
   }
   if (!fs.existsSync(safe)) {
     throw Object.assign(new Error('Content file not found on disk'), { code: 'NOT_FOUND' });
   }
+  return safe;
+}
+
+function parseColorToRgba(hexOrInt, fallback = 0x000000FF) {
+  if (typeof hexOrInt === 'number' && Number.isFinite(hexOrInt)) return hexOrInt >>> 0;
+  if (typeof hexOrInt === 'string') {
+    let s = hexOrInt.trim().replace(/^#/, '');
+    if (s.length === 3) {
+      s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2] + 'FF';
+    } else if (s.length === 6) {
+      s = s + 'FF';
+    }
+    if (s.length === 8) {
+      const parsed = parseInt(s, 16);
+      if (!Number.isNaN(parsed)) return parsed >>> 0;
+    }
+  }
+  return fallback;
+}
+
+function withTimeout(promise, ms = 15000, timeoutErrorMsg = 'Render timed out') {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(timeoutErrorMsg);
+      err.code = 'RENDER_TIMEOUT';
+      reject(err);
+    }, ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    clearTimeout(timer);
+  });
+}
+
+async function renderLocalImage(content, profile) {
+  const fileToLoad = (content.filepath && looksLikeImage(content.filepath, content.mime_type))
+    ? content.filepath
+    : (content.thumbnail_path || content.filepath);
+  const safe = safeLocalImagePath(fileToLoad);
   const img = await Jimp.fromBuffer(fs.readFileSync(safe));
   img.cover({ w: profile.width, h: profile.height });
   return img.getBuffer('image/png');
@@ -214,13 +254,30 @@ const MAX_CONCURRENT_PAGES = 3;
 let activePages = 0;
 const pageWaiters = [];
 
-function acquirePageSlot() {
+function acquirePageSlot(signal) {
+  if (signal?.aborted) {
+    const err = new Error('Render request aborted');
+    err.code = 'ABORTED';
+    return Promise.reject(err);
+  }
   if (activePages < MAX_CONCURRENT_PAGES) {
     activePages++;
     return Promise.resolve();
   }
-  return new Promise((resolve) => {
-    pageWaiters.push(resolve);
+  return new Promise((resolve, reject) => {
+    const waiter = { resolve, reject };
+    pageWaiters.push(waiter);
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        const idx = pageWaiters.indexOf(waiter);
+        if (idx !== -1) {
+          pageWaiters.splice(idx, 1);
+          const err = new Error('Render request aborted');
+          err.code = 'ABORTED';
+          reject(err);
+        }
+      }, { once: true });
+    }
   });
 }
 
@@ -229,7 +286,7 @@ function releasePageSlot() {
   if (pageWaiters.length > 0) {
     activePages++;
     const next = pageWaiters.shift();
-    next();
+    next.resolve();
   }
 }
 
@@ -283,103 +340,105 @@ function localBaseUrl() {
   return global.__localApiOrigin || process.env.BASE_URL || `http://127.0.0.1:${process.env.PORT || config.port || 3001}`;
 }
 
-async function renderWidgetOrHtml(html, profile, widgetType = '') {
-  await acquirePageSlot();
+async function renderWidgetOrHtml(html, profile, widgetType = '', options = {}) {
+  await acquirePageSlot(options.signal);
   let browser = null;
   let page = null;
   try {
-    browser = await getBrowser();
-    page = await browser.newPage();
-    await page.setViewport({ width: profile.width, height: profile.height });
+    return await withTimeout((async () => {
+      browser = await getBrowser();
+      page = await browser.newPage();
+      await page.setViewport({ width: profile.width, height: profile.height });
 
-    const baseUrl = localBaseUrl();
-    const staticStyle = '<style>*, *::before, *::after { animation: none !important; transition: none !important; }</style>';
-    let finalHtml = html;
-    if (/<head[^>]*>/i.test(finalHtml)) {
-      finalHtml = finalHtml.replace(/(<head[^>]*>)/i, `$1\n<base href="${baseUrl}/">\n${staticStyle}`);
-    } else if (/<html[^>]*>/i.test(finalHtml)) {
-      finalHtml = finalHtml.replace(/(<html[^>]*>)/i, `$1\n<head><base href="${baseUrl}/">\n${staticStyle}</head>`);
-    } else {
-      finalHtml = `<!DOCTYPE html><html><head><base href="${baseUrl}/">\n${staticStyle}</head><body>${finalHtml}</body></html>`;
-    }
+      const baseUrl = localBaseUrl();
+      const staticStyle = '<style>*, *::before, *::after { animation: none !important; transition: none !important; }</style>';
+      let finalHtml = html;
+      if (/<head[^>]*>/i.test(finalHtml)) {
+        finalHtml = finalHtml.replace(/(<head[^>]*>)/i, `$1\n<base href="${baseUrl}/">\n${staticStyle}`);
+      } else if (/<html[^>]*>/i.test(finalHtml)) {
+        finalHtml = finalHtml.replace(/(<html[^>]*>)/i, `$1\n<head><base href="${baseUrl}/">\n${staticStyle}</head>`);
+      } else {
+        finalHtml = `<!DOCTYPE html><html><head><base href="${baseUrl}/">\n${staticStyle}</head><body>${finalHtml}</body></html>`;
+      }
 
-    // For layout compositions, wait for domcontentloaded so slow/hung zones don't abort whole layout.
-    // Single-widget / slide / webpage items wait for 'load'.
-    const waitUntil = widgetType === 'layout' ? 'domcontentloaded' : 'load';
-    await page.setContent(finalHtml, { waitUntil, timeout: 8000 });
+      // For layout compositions, wait for domcontentloaded so slow/hung zones don't abort whole layout.
+      // Single-widget / slide / webpage items wait for 'load'.
+      const waitUntil = widgetType === 'layout' ? 'domcontentloaded' : 'load';
+      await page.setContent(finalHtml, { waitUntil, timeout: 8000 });
 
-    // Wait for any async network fetches to settle if present
-    if (widgetType === 'weather' || widgetType === 'rss' || widgetType === 'layout') {
-      await page.waitForNetworkIdle({ idleTime: 200, timeout: 2500 }).catch(() => {});
-    }
+      // Wait for any async network fetches to settle if present
+      if (widgetType === 'weather' || widgetType === 'rss' || widgetType === 'layout') {
+        await page.waitForNetworkIdle({ idleTime: 200, timeout: 2500 }).catch(() => {});
+      }
 
-    // Template-agnostic settlement: fonts, animations, images, and videos (including inside srcdoc iframes)
-    await page.evaluate(async (isLayout) => {
-      try { if (document.fonts?.ready) await document.fonts.ready; } catch (_) {}
-      try { document.getAnimations().forEach(a => { try { a.finish(); } catch (_) {} }); } catch (_) {}
+      // Template-agnostic settlement: fonts, animations, images, and videos (including inside srcdoc iframes)
+      await page.evaluate(async (isLayout) => {
+        try { if (document.fonts?.ready) await document.fonts.ready; } catch (_) {}
+        try { document.getAnimations().forEach(a => { try { a.finish(); } catch (_) {} }); } catch (_) {}
 
-      // Settle iframes with individual bounded wait (so a hung remote iframe never blocks whole layout)
-      const iframes = Array.from(document.querySelectorAll('iframe'));
-      await Promise.all(iframes.map(iframe => {
-        return new Promise((resolve) => {
-          // Listeners and the timer FIRST. Reading contentDocument on a cross-origin zone throws
-          // SecurityError, and a catch that resolved there let a remote dashboard be captured
-          // blank at ~3s while it was still painting. A remote zone now waits for its load
-          // event or the bounded timer, whichever comes first.
-          setTimeout(resolve, isLayout ? 3000 : 5000);
-          iframe.addEventListener('load', resolve, { once: true });
-          iframe.addEventListener('error', resolve, { once: true });
-          try {
-            const doc = iframe.contentDocument || iframe.contentWindow?.document;
-            if (doc && (doc.readyState === 'complete' || doc.readyState === 'interactive')) {
-              try { doc.getAnimations().forEach(a => { try { a.finish(); } catch (_) {} }); } catch (_) {}
-              const fonts = doc.fonts && doc.fonts.ready;
-              if (fonts && typeof fonts.then === 'function') fonts.then(resolve, resolve); else resolve();
-            }
-          } catch (_) { /* cross-origin: the load event or the timer settles it */ }
-        });
-      }));
+        // Settle iframes with individual bounded wait (so a hung remote iframe never blocks whole layout)
+        const iframes = Array.from(document.querySelectorAll('iframe'));
+        await Promise.all(iframes.map(iframe => {
+          return new Promise((resolve) => {
+            // Listeners and the timer FIRST. Reading contentDocument on a cross-origin zone throws
+            // SecurityError, and a catch that resolved there let a remote dashboard be captured
+            // blank at ~3s while it was still painting. A remote zone now waits for its load
+            // event or the bounded timer, whichever comes first.
+            setTimeout(resolve, isLayout ? 3000 : 5000);
+            iframe.addEventListener('load', resolve, { once: true });
+            iframe.addEventListener('error', resolve, { once: true });
+            try {
+              const doc = iframe.contentDocument || iframe.contentWindow?.document;
+              if (doc && (doc.readyState === 'complete' || doc.readyState === 'interactive')) {
+                try { doc.getAnimations().forEach(a => { try { a.finish(); } catch (_) {} }); } catch (_) {}
+                const fonts = doc.fonts && doc.fonts.ready;
+                if (fonts && typeof fonts.then === 'function') fonts.then(resolve, resolve); else resolve();
+              }
+            } catch (_) { /* cross-origin: the load event or the timer settles it */ }
+          });
+        }));
 
-      // Settle images across root and iframes
-      const getNestedImages = (root) => {
-        let imgs = Array.from(root.querySelectorAll('img'));
-        const fList = Array.from(root.querySelectorAll('iframe'));
-        for (const f of fList) {
-          try {
-            const doc = f.contentDocument || f.contentWindow?.document;
-            if (doc) {
-              imgs = imgs.concat(Array.from(doc.querySelectorAll('img')));
-            }
-          } catch (_) {}
-        }
-        return imgs;
-      };
+        // Settle images across root and iframes
+        const getNestedImages = (root) => {
+          let imgs = Array.from(root.querySelectorAll('img'));
+          const fList = Array.from(root.querySelectorAll('iframe'));
+          for (const f of fList) {
+            try {
+              const doc = f.contentDocument || f.contentWindow?.document;
+              if (doc) {
+                imgs = imgs.concat(Array.from(doc.querySelectorAll('img')));
+              }
+            } catch (_) {}
+          }
+          return imgs;
+        };
 
-      const imgs = getNestedImages(document);
-      await Promise.all(imgs.map(img => {
-        if (img.complete && img.naturalHeight !== 0) return Promise.resolve();
-        return new Promise(resolve => {
-          img.addEventListener('load', resolve, { once: true });
-          img.addEventListener('error', resolve, { once: true });
-          setTimeout(resolve, 1500);
-        });
-      }));
+        const imgs = getNestedImages(document);
+        await Promise.all(imgs.map(img => {
+          if (img.complete && img.naturalHeight !== 0) return Promise.resolve();
+          return new Promise(resolve => {
+            img.addEventListener('load', resolve, { once: true });
+            img.addEventListener('error', resolve, { once: true });
+            setTimeout(resolve, 1500);
+          });
+        }));
 
-      // Settle videos
-      const videos = Array.from(document.querySelectorAll('video'));
-      await Promise.all(videos.map(v => {
-        if (v.readyState >= 2) return Promise.resolve();
-        return new Promise(resolve => {
-          v.addEventListener('loadeddata', resolve, { once: true });
-          v.addEventListener('canplay', resolve, { once: true });
-          v.addEventListener('error', resolve, { once: true });
-          setTimeout(resolve, 2000);
-        });
-      }));
-    }, widgetType === 'layout').catch(() => {});
+        // Settle videos
+        const videos = Array.from(document.querySelectorAll('video'));
+        await Promise.all(videos.map(v => {
+          if (v.readyState >= 2) return Promise.resolve();
+          return new Promise(resolve => {
+            v.addEventListener('loadeddata', resolve, { once: true });
+            v.addEventListener('canplay', resolve, { once: true });
+            v.addEventListener('error', resolve, { once: true });
+            setTimeout(resolve, 2000);
+          });
+        }));
+      }, widgetType === 'layout').catch(() => {});
 
-    const snap = await page.screenshot({ type: 'png' });
-    return Buffer.from(snap);
+      const snap = await page.screenshot({ type: 'png' });
+      return Buffer.from(snap);
+    })(), 15000, 'Page rendering exceeded 15s deadline');
   } finally {
     if (page) {
       try { await page.close(); } catch (_) {}
@@ -401,7 +460,7 @@ async function renderWidgetOrHtml(html, profile, widgetType = '') {
  * device on that workspace can pull. The media proxy and the data-source fetcher already refuse
  * those through lib/ssrf-guard; this path never did.
  */
-async function renderRemotePage(url, profile) {
+async function renderRemotePage(url, profile, options = {}) {
   try {
     await assertSafeUrl(url);
   } catch (e) {
@@ -410,17 +469,19 @@ async function renderRemotePage(url, profile) {
     }
     throw Object.assign(new Error(`Invalid remote URL: ${e.message}`), { code: 'FETCH_ERROR' });
   }
-  await acquirePageSlot();
+  await acquirePageSlot(options.signal);
   let page = null;
   try {
-    const browser = await getBrowser();
-    page = await browser.newPage();
-    await page.setViewport({ width: profile.width, height: profile.height });
-    await page.goto(url, { waitUntil: 'load', timeout: 10000 });
-    // Dashboards and boards usually paint from a fetch after load; give that a bounded chance.
-    await page.waitForNetworkIdle({ idleTime: 200, timeout: 2500 }).catch(() => {});
-    const snap = await page.screenshot({ type: 'png' });
-    return Buffer.from(snap);
+    return await withTimeout((async () => {
+      const browser = await getBrowser();
+      page = await browser.newPage();
+      await page.setViewport({ width: profile.width, height: profile.height });
+      await page.goto(url, { waitUntil: 'load', timeout: 10000 });
+      // Dashboards and boards usually paint from a fetch after load; give that a bounded chance.
+      await page.waitForNetworkIdle({ idleTime: 200, timeout: 2500 }).catch(() => {});
+      const snap = await page.screenshot({ type: 'png' });
+      return Buffer.from(snap);
+    })(), 15000, 'Remote page rendering exceeded 15s deadline');
   } finally {
     if (page) {
       try { await page.close(); } catch (_) {}
@@ -429,7 +490,7 @@ async function renderRemotePage(url, profile) {
   }
 }
 
-async function render(item, content, screenProfile) {
+async function render(item, content, screenProfile, options = {}) {
   const profile = {
     width: safeDimension(screenProfile?.width, 800),
     height: safeDimension(screenProfile?.height, 480),
@@ -473,7 +534,7 @@ async function render(item, content, screenProfile) {
         resolveFont: fontResolverFor ? fontResolverFor({ workspace_id: wsId }) : undefined,
         resolveData: typeof dataResolverFor === 'function' ? dataResolverFor(wsId) : undefined,
       });
-      const png = await renderWidgetOrHtml(html, profile, type);
+      const png = await renderWidgetOrHtml(html, profile, type, options);
       return { png };
     } catch (e) {
       if (e.code === 'BROWSER_UNAVAILABLE' || e.code === 'BROWSER_NOT_FOUND') {
@@ -492,7 +553,7 @@ async function render(item, content, screenProfile) {
     if (png) return { png };
 
     try {
-      const p = await renderRemotePage(content.remote_url, profile);
+      const p = await renderRemotePage(content.remote_url, profile, options);
       return { png: p };
     } catch (e) {
       if (e.code === 'BROWSER_UNAVAILABLE' || e.code === 'BROWSER_NOT_FOUND') {
@@ -512,22 +573,7 @@ async function render(item, content, screenProfile) {
       : (content.thumbnail_path || content.filepath);
 
     if (fileToLoad) {
-      const base = path.resolve(contentDir());
-      const safe = path.resolve(base, path.basename(String(fileToLoad)));
-      if (!safe.startsWith(base + path.sep) && safe !== base) {
-        throw Object.assign(
-          new Error('Invalid content file path'),
-          { code: 'INVALID_PATH' }
-        );
-      }
-
-      if (!fs.existsSync(safe)) {
-        throw Object.assign(
-          new Error('Content file not found on disk'),
-          { code: 'NOT_FOUND' }
-        );
-      }
-
+      const safe = safeLocalImagePath(fileToLoad);
       try {
         const fileBuffer = fs.readFileSync(safe);
         const img = await Jimp.fromBuffer(fileBuffer);
@@ -535,6 +581,7 @@ async function render(item, content, screenProfile) {
         const png = await img.getBuffer('image/png');
         return { png };
       } catch (e) {
+        if (e.code === 'INVALID_PATH' || e.code === 'NOT_FOUND') throw e;
         throw Object.assign(
           new Error(`Failed to decode image with Jimp: ${e.message}`),
           { code: 'DECODE_ERROR' }
@@ -587,7 +634,8 @@ async function renderLayoutNative(layout, zoneEntries, screenProfile) {
     return za - zb;
   });
 
-  const canvas = new Jimp({ width: profile.width, height: profile.height, color: 0x000000FF });
+  const layoutBg = parseColorToRgba(layout?.background_color, 0x000000FF);
+  const canvas = new Jimp({ width: profile.width, height: profile.height, color: layoutBg });
 
   for (const entry of sorted) {
     const { zone, content } = entry;
@@ -603,44 +651,56 @@ async function renderLayoutNative(layout, zoneEntries, screenProfile) {
     const pixelW = Math.max(1, Math.round((w / 100) * profile.width));
     const pixelH = Math.max(1, Math.round((h / 100) * profile.height));
 
-    let img = null;
-    if (content.remote_url) {
-      let res;
-      try {
-        res = await fetch(content.remote_url, {
-          signal: AbortSignal.timeout(10000),
-          headers: { 'User-Agent': 'ScreenTinker-EmbeddedRenderer/1.0' },
-        });
-      } catch (e) {
-        throw Object.assign(new Error(`Failed to fetch remote content: ${e.message}`), { code: 'FETCH_ERROR' });
-      }
-      if (!res.ok) {
-        throw Object.assign(new Error(`Remote content returned HTTP ${res.status}`), { code: 'FETCH_ERROR' });
-      }
-      const contentType = res.headers.get('content-type') || '';
-      if (!looksLikeImage(content.remote_url, contentType)) {
-        throw Object.assign(new Error('Remote content is not an image'), { code: 'FETCH_ERROR' });
-      }
-      const buf = Buffer.from(await res.arrayBuffer());
-      img = await Jimp.fromBuffer(buf);
-    } else {
-      const fileToLoad = content.filepath || content.thumbnail_path;
-      if (fileToLoad) {
-        const base = path.resolve(contentDir());
-        const safe = path.resolve(base, path.basename(String(fileToLoad)));
-        if (!safe.startsWith(base + path.sep) && safe !== base) {
-          throw Object.assign(new Error('Invalid content file path'), { code: 'INVALID_PATH' });
+    try {
+      if (zone.background_color) {
+        const zoneBg = parseColorToRgba(zone.background_color, null);
+        if (zoneBg !== null) {
+          const bgImg = new Jimp({ width: pixelW, height: pixelH, color: zoneBg });
+          canvas.composite(bgImg, pixelX, pixelY);
         }
-        if (!fs.existsSync(safe)) {
-          throw Object.assign(new Error('Content file not found on disk'), { code: 'NOT_FOUND' });
-        }
-        img = await Jimp.fromBuffer(fs.readFileSync(safe));
       }
-    }
 
-    if (img) {
-      img.cover({ w: pixelW, h: pixelH });
-      canvas.composite(img, pixelX, pixelY);
+      let img = null;
+      if (content.remote_url) {
+        let res;
+        try {
+          res = await fetch(content.remote_url, {
+            signal: AbortSignal.timeout(10000),
+            headers: { 'User-Agent': 'ScreenTinker-EmbeddedRenderer/1.0' },
+          });
+        } catch (e) {
+          throw Object.assign(new Error(`Failed to fetch remote content: ${e.message}`), { code: 'FETCH_ERROR' });
+        }
+        if (!res.ok) {
+          throw Object.assign(new Error(`Remote content returned HTTP ${res.status}`), { code: 'FETCH_ERROR' });
+        }
+        const contentType = res.headers.get('content-type') || '';
+        if (!looksLikeImage(content.remote_url, contentType)) {
+          throw Object.assign(new Error('Remote content is not an image'), { code: 'FETCH_ERROR' });
+        }
+        const buf = Buffer.from(await res.arrayBuffer());
+        img = await Jimp.fromBuffer(buf);
+      } else {
+        const fileToLoad = (content.filepath && looksLikeImage(content.filepath, content.mime_type))
+          ? content.filepath
+          : (content.thumbnail_path || content.filepath);
+        if (fileToLoad) {
+          const safe = safeLocalImagePath(fileToLoad);
+          img = await Jimp.fromBuffer(fs.readFileSync(safe));
+        }
+      }
+
+      if (img) {
+        const fitMode = zone.fit_mode || 'contain';
+        if (fitMode === 'cover') {
+          img.cover({ w: pixelW, h: pixelH });
+        } else {
+          img.contain({ w: pixelW, h: pixelH });
+        }
+        canvas.composite(img, pixelX, pixelY);
+      }
+    } catch (zoneErr) {
+      console.warn(`[embedded] native layout zone error for zone ${zone.id || 'unknown'}: ${zoneErr.message}`);
     }
   }
 
@@ -648,7 +708,7 @@ async function renderLayoutNative(layout, zoneEntries, screenProfile) {
   return { png };
 }
 
-async function renderLayout(layout, zoneEntries, screenProfile) {
+async function renderLayout(layout, zoneEntries, screenProfile, options = {}) {
   const profile = {
     width: safeDimension(screenProfile?.width, 800),
     height: safeDimension(screenProfile?.height, 480),
@@ -680,6 +740,8 @@ async function renderLayout(layout, zoneEntries, screenProfile) {
     const w = Number.isFinite(Number(zone.width_percent)) ? Math.max(0, Math.min(100, Number(zone.width_percent))) : 100;
     const h = Number.isFinite(Number(zone.height_percent)) ? Math.max(0, Math.min(100, Number(zone.height_percent))) : 100;
     const zIndex = Number.isFinite(Number(zone.z_index)) ? Math.floor(Number(zone.z_index)) : 0;
+    const fitMode = zone.fit_mode || 'contain';
+    const zoneBg = zone.background_color ? `background-color: ${escapeHtmlAttr(zone.background_color)};` : '';
 
     let innerHtml = '<div style="width:100%;height:100%;background:transparent;"></div>';
 
@@ -720,25 +782,25 @@ async function renderLayout(layout, zoneEntries, screenProfile) {
       }
     } else if (content && content.remote_url) {
       if (looksLikeImage(content.remote_url, content.mime_type)) {
-        innerHtml = `<img src="${escapeHtmlAttr(content.remote_url)}" style="width:100%;height:100%;object-fit:cover;display:block;" />`;
+        innerHtml = `<img src="${escapeHtmlAttr(content.remote_url)}" style="width:100%;height:100%;object-fit:${fitMode};display:block;" />`;
       } else {
         innerHtml = `<iframe src="${escapeHtmlAttr(content.remote_url)}" style="width:100%;height:100%;border:none;overflow:hidden;display:block;" scrolling="no"></iframe>`;
       }
     } else if (content && content.filepath) {
       if (looksLikeImage(content.filepath, content.mime_type)) {
         const safeFilename = path.basename(content.filepath);
-        innerHtml = `<img src="/uploads/content/${encodeURIComponent(safeFilename)}" style="width:100%;height:100%;object-fit:cover;display:block;" />`;
+        innerHtml = `<img src="/uploads/content/${encodeURIComponent(safeFilename)}" style="width:100%;height:100%;object-fit:${fitMode};display:block;" />`;
       } else if (content.thumbnail_path) {
         const safeThumb = path.basename(content.thumbnail_path);
-        innerHtml = `<img src="/uploads/content/${encodeURIComponent(safeThumb)}" style="width:100%;height:100%;object-fit:cover;display:block;" />`;
+        innerHtml = `<img src="/uploads/content/${encodeURIComponent(safeThumb)}" style="width:100%;height:100%;object-fit:${fitMode};display:block;" />`;
       } else {
         const safeFilename = path.basename(content.filepath);
-        innerHtml = `<video src="/uploads/content/${encodeURIComponent(safeFilename)}" style="width:100%;height:100%;object-fit:cover;display:block;" autoplay muted playsinline preload="auto"></video>`;
+        innerHtml = `<video src="/uploads/content/${encodeURIComponent(safeFilename)}" style="width:100%;height:100%;object-fit:${fitMode};display:block;" autoplay muted playsinline preload="auto"></video>`;
       }
     }
 
     zoneHtmls.push(`
-      <div class="zone-slot" style="position:absolute;left:${x}%;top:${y}%;width:${w}%;height:${h}%;z-index:${zIndex};overflow:hidden;">
+      <div class="zone-slot" style="position:absolute;left:${x}%;top:${y}%;width:${w}%;height:${h}%;z-index:${zIndex};overflow:hidden;${zoneBg}">
         ${innerHtml}
       </div>
     `);
@@ -754,7 +816,7 @@ async function renderLayout(layout, zoneEntries, screenProfile) {
   html, body {
     margin: 0; padding: 0;
     width: ${profile.width}px; height: ${profile.height}px;
-    background: #000000; overflow: hidden; position: relative;
+    background: ${escapeHtmlAttr(layout?.background_color || '#000000')}; overflow: hidden; position: relative;
     box-sizing: border-box;
   }
   *, *:before, *:after { box-sizing: inherit; }
@@ -768,7 +830,7 @@ async function renderLayout(layout, zoneEntries, screenProfile) {
 </html>`;
 
   try {
-    const png = await renderWidgetOrHtml(compositeHtml, profile, 'layout');
+    const png = await renderWidgetOrHtml(compositeHtml, profile, 'layout', options);
     return { png };
   } catch (e) {
     if (e.code === 'BROWSER_UNAVAILABLE' || e.code === 'BROWSER_NOT_FOUND') {
@@ -792,4 +854,7 @@ module.exports = {
   isLayoutImageOnly,
   isBrowserAvailable,
   safeDimension,
+  safeLocalImagePath,
+  parseColorToRgba,
+  withTimeout,
 };

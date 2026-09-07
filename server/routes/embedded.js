@@ -46,6 +46,9 @@ const { render, renderLayout, isLayoutImageOnly, isBrowserAvailable, looksLikeIm
 const { postprocess }       = require('../lib/embedded-postprocess');
 const pairLockout           = require('../lib/pair-lockout');
 const { sixDigitCode }      = require('../lib/numeric-code');
+const { buildSnapshotItems } = require('./playlists');
+const ScheduleEval          = require('../lib/schedule-eval');
+const { effectiveDeviceTz } = require('../lib/device-timezone');
 
 // ─── Auth helper ───────────────────────────────────────────────────────────────
 
@@ -165,53 +168,6 @@ function dynamicRevFor(item, nowSec) {
   return edited;
 }
 
-/**
- * Fetch published, unexpired playlist items matching player rules,
- * expanding child playlist references up to 1 level.
- */
-function fetchPlaylistItems(playlistId, depth = 0) {
-  if (!playlistId || depth > 1) return [];
-
-  const items = db.prepare(`
-    SELECT pi.*, pl.workspace_id, c.mime_type, c.filepath, c.remote_url, c.thumbnail_path,
-           c.updated_at AS content_updated_at, c.id AS content_id,
-           w.widget_type, w.config AS widget_config, w.name AS widget_name,
-           w.workspace_id AS widget_workspace_id,
-           w.updated_at AS widget_updated_at
-    FROM playlist_items pi
-    JOIN playlists pl ON pl.id = pi.playlist_id
-    LEFT JOIN content c ON c.id = pi.content_id
-    LEFT JOIN widgets w ON pi.widget_id = w.id
-    WHERE pi.playlist_id = ?
-      AND (pl.status = 'published' OR pl.status IS NULL)
-      AND (
-        pi.content_id IS NULL
-        OR (COALESCE(c.is_active, 1) = 1 AND (c.expires_at IS NULL OR c.expires_at > strftime('%s','now')))
-      )
-    ORDER BY pi.sort_order ASC, pi.id ASC
-  `).all(playlistId);
-
-  if (!items.some((i) => i && i.child_playlist_id)) {
-    return items;
-  }
-
-  const out = [];
-  for (const it of items) {
-    if (!it.child_playlist_id) {
-      out.push(it);
-    } else {
-      const children = fetchPlaylistItems(it.child_playlist_id, depth + 1);
-      for (const child of children) {
-        out.push({
-          ...child,
-          zone_id: child.zone_id || it.zone_id,
-        });
-      }
-    }
-  }
-  return out;
-}
-
 /*
  * Resolve the current playlist item for a device, advancing the cursor if the
  * current item's duration has elapsed.
@@ -225,7 +181,11 @@ function resolveCurrentItem(deviceId, forceIndex) {
   const { playlist_id } = resolveDeviceContext(deviceId);
   if (!playlist_id) return null;
 
-  const items = fetchPlaylistItems(playlist_id);
+  const device = db.prepare('SELECT id, timezone, reported_timezone FROM devices WHERE id = ?').get(deviceId);
+  const tz = effectiveDeviceTz(device);
+
+  const allItems = buildSnapshotItems(playlist_id);
+  const items = allItems.filter((it) => ScheduleEval.isItemActiveNow(it.schedules, Date.now(), tz));
   if (!items.length) return null;
 
   const now = Math.floor(Date.now() / 1000);
@@ -303,7 +263,9 @@ function resolveLayoutItems(deviceId, forceIndex, { advance = true } = {}) {
 
   let allItems = [];
   if (playlist_id) {
-    allItems = fetchPlaylistItems(playlist_id);
+    const device = db.prepare('SELECT id, timezone, reported_timezone FROM devices WHERE id = ?').get(deviceId);
+    const tz = effectiveDeviceTz(device);
+    allItems = buildSnapshotItems(playlist_id).filter((it) => ScheduleEval.isItemActiveNow(it.schedules, Date.now(), tz));
   }
 
   // If the device has no items in its assigned playlist, return null so caller returns 404
@@ -687,7 +649,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
 
   for (let attempt = 0; attempt < total; attempt++) {
     try {
-      renderResult = await render(renderItem, renderContent, profile);
+      renderResult = await render(renderItem, renderContent, profile, { signal: req.signal });
       if (!renderResult.unsupported) break;
     } catch (e) {
       console.warn(`[embedded] item ${renderIndex} render error: ${e.message}`);
@@ -799,7 +761,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   // ── Render ──────────────────────────────────────────────────────────────────
   let renderResult;
   try {
-    renderResult = await renderLayout(layout, zoneEntries, profile);
+    renderResult = await renderLayout(layout, zoneEntries, profile, { signal: req.signal });
   } catch (e) {
     console.error(`[embedded] multi-zone layout render error: ${e.message}`);
     if (isExplicit) {
