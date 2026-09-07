@@ -137,6 +137,9 @@ function buildSnapshotItems(playlistId) {
   // #74/#75: attach per-item schedule blocks (the player honours these in its own
   // local time via the shared evaluator). An item with zero blocks gets no
   // `schedules` field -> always on. Additive: old players ignore the field.
+  // widget_rev is widgets.updated_at, and a data-source change bumps that for the widgets bound
+  // to the changed slug (lib/data-sources/service.js bumpDependentWidgets); no workspace-wide
+  // MAX(data_sources.updated_at) here, which re-revved unrelated widgets on any rename.
   for (const it of items) {
     const blocks = schedulesForItem(it._iid);
     if (blocks.length) it.schedules = blocks;

@@ -123,14 +123,33 @@ async function assertSafeUrl(urlString) {
   return { url, addresses: resolved.map((a) => a.address) };
 }
 
-// Build a `lookup` for http.request that pins to a pre-vetted address, so the socket connects to the
-// IP we checked — not a value a rebinding DNS server hands back a second time.
 function pinnedLookup(vettedAddresses) {
-  const addr = vettedAddresses[0];
-  const family = net.isIP(addr);
+  const addrs = (Array.isArray(vettedAddresses) ? vettedAddresses : [vettedAddresses]).filter(Boolean);
+  const list = addrs.map((a) => ({ address: a, family: net.isIP(a) }));
+  const first = list[0];
+
   return (hostname, options, cb) => {
-    if (typeof options === 'function') { cb = options; }
-    process.nextTick(() => cb(null, addr, family));
+    if (typeof options === 'function') {
+      cb = options;
+      options = {};
+    }
+    /*
+     * ⚠️ FAIL CLOSED. An empty vetted list once fell back to 127.0.0.1, which PINNED THE SOCKET
+     * TO THIS SERVER'S LOOPBACK on the requested port with no error, on a primitive whose whole
+     * job is to keep a request off exactly that address. No current caller passes an empty list;
+     * the next one must get an error, not the API.
+     */
+    if (!first) {
+      const err = Object.assign(new Error('pinnedLookup: no vetted address for ' + hostname), { code: 'ENOTFOUND' });
+      process.nextTick(() => cb(err));
+      return;
+    }
+    const isAll = Boolean(options && options.all);
+    if (isAll) {
+      process.nextTick(() => cb(null, list));
+    } else {
+      process.nextTick(() => cb(null, first.address, first.family));
+    }
   };
 }
 

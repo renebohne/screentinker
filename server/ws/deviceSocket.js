@@ -393,12 +393,20 @@ function resolveGroupSync(device, deviceId) {
 // and only then, so the anti-flash reuse still holds for widgets nobody has touched.
 const widgetFactsOf = db.prepare(`
   SELECT w.updated_at AS rev,
+         w.config,
+         w.workspace_id,
          COALESCE(o.widget_sandbox_isolation_disabled, 0) AS same_origin
   FROM widgets w
   LEFT JOIN workspaces ws ON ws.id = w.workspace_id
   LEFT JOIN organizations o ON o.id = ws.organization_id
   WHERE w.id = ?
 `);
+
+// Data-source changes reach here through widgets.updated_at: a sync that changed data bumps the
+// widgets bound to that slug (lib/data-sources/service.js bumpDependentWidgets). An earlier cut
+// also max'd every '{{ds:' widget against the workspace-wide MAX(data_sources.updated_at), which
+// re-revved twenty unrelated room signs, and reloaded their WebViews, whenever one source was
+// renamed. The targeted bump is the whole mechanism now.
 function refreshWidgetRevs(assignments) {
   if (!Array.isArray(assignments)) return;
   for (const a of assignments) {
@@ -406,7 +414,8 @@ function refreshWidgetRevs(assignments) {
     try {
       const facts = widgetFactsOf.get(a.widget_id);
       if (!facts) continue;
-      a.widget_rev = facts.rev ?? a.widget_rev ?? 0;
+      const rev = facts.rev ?? a.widget_rev ?? 0;
+      a.widget_rev = rev;
       a.widget_allow_same_origin = Number(facts.same_origin || 0) === 1;
     } catch (_) { /* keep published */ }
   }
