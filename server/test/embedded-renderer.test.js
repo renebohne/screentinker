@@ -36,14 +36,15 @@ db.exec(`
   CREATE TABLE playlist_items (
     id TEXT PRIMARY KEY, playlist_id TEXT, content_id TEXT,
     sort_order INTEGER DEFAULT 0, duration_sec INTEGER DEFAULT 30, updated_at INTEGER DEFAULT 0,
-    zone_id TEXT, widget_id TEXT
+    zone_id TEXT, widget_id TEXT, child_playlist_id TEXT
   );
   CREATE TABLE widgets (
     id TEXT PRIMARY KEY, workspace_id TEXT, widget_type TEXT, name TEXT, config TEXT, updated_at INTEGER DEFAULT 0
   );
   CREATE TABLE content (
     id TEXT PRIMARY KEY, workspace_id TEXT, type TEXT, mime_type TEXT, filepath TEXT,
-    remote_url TEXT, thumbnail_path TEXT, updated_at INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1
+    remote_url TEXT, thumbnail_path TEXT, updated_at INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1,
+    expires_at INTEGER
   );
   CREATE TABLE embedded_cursor (
     device_id TEXT PRIMARY KEY, item_index INTEGER DEFAULT 0, started_at INTEGER DEFAULT 0
@@ -256,7 +257,7 @@ describe('Postprocessing & Dithering', () => {
   });
 });
 
-const { render, renderLayout, closeBrowser } = require('../lib/embedded-render');
+const { render, renderLayout, closeBrowser, safeDimension } = require('../lib/embedded-render');
 
 describe('Embedded Renderer Native Image Path & Multi-Zone Layout', () => {
   after(async () => {
@@ -384,31 +385,19 @@ describe('Embedded Renderer Native Image Path & Multi-Zone Layout', () => {
     try { fs.unlinkSync(imgPath2); } catch (_) {}
   });
 
-  test('renderLayout coerces a malicious profile dimension to a safe integer', async () => {
-    const layout = { id: 'tpl-split-h', name: 'Split Horizontal' };
-    const zoneEntries = [
-      {
-        zone: { id: 'z1', x_percent: 0, y_percent: 0, width_percent: 50, height_percent: 100, z_index: 0 },
-        item: { widget_type: 'clock', widget_config: { timezone: 'Europe/Berlin' } },
-        content: null,
-      },
-    ];
-    // A hostile/overflowing profile must not be interpolated into CSS.
-    const profile = { width: '800px; background:red', height: '480" onload=alert(1)' };
-
-    const res = await renderLayout(layout, zoneEntries, profile);
-    if (res.unsupported) {
-      assert.ok(res.reason);
-    } else {
-      assert.ok(res.png);
-      assert.ok(Buffer.isBuffer(res.png));
-    }
+  test('safeDimension sanitizes dimension inputs against CSS injection and hostile payloads', () => {
+    assert.equal(safeDimension('800px; background:red', 800), 800);
+    assert.equal(safeDimension('480" onload=alert(1)', 480), 480);
+    assert.equal(safeDimension(-50, 800), 800);
+    assert.equal(safeDimension('NaN', 800), 800);
+    assert.equal(safeDimension(1024, 800), 1024);
+    assert.equal(safeDimension('1200', 800), 1200);
   });
 });
 
 describe('Embedded Edge Cases & Robustness', () => {
   const { resolveCurrentItem, resolveLayoutItems } = require('../routes/embedded');
-  const { looksLikeImage, isLayoutImageOnly, isBrowserAvailable } = require('../lib/embedded-render');
+  const { looksLikeImage, isLayoutImageOnly, isBrowserAvailable, safeDimension } = require('../lib/embedded-render');
 
   test('looksLikeImage identifies extensions, bare filenames, URLs, and MIME types', () => {
     assert.equal(looksLikeImage('image.png'), true);
@@ -480,7 +469,7 @@ describe('Embedded Edge Cases & Robustness', () => {
     const layoutId = 'lay-empty-1';
     db.prepare("INSERT INTO layouts (id, workspace_id, name) VALUES (?, 'ws-1', 'Empty Lay')").run(layoutId);
     db.prepare("INSERT INTO layout_zones (id, layout_id, name, width_percent, height_percent) VALUES ('z-emp-1', ?, 'Z1', 100, 100)").run(layoutId);
-    db.prepare("INSERT INTO devices (id, name, workspace_id, screen_profile) VALUES ('dev-lay-empty', 'Lay Empty', 'ws-1', '{\"preset\":\"seeed-reterminal-sticky\"}')").run();
+    db.prepare("INSERT INTO devices (id, name, workspace_id, layout_id, screen_profile) VALUES ('dev-lay-empty', 'Lay Empty', 'ws-1', ?, '{\"preset\":\"seeed-reterminal-sticky\"}')").run(layoutId);
 
     const res = resolveLayoutItems('dev-lay-empty');
     assert.equal(res, null, 'expected null for device with layout but no playlist items');
@@ -529,6 +518,7 @@ describe('Embedded Edge Cases & Robustness', () => {
 describe('Embedded HTTP Route & Fallback Handling', () => {
   const http = require('node:http');
   const express = require('express');
+  const { isBrowserAvailable } = require('../lib/embedded-render');
   let app, server, baseUrl;
 
   before(async () => {
@@ -577,7 +567,7 @@ describe('Embedded HTTP Route & Fallback Handling', () => {
   });
 
   test('GET /api/embedded/render falls back to single-item with X-ST-Layout-Fallback header when browser unavailable', async () => {
-    // Setup device with a layout containing a widget (non-image) and an image item in playlist
+    // Setup device with a multi-zone layout containing a widget (non-image) and an image item in playlist
     const tmpUpload = path.join(require('../config').contentDir);
     fs.mkdirSync(tmpUpload, { recursive: true });
     const imgPath = path.join(tmpUpload, 'route-test-fallback.png');
@@ -590,7 +580,8 @@ describe('Embedded HTTP Route & Fallback Handling', () => {
     const token = 'tok-route-fallback';
 
     db.prepare("INSERT INTO layouts (id, workspace_id, name) VALUES (?, 'ws-1', 'Widget Lay')").run(layId);
-    db.prepare("INSERT INTO layout_zones (id, layout_id, name, x_percent, y_percent, width_percent, height_percent) VALUES ('z-w-1', ?, 'Z1', 0, 0, 100, 100)").run(layId);
+    db.prepare("INSERT INTO layout_zones (id, layout_id, name, x_percent, y_percent, width_percent, height_percent) VALUES ('z-w-1', ?, 'Z1', 0, 0, 50, 100)").run(layId);
+    db.prepare("INSERT INTO layout_zones (id, layout_id, name, x_percent, y_percent, width_percent, height_percent) VALUES ('z-w-2', ?, 'Z2', 50, 0, 50, 100)").run(layId);
 
     db.prepare("INSERT INTO playlists (id, workspace_id, name, status) VALUES (?, 'ws-1', 'Fallback PL', 'published')").run(plId);
     db.prepare("INSERT INTO content (id, workspace_id, type, mime_type, filepath, is_active) VALUES ('c-rt-fb', 'ws-1', 'image', 'image/png', 'route-test-fallback.png', 1)").run();
@@ -598,15 +589,28 @@ describe('Embedded HTTP Route & Fallback Handling', () => {
     db.prepare("INSERT INTO widgets (id, workspace_id, widget_type, name, config) VALUES ('w-rt-fb', 'ws-1', 'weather', 'Weather', '{}')").run();
     db.prepare("INSERT INTO playlist_items (id, playlist_id, widget_id, zone_id, sort_order, duration_sec) VALUES ('pi-rt-w', ?, 'w-rt-fb', 'z-w-1', 0, 30)").run(plId);
     // Item 2: image
-    db.prepare("INSERT INTO playlist_items (id, playlist_id, content_id, sort_order, duration_sec) VALUES ('pi-rt-img', ?, 'c-rt-fb', 1, 30)").run(plId);
+    db.prepare("INSERT INTO playlist_items (id, playlist_id, content_id, zone_id, sort_order, duration_sec) VALUES ('pi-rt-img', ?, 'c-rt-fb', 'z-w-2', 1, 30)").run(plId);
 
     db.prepare("INSERT INTO devices (id, name, workspace_id, playlist_id, layout_id, device_token, screen_profile) VALUES (?, 'Fallback Dev', 'ws-1', ?, ?, ?, '{\"preset\":\"seeed-reterminal-sticky\"}')").run(devId, plId, layId, token);
 
-    // Test explicit mode=layout -> returns 501 if browser unavailable (or 200 if browser is present)
+    // Auto-mode test:
+    const autoRes = await fetch(`${baseUrl}/render?device_id=${devId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(autoRes.status, 200);
+
+    // Explicit mode test:
     const explicitRes = await fetch(`${baseUrl}/render?device_id=${devId}&mode=layout`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    assert.ok(explicitRes.status === 200 || explicitRes.status === 501);
+
+    if (!isBrowserAvailable()) {
+      assert.equal(autoRes.headers.get('x-st-layout-fallback'), '1', 'fallback header must be set in auto-mode when browser unavailable');
+      assert.equal(explicitRes.status, 501, 'explicit layout mode must return 501 when browser unavailable');
+    } else {
+      assert.equal(autoRes.headers.get('x-st-total-zones'), '2');
+      assert.equal(explicitRes.status, 200);
+    }
 
     try { fs.unlinkSync(imgPath); } catch (_) {}
   });

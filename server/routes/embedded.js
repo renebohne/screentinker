@@ -42,7 +42,7 @@ const { resolveTenancy }    = require('../lib/tenancy');
 const { resolveDevicePlaylist, resolvedLayoutId, resolveDeviceContext } = require('../lib/resolve-device-playlist');
 const { parseProfile, listPresets } = require('../lib/embedded-profiles');
 const { cacheKey, toETag, isNotModified, get: cacheGet, set: cacheSet } = require('../lib/embedded-cache');
-const { render, renderLayout, isLayoutImageOnly, isBrowserAvailable } = require('../lib/embedded-render');
+const { render, renderLayout, isLayoutImageOnly, isBrowserAvailable, looksLikeImage } = require('../lib/embedded-render');
 const { postprocess }       = require('../lib/embedded-postprocess');
 const pairLockout           = require('../lib/pair-lockout');
 const { sixDigitCode }      = require('../lib/numeric-code');
@@ -130,24 +130,51 @@ const CURSOR_UPSERT = db.prepare(`
                                        started_at = strftime('%s','now')
 `);
 
-/*
- * Resolve the current playlist item for a device, advancing the cursor if the
- * current item's duration has elapsed.
- *
- * @param {string} deviceId
- * @param {string|null} forceIndex  Optional ?item= override (for testing).
- * @returns {{ item, content, itemIndex, expiresIn } | null}
- *   null when no playlist or no items.
+/**
+ * Compute dynamic revision bucket for time-varying widgets and remote dynamic content.
  */
-function resolveCurrentItem(deviceId, forceIndex) {
-  const { playlist_id } = resolveDeviceContext(deviceId);
-  if (!playlist_id) return null;
+function dynamicRevFor(item, nowSec) {
+  if (!item) return 0;
+  const now = typeof nowSec === 'number' ? nowSec : Math.floor(Date.now() / 1000);
+  if (item.widget_type === 'clock') {
+    return `clock_${Math.floor(now / 60)}`;
+  }
+  if (item.widget_type === 'weather') {
+    return `weather_${Math.floor(now / 600)}`;
+  }
+  if (item.widget_type === 'slide') {
+    return `slide_${Math.floor(now / 60)}`;
+  }
+  if (item.widget_type === 'rss') {
+    return `rss_${Math.floor(now / 300)}`;
+  }
+  if (item.widget_type === 'webpage') {
+    return `webpage_${Math.floor(now / 300)}`;
+  }
+  if (item.widget_type === 'social') {
+    return `social_${Math.floor(now / 300)}`;
+  }
+  if (item.widget_type === 'directory-board') {
+    return `directory_${Math.floor(now / 300)}`;
+  }
+  if (item.remote_url && !looksLikeImage(item.remote_url, item.mime_type)) {
+    return `url_${Math.floor(now / 300)}`;
+  }
+  return item.widget_updated_at || item.content_updated_at || item.updated_at || 0;
+}
 
-  // Fetch all active, published items in playlist order (joining content and widgets).
+/**
+ * Fetch published, unexpired playlist items matching player rules,
+ * expanding child playlist references up to 1 level.
+ */
+function fetchPlaylistItems(playlistId, depth = 0) {
+  if (!playlistId || depth > 1) return [];
+
   const items = db.prepare(`
     SELECT pi.*, pl.workspace_id, c.mime_type, c.filepath, c.remote_url, c.thumbnail_path,
            c.updated_at AS content_updated_at, c.id AS content_id,
            w.widget_type, w.config AS widget_config, w.name AS widget_name,
+           w.workspace_id AS widget_workspace_id,
            w.updated_at AS widget_updated_at
     FROM playlist_items pi
     JOIN playlists pl ON pl.id = pi.playlist_id
@@ -155,10 +182,48 @@ function resolveCurrentItem(deviceId, forceIndex) {
     LEFT JOIN widgets w ON pi.widget_id = w.id
     WHERE pi.playlist_id = ?
       AND (pl.status = 'published' OR pl.status IS NULL)
-      AND (c.id IS NULL OR c.is_active IS NULL OR c.is_active = 1)
+      AND (
+        pi.content_id IS NULL
+        OR (COALESCE(c.is_active, 1) = 1 AND (c.expires_at IS NULL OR c.expires_at > strftime('%s','now')))
+      )
     ORDER BY pi.sort_order ASC, pi.id ASC
-  `).all(playlist_id);
+  `).all(playlistId);
 
+  if (!items.some((i) => i && i.child_playlist_id)) {
+    return items;
+  }
+
+  const out = [];
+  for (const it of items) {
+    if (!it.child_playlist_id) {
+      out.push(it);
+    } else {
+      const children = fetchPlaylistItems(it.child_playlist_id, depth + 1);
+      for (const child of children) {
+        out.push({
+          ...child,
+          zone_id: child.zone_id || it.zone_id,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/*
+ * Resolve the current playlist item for a device, advancing the cursor if the
+ * current item's duration has elapsed.
+ *
+ * @param {string} deviceId
+ * @param {string|null} forceIndex  Optional ?item= override (for testing).
+ * @returns {{ item, content, itemIndex, expiresIn, total } | null}
+ *   null when no playlist or no items.
+ */
+function resolveCurrentItem(deviceId, forceIndex) {
+  const { playlist_id } = resolveDeviceContext(deviceId);
+  if (!playlist_id) return null;
+
+  const items = fetchPlaylistItems(playlist_id);
   if (!items.length) return null;
 
   const now = Math.floor(Date.now() / 1000);
@@ -221,7 +286,7 @@ const ZONE_CURSOR_UPSERT = db.prepare(`
  * @param {string} deviceId
  * @param {string|number|null} forceIndex
  * @param {{ advance?: boolean }} [options]
- * @returns {{ layout, zoneEntries, expiresIn, dynamicRev } | null}
+ * @returns {{ layout, zoneEntries, expiresIn, dynamicRev, pendingAdvances } | null}
  *   null when device has no layout or layout has no zones.
  */
 function resolveLayoutItems(deviceId, forceIndex, { advance = true } = {}) {
@@ -236,20 +301,7 @@ function resolveLayoutItems(deviceId, forceIndex, { advance = true } = {}) {
 
   let allItems = [];
   if (playlist_id) {
-    allItems = db.prepare(`
-      SELECT pi.*, pl.workspace_id, c.mime_type, c.filepath, c.remote_url, c.thumbnail_path,
-             c.updated_at AS content_updated_at, c.id AS content_id,
-             w.widget_type, w.config AS widget_config, w.name AS widget_name,
-             w.updated_at AS widget_updated_at
-      FROM playlist_items pi
-      JOIN playlists pl ON pl.id = pi.playlist_id
-      LEFT JOIN content c ON c.id = pi.content_id
-      LEFT JOIN widgets w ON pi.widget_id = w.id
-      WHERE pi.playlist_id = ?
-        AND (pl.status = 'published' OR pl.status IS NULL)
-        AND (c.id IS NULL OR c.is_active IS NULL OR c.is_active = 1)
-      ORDER BY pi.sort_order ASC, pi.id ASC
-    `).all(playlist_id);
+    allItems = fetchPlaylistItems(playlist_id);
   }
 
   // If the device has no items in its assigned playlist, return null so caller returns 404
@@ -279,6 +331,7 @@ function resolveLayoutItems(deviceId, forceIndex, { advance = true } = {}) {
   const zoneEntries = [];
   const expiresList = [];
   const dynamicRevParts = [layout.updated_at || layout.id];
+  const pendingAdvances = [];
 
   for (let i = 0; i < zones.length; i++) {
     const zone = zones[i];
@@ -306,6 +359,7 @@ function resolveLayoutItems(deviceId, forceIndex, { advance = true } = {}) {
     } else {
       let cursor = ZONE_CURSOR_GET.get(deviceId, zone.id);
       if (!cursor) {
+        pendingAdvances.push({ zoneId: zone.id, index: 0 });
         if (advance) {
           ZONE_CURSOR_UPSERT.run(deviceId, zone.id, 0);
         }
@@ -320,6 +374,7 @@ function resolveLayoutItems(deviceId, forceIndex, { advance = true } = {}) {
 
       if (elapsed >= duration) {
         idx = (idx + 1) % matchingItems.length;
+        pendingAdvances.push({ zoneId: zone.id, index: idx });
         if (advance) {
           ZONE_CURSOR_UPSERT.run(deviceId, zone.id, idx);
         }
@@ -332,14 +387,7 @@ function resolveLayoutItems(deviceId, forceIndex, { advance = true } = {}) {
     const expiresIn = Math.max(1, itemDuration - (now - startedAt));
     expiresList.push(expiresIn);
 
-    let dRev = item.widget_updated_at || item.content_updated_at || item.updated_at || 0;
-    if (item.widget_type === 'clock') {
-      dRev = `clock_${Math.floor(now / 60)}`;
-    } else if (item.widget_type === 'weather') {
-      dRev = `weather_${Math.floor(now / 600)}`;
-    } else if (item.widget_type === 'slide') {
-      dRev = `slide_${Math.floor(now / 60)}`;
-    }
+    const dRev = dynamicRevFor(item, now);
     dynamicRevParts.push(`z_${zone.id}_${item.id}_${dRev}`);
 
     zoneEntries.push({ zone, item, content: item });
@@ -351,6 +399,7 @@ function resolveLayoutItems(deviceId, forceIndex, { advance = true } = {}) {
     zoneEntries,
     expiresIn,
     dynamicRev: dynamicRevParts.join(';'),
+    pendingAdvances,
   };
 }
 
@@ -525,30 +574,23 @@ router.get('/render', resolveAuth, async (req, res) => {
   }
 
   // Query mode overrides
-  if (req.query.mode === 'layout') {
-    return handleRenderLayout(req, res, device, profile, { explicitMode: true });
-  }
   if (req.query.mode === 'single') {
     return handleRenderStandard(req, res, device, profile);
   }
+  if (req.query.mode === 'layout') {
+    return handleRenderLayout(req, res, device, profile, { explicitMode: true });
+  }
 
   // Automatic multi-zone layout detection
-  const { layout_id: layoutId } = resolveDeviceContext(device.id);
-  if (layoutId) {
-    const zoneCount = db.prepare('SELECT COUNT(*) AS count FROM layout_zones WHERE layout_id = ?').get(layoutId)?.count || 0;
-    if (zoneCount >= 1) {
-      const forceIndex = req.query.item !== undefined ? req.query.item : null;
-      const probe = resolveLayoutItems(device.id, forceIndex, { advance: false });
-      if (probe) {
-        const isImageOnly = isLayoutImageOnly(probe.zoneEntries);
-        if (!isImageOnly && !isBrowserAvailable()) {
-          // Browser is not available and layout has non-image items (widgets/web).
-          // Fall back to single-item standard render with fallback header.
-          return handleRenderStandard(req, res, device, profile, { isFallback: true });
-        }
-        return handleRenderLayout(req, res, device, profile, { explicitMode: false });
-      }
+  const forceIndex = req.query.item !== undefined ? req.query.item : null;
+  const layoutResolved = resolveLayoutItems(device.id, forceIndex, { advance: false });
+
+  if (layoutResolved && layoutResolved.zoneEntries.length > 1) {
+    const isImageOnly = isLayoutImageOnly(layoutResolved.zoneEntries);
+    if (!isImageOnly && !isBrowserAvailable()) {
+      return handleRenderStandard(req, res, device, profile, { isFallback: true });
     }
+    return handleRenderLayout(req, res, device, profile, { explicitMode: false, preResolved: layoutResolved });
   }
 
   return handleRenderStandard(req, res, device, profile);
@@ -598,14 +640,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
   console.log(`[embedded] Device '${device.name}' (${device.id}) requested frame [item=${itemIndex + 1}/${total}] from ${clientIp}`);
 
   // ── Cache check ─────────────────────────────────────────────────────────────
-  let dynamicRev = item.widget_updated_at || content?.content_updated_at || item.updated_at || 0;
-  if (item.widget_type === 'clock') {
-    dynamicRev = `clock_${Math.floor(Date.now() / 60000)}`; // invalidate every minute
-  } else if (item.widget_type === 'weather') {
-    dynamicRev = `weather_${Math.floor(Date.now() / 600000)}`; // invalidate every 10 min
-  } else if (item.widget_type === 'slide') {
-    dynamicRev = `slide_${Math.floor(Date.now() / 60000)}`; // invalidate every minute for dynamic content/clocks
-  }
+  const dynamicRev = dynamicRevFor(item, Math.floor(Date.now() / 1000));
 
   const key = cacheKey(
     device.id,
@@ -694,17 +729,15 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   const isExplicit = opts.explicitMode || req.query.mode === 'layout' || req.baseUrl?.endsWith('render-layout') || req.path?.includes('render-layout');
   const forceIndex = req.query.item !== undefined ? req.query.item : null;
 
-  // Probe layout first without advancing cursors
-  const probe = resolveLayoutItems(device.id, forceIndex, { advance: false });
-  // Fall back to standard single-item render if device has no multi-zone layout
-  if (!probe) {
+  const resolved = opts.preResolved || resolveLayoutItems(device.id, forceIndex, { advance: false });
+  if (!resolved || resolved.zoneEntries.length === 0) {
     if (isExplicit) {
       return res.status(404).json({ error: 'Device has no multi-zone layout assigned or no active items.' });
     }
     return handleRenderStandard(req, res, device, profile, { isFallback: true });
   }
 
-  const isImageOnly = isLayoutImageOnly(probe.zoneEntries);
+  const isImageOnly = isLayoutImageOnly(resolved.zoneEntries);
   if (!isImageOnly && !isBrowserAvailable()) {
     if (isExplicit) {
       return res.status(501).json({
@@ -715,13 +748,11 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     return handleRenderStandard(req, res, device, profile, { isFallback: true });
   }
 
-  // Advance cursors and resolve actual items
-  const resolved = resolveLayoutItems(device.id, forceIndex, { advance: true });
-  if (!resolved) {
-    if (isExplicit) {
-      return res.status(404).json({ error: 'Device has no multi-zone layout assigned or no active items.' });
+  // Persist pending cursor advances now that the layout is confirmed for rendering
+  if (!forceIndex && resolved.pendingAdvances && resolved.pendingAdvances.length > 0) {
+    for (const adv of resolved.pendingAdvances) {
+      ZONE_CURSOR_UPSERT.run(device.id, adv.zoneId, adv.index);
     }
-    return handleRenderStandard(req, res, device, profile, { isFallback: true });
   }
 
   const clientIp = touchDeviceHeartbeat(device, req);

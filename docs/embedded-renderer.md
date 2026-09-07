@@ -126,7 +126,7 @@ Fetches the pre-rendered image for the current playlist item.
 - **`If-None-Match`** *(header, optional)*: ETag received in previous request.
 - **`format`** *(query, optional)*: Override output format (`x-epd-packed`, `png`, `jpeg`, `bmp`, `raw`).
 - **`dither`** *(query, optional)*: Override dithering algorithm (`floyd-steinberg`, `atkinson`, `none`).
-- **`mode`** *(query, optional)*: `layout` (forces multi-zone layout rendering), `single` (forces single-item rendering). When omitted, automatically renders in multi-zone layout mode if the device has an assigned multi-zone layout (`zones.length >= 1`), or single-item mode otherwise.
+- **`mode`** *(query, optional)*: `layout` (forces multi-zone layout rendering), `single` (forces single-item rendering). When omitted, automatically renders in multi-zone layout mode if the device has an assigned multi-zone layout (`zones.length > 1`), or single-item mode otherwise.
 - **`item`** *(query, optional)*: Force a specific playlist item index (0-based integer) for step testing or previewing.
 - **`preview`** *(query, optional)*: Set `preview=1` to bypass ETag 304 check and cache read/write (always renders live).
 
@@ -147,7 +147,7 @@ Fetches the pre-rendered image for the current playlist item.
 - **`400 Bad Request`**: Device lacks a configured `screen_profile`.
 - **`401 Unauthorized`**: Invalid or missing device token.
 - **`404 Not Found`**: Device not found or no playlist assigned.
-- **`501 Not Implemented`**: Content type or multi-zone layout contains widgets requiring a browser when Chromium is not installed on the server (returned when explicitly requesting `?mode=layout` or `/render-layout`). In default auto mode, the server degrades gracefully to single-item rendering with `X-ST-Layout-Fallback: 1`.
+- **`501 Not Implemented`**: Returned in any mode when no playlist item is natively renderable, or when `?mode=layout` / `/render-layout` is explicitly requested for widgets/webpages and Chromium is not installed on the server. In default auto mode with missing browser dependencies, the server degrades gracefully to single-item rendering with `X-ST-Layout-Fallback: 1`.
 
 ---
 
