@@ -153,4 +153,147 @@ function pinnedLookup(vettedAddresses) {
   };
 }
 
-module.exports = { assertSafeUrl, isBlockedIp, isBlockedV4, isBlockedV6, pinnedLookup, SsrfError };
+const http = require('http');
+const https = require('https');
+
+/**
+ * Execute an HTTP/HTTPS request with complete SSRF protections:
+ * - Scheme enforcement (http/https only)
+ * - DNS resolution & private/reserved IP filtering on all resolved addresses
+ * - Socket address pinning (defeating DNS rebinding)
+ * - SNI / TLS validation against original hostname
+ * - Per-hop SSRF validation across redirects
+ * - Bounded timeouts and optional response size caps
+ *
+ * @param {string} urlString Target URL
+ * @param {object} [options] Request options
+ * @param {string} [options.method='GET'] HTTP method
+ * @param {object} [options.headers={}] HTTP headers
+ * @param {number} [options.maxRedirects=4] Maximum redirect hops to follow
+ * @param {number} [options.timeoutMs=10000] Overall request timeout in milliseconds
+ * @param {number} [options.maxBytes] Maximum response body size in bytes
+ * @param {object} [options.validators] ETag / Last-Modified conditional headers { etag, lastModified }
+ * @param {'stream'|'text'|'buffer'} [options.responseType='stream'] Response format
+ * @returns {Promise<{res?: import('http').IncomingMessage, text?: string, buffer?: Buffer, notModified?: boolean, statusCode: number, headers: object}>}
+ */
+function guardedRequest(urlString, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const headers = { ...(options.headers || {}) };
+  const maxRedirects = Number.isInteger(options.maxRedirects) ? options.maxRedirects : 4;
+  const timeoutMs = options.timeoutMs || 10000;
+  const maxBytes = options.maxBytes || null;
+  const validators = options.validators || null;
+  const responseType = options.responseType || 'stream';
+
+  if (validators) {
+    if (validators.etag) headers['if-none-match'] = validators.etag;
+    if (validators.lastModified) headers['if-modified-since'] = validators.lastModified;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+
+  const follow = (targetUrl, redirectsLeft) => new Promise((resolve, reject) => {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      return reject(new Error('Request timed out'));
+    }
+
+    assertSafeUrl(targetUrl).then(({ url, addresses }) => {
+      const mod = url.protocol === 'https:' ? https : http;
+      let timer = null;
+
+      const clearReqTimer = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      };
+
+      const req = mod.request(url, {
+        method,
+        lookup: pinnedLookup(addresses),
+        servername: url.hostname,
+        headers,
+      }, (res) => {
+        const sc = res.statusCode;
+
+        if (sc === 304) {
+          res.resume();
+          clearReqTimer();
+          return resolve({ notModified: true, statusCode: 304, headers: res.headers });
+        }
+
+        if (sc >= 300 && sc < 400 && res.headers.location) {
+          res.resume();
+          clearReqTimer();
+          if (redirectsLeft <= 0) {
+            return reject(new Error('Too many redirects'));
+          }
+          let next;
+          try { next = new URL(res.headers.location, url).toString(); }
+          catch (_) { return reject(new Error('Invalid redirect location')); }
+          return follow(next, redirectsLeft - 1).then(resolve, reject);
+        }
+
+        if (sc < 200 || sc >= 300) {
+          res.resume();
+          clearReqTimer();
+          const err = new Error(`Request failed with status ${sc}`);
+          err.statusCode = sc;
+          return reject(err);
+        }
+
+        if (responseType === 'stream') {
+          clearReqTimer();
+          return resolve({ res, statusCode: sc, headers: res.headers });
+        }
+
+        const chunks = [];
+        let total = 0;
+
+        res.on('data', (chunk) => {
+          total += chunk.length;
+          if (maxBytes !== null && total > maxBytes) {
+            clearReqTimer();
+            res.destroy(new Error('Response exceeds size limit'));
+            return;
+          }
+          chunks.push(chunk);
+        });
+
+        res.on('end', () => {
+          clearReqTimer();
+          const buf = Buffer.concat(chunks);
+          if (responseType === 'text') {
+            resolve({ text: buf.toString('utf8'), buffer: buf, statusCode: sc, headers: res.headers });
+          } else {
+            resolve({ buffer: buf, text: buf.toString('utf8'), statusCode: sc, headers: res.headers });
+          }
+        });
+
+        res.on('error', (err) => {
+          clearReqTimer();
+          reject(err);
+        });
+      });
+
+      const timeRemaining = Math.max(100, deadline - Date.now());
+      timer = setTimeout(() => {
+        req.destroy(new Error('Request timed out'));
+      }, timeRemaining);
+      timer.unref?.();
+
+      req.on('error', (err) => {
+        clearReqTimer();
+        reject(err);
+      });
+
+      req.end();
+    }, reject);
+  });
+
+  return follow(urlString, maxRedirects);
+}
+
+module.exports = { assertSafeUrl, isBlockedIp, isBlockedV4, isBlockedV6, pinnedLookup, SsrfError, guardedRequest };
+

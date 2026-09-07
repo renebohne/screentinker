@@ -45,6 +45,33 @@ function sanitizeConfigForRole(cfg, req) {
   return safe;
 }
 
+function validateDataSourceConfig(type, config) {
+  if (!config || typeof config !== 'object') return;
+  if (type === 'ical') {
+    if (config.url) {
+      let u;
+      try {
+        u = new URL(String(config.url).replace(/^webcal:\/\//i, 'https://'));
+      } catch (_) {
+        throw new Error('Invalid URL format');
+      }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+        throw new Error('URL must use HTTP, HTTPS, or webcal protocol');
+      }
+      if (u.username || u.password) {
+        throw new Error('Calendar URLs with basic-auth credentials (username/password) are not allowed');
+      }
+    }
+    if (config.timezone) {
+      try {
+        new Intl.DateTimeFormat(undefined, { timeZone: String(config.timezone).trim() });
+      } catch (_) {
+        throw new Error(`Invalid IANA timezone: "${config.timezone}"`);
+      }
+    }
+  }
+}
+
 // ─── GET /api/data-sources (List all in current workspace) ─────────────────────
 router.get('/', (req, res) => {
   const wsId = req.workspaceId;
@@ -112,6 +139,12 @@ router.post('/test', requireWorkspaceWrite, async (req, res, next) => {
   }
 
   try {
+    validateDataSourceConfig(type, parsedConfig);
+  } catch (valErr) {
+    return res.status(400).json({ error: valErr.message });
+  }
+
+  try {
     let previewData = null;
     if (type === 'ical') {
       previewData = await withFetchSlot(() => resolveIcalData(parsedConfig));
@@ -136,6 +169,9 @@ router.post('/test', requireWorkspaceWrite, async (req, res, next) => {
 // ─── POST /api/data-sources (Create new data source) ───────────────────────────
 router.post('/', requireWorkspaceWrite, (req, res) => {
   const wsId = req.workspaceId;
+  if (!wsId) {
+    return res.status(400).json({ error: 'Workspace ID is required' });
+  }
   const { name, type, config, slug: customSlug } = req.body || {};
 
   if (!name || !type || !config) {
@@ -153,6 +189,12 @@ router.post('/', requireWorkspaceWrite, (req, res) => {
   }
   if (!parsedConfig || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) {
     return res.status(400).json({ error: 'Config must be an object' });
+  }
+
+  try {
+    validateDataSourceConfig(type, parsedConfig);
+  } catch (valErr) {
+    return res.status(400).json({ error: valErr.message });
   }
 
   const cleanName = String(name).trim();
@@ -221,6 +263,11 @@ router.put('/:id', requireWorkspaceWrite, (req, res) => {
     }
     if (!parsedConfig || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) {
       return res.status(400).json({ error: 'Config must be an object' });
+    }
+    try {
+      validateDataSourceConfig(existing.type, parsedConfig);
+    } catch (valErr) {
+      return res.status(400).json({ error: valErr.message });
     }
     configJson = JSON.stringify(parsedConfig);
   } else {

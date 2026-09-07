@@ -77,14 +77,21 @@ function elementsOf(s) { return (s.template && Array.isArray(s.template.elements
 
 function resolveInterpolatedText(str) {
   if (typeof str !== 'string' || !str.includes('{{ds:')) return str;
+  const formatVal = (val) => {
+    if (val === undefined || val === null) return '';
+    if (typeof val === 'object') {
+      try { return JSON.stringify(val).slice(0, 2000); } catch (_) { return ''; }
+    }
+    return String(val).slice(0, 2000);
+  };
   return str.replace(/\{\{ds:([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_]+)\}\}/g, (match, slug, key) => {
     const ds = DATA_SOURCES_LIST.find((x) => x.slug === slug || x.slug === slug.toLowerCase());
     if (ds) {
-      if (ds.data && ds.data[key] !== undefined && ds.data[key] !== null) return String(ds.data[key]).slice(0, 2000);
+      if (ds.data && ds.data[key] !== undefined && ds.data[key] !== null) return formatVal(ds.data[key]);
       if (ds.cached_data) {
         try {
           const parsed = typeof ds.cached_data === 'string' ? JSON.parse(ds.cached_data) : ds.cached_data;
-          if (parsed && parsed[key] !== undefined && parsed[key] !== null) return String(parsed[key]).slice(0, 2000);
+          if (parsed && parsed[key] !== undefined && parsed[key] !== null) return formatVal(parsed[key]);
         } catch (_) {}
       }
     }

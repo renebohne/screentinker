@@ -8,9 +8,7 @@
  */
 
 const ical = require('node-ical');
-const http = require('http');
-const https = require('https');
-const { assertSafeUrl, pinnedLookup, SsrfError } = require('../ssrf-guard');
+const { assertSafeUrl, pinnedLookup, SsrfError, guardedRequest } = require('../ssrf-guard');
 
 const FETCH_TIMEOUT_MS = 10000;
 const MAX_REDIRECTS = 4;
@@ -19,98 +17,32 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024; // refuse calendar feeds larger than 2 M
 /**
  * Fetch a calendar feed over HTTPS/HTTP with the project's SSRF guard applied.
  *
- * node-ical's built-in `fromURL` performs an unguarded fetch that follows redirects and
- * accepts any scheme, making it an open fetch primitive reachable by workspace editors.
- * Instead we fetch the bytes ourselves, reusing the hardened pipeline from the media
- * proxy: vet the URL (scheme + DNS + private-IP ranges), pin the socket to a vetted
- * address (defeating DNS rebinding), re-vet every redirect hop, and enforce a timeout.
- * The response body is then parsed locally with ical.sync.parseICS().
- *
  * @param {string} urlString - http(s) or webcal:// URL
  * @returns {Promise<string>} The raw calendar text
  */
-function fetchCalendar(urlString) {
+async function fetchCalendar(urlString) {
   const raw = String(urlString || '').trim().replace(/^webcal:\/\//i, 'https://');
-  const deadline = Date.now() + FETCH_TIMEOUT_MS;
-
-  const follow = (target, redirectsLeft) => new Promise((resolve, reject) => {
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) {
-      return reject(new Error('Calendar feed timed out'));
-    }
-
-    assertSafeUrl(target).then(({ url, addresses }) => {
-      const mod = url.protocol === 'https:' ? https : http;
-      let timer = null;
-      const clearReqTimer = () => {
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
-      };
-
-      const req = mod.request(url, {
-        method: 'GET',
-        lookup: pinnedLookup(addresses),
-        servername: url.hostname,
-        headers: {
-          'User-Agent': 'ScreenTinker-DataSource/2.0',
-          'Accept': 'text/calendar, application/json, text/plain',
-        },
-      }, (res) => {
-        const sc = res.statusCode;
-        if (sc >= 300 && sc < 400 && res.headers.location) {
-          res.resume();
-          clearReqTimer();
-          if (redirectsLeft <= 0) {
-            return reject(new Error('Too many redirects fetching calendar feed'));
-          }
-          let next;
-          try { next = new URL(res.headers.location, url).toString(); }
-          catch (_) { return reject(new Error('Invalid redirect from calendar feed')); }
-          return follow(next, redirectsLeft - 1).then(resolve, reject);
-        }
-        if (sc !== 200) {
-          res.resume();
-          clearReqTimer();
-          return reject(new Error(`Calendar feed responded ${sc}`));
-        }
-        const chunks = [];
-        let total = 0;
-        res.on('data', (c) => {
-          total += c.length;
-          if (total > MAX_BODY_BYTES) {
-            clearReqTimer();
-            res.destroy(new Error('Calendar feed exceeds size limit'));
-            return;
-          }
-          chunks.push(c);
-        });
-        res.on('end', () => {
-          clearReqTimer();
-          resolve(Buffer.concat(chunks).toString('utf8'));
-        });
-        res.on('error', (err) => {
-          clearReqTimer();
-          reject(err);
-        });
-      });
-
-      const timeRemaining = Math.max(100, deadline - Date.now());
-      timer = setTimeout(() => {
-        req.destroy(new Error('Calendar feed timed out'));
-      }, timeRemaining);
-      timer.unref?.();
-
-      req.on('error', (err) => {
-        clearReqTimer();
-        reject(err);
-      });
-      req.end();
-    }, reject);
-  });
-
-  return follow(raw, MAX_REDIRECTS);
+  try {
+    const res = await guardedRequest(raw, {
+      maxRedirects: MAX_REDIRECTS,
+      timeoutMs: FETCH_TIMEOUT_MS,
+      maxBytes: MAX_BODY_BYTES,
+      responseType: 'text',
+      headers: {
+        'User-Agent': 'ScreenTinker-DataSource/2.0',
+        'Accept': 'text/calendar, application/json, text/plain',
+      },
+    });
+    return res.text;
+  } catch (err) {
+    if (err instanceof SsrfError) throw err;
+    if (err.message === 'Request timed out') throw new Error('Calendar feed timed out');
+    if (err.message === 'Too many redirects') throw new Error('Too many redirects fetching calendar feed');
+    if (err.message === 'Invalid redirect location') throw new Error('Invalid redirect from calendar feed');
+    if (err.message === 'Response exceeds size limit') throw new Error('Calendar feed exceeds size limit');
+    if (err.statusCode) throw new Error(`Calendar feed responded ${err.statusCode}`);
+    throw err;
+  }
 }
 
 /**
@@ -163,11 +95,58 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
   }
 
   const now = new Date(nowRef);
-  const startWindow = new Date(now);
-  startWindow.setHours(0, 0, 0, 0); // Start of today
+  const tzOpts = timezone ? { timeZone: timezone } : {};
+  const dateKey = (d) => d.toLocaleDateString('en-CA', tzOpts); // YYYY-MM-DD in target zone
+  const todayKey = dateKey(now);
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowKey = dateKey(tomorrow);
 
-  const endWindow = new Date(startWindow);
-  endWindow.setDate(endWindow.getDate() + lookaheadDays);
+  const formatAllDayKey = (d) => {
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+
+  const formatAllDayDate = (d) => {
+    const key = formatAllDayKey(d);
+    if (key === todayKey) return locale === 'de' ? 'Heute' : 'Today';
+    if (key === tomorrowKey) return locale === 'de' ? 'Morgen' : 'Tomorrow';
+
+    // Format calendar date using midday UTC representation to avoid timezone shifts across day boundaries
+    const y = d.getUTCFullYear();
+    const m = d.getUTCMonth();
+    const day = d.getUTCDate();
+    const noonUtc = new Date(Date.UTC(y, m, day, 12, 0, 0));
+    return noonUtc.toLocaleDateString(locale === 'de' ? 'de-DE' : 'en-US', {
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+      timeZone: 'UTC',
+    });
+  };
+
+  const formatTime = (d) => d.toLocaleTimeString(locale === 'de' ? 'de-DE' : 'en-US', { hour: '2-digit', minute: '2-digit', hour12: locale !== 'de', ...tzOpts });
+  const formatDate = (d, isAllDay = false) => {
+    if (isAllDay) return formatAllDayDate(d);
+    const key = dateKey(d);
+    if (key === todayKey) return locale === 'de' ? 'Heute' : 'Today';
+    if (key === tomorrowKey) return locale === 'de' ? 'Morgen' : 'Tomorrow';
+
+    return d.toLocaleDateString(locale === 'de' ? 'de-DE' : 'en-US', {
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+      ...tzOpts,
+    });
+  };
+
+  const startWindow = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  startWindow.setHours(0, 0, 0, 0); // Widen startWindow back 24h to avoid UTC offset boundary clipping
+
+  const endWindow = new Date(now);
+  endWindow.setDate(endWindow.getDate() + lookaheadDays + 1);
   endWindow.setHours(23, 59, 59, 999);
 
   const flatEvents = [];
@@ -287,7 +266,8 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
           }
 
           // Skip if occurrence has already ended before now
-          if (occEnd < now && !isAllDay) continue;
+          const occIsPast = isAllDay ? formatAllDayKey(occEnd) <= todayKey && formatAllDayKey(occStart) < todayKey : occEnd < now;
+          if (occIsPast) continue;
 
           flatEvents.push({
             summary: occSummary,
@@ -307,7 +287,8 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
       const evEnd = ev.end ? new Date(ev.end) : new Date(evStart.getTime() + 3600000);
 
       // Include if within window and hasn't already ended
-      if (evEnd >= now && evStart <= endWindow) {
+      const isPast = isAllDay ? formatAllDayKey(evEnd) <= todayKey && formatAllDayKey(evStart) < todayKey : evEnd < now;
+      if (!isPast && evStart <= endWindow) {
         flatEvents.push({
           summary,
           start: evStart,
@@ -333,54 +314,6 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
   // Determine next upcoming event (DTSTART > now)
   const nextEvent = flatEvents.find(e => e.start > now) || null;
 
-  // Format date and time helpers (honour the configured IANA timezone, falling back to
-  // the server's local zone so times are never silently shifted for a different venue).
-  const tzOpts = timezone ? { timeZone: timezone } : {};
-  const dateKey = (d) => d.toLocaleDateString('en-CA', tzOpts); // YYYY-MM-DD in target zone
-  const todayKey = dateKey(now);
-  const tomorrow = new Date(now);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowKey = dateKey(tomorrow);
-
-  const formatAllDayKey = (d) => {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-  };
-
-  const formatAllDayDate = (d) => {
-    const key = formatAllDayKey(d);
-    if (key === todayKey) return locale === 'de' ? 'Heute' : 'Today';
-    if (key === tomorrowKey) return locale === 'de' ? 'Morgen' : 'Tomorrow';
-
-    // Format calendar date using midday UTC representation to avoid timezone shifts across day boundaries
-    const y = d.getFullYear();
-    const m = d.getMonth();
-    const day = d.getDate();
-    const noonUtc = new Date(Date.UTC(y, m, day, 12, 0, 0));
-    return noonUtc.toLocaleDateString(locale === 'de' ? 'de-DE' : 'en-US', {
-      weekday: 'short',
-      day: 'numeric',
-      month: 'short',
-      timeZone: 'UTC',
-    });
-  };
-
-  const formatTime = (d) => d.toLocaleTimeString(locale === 'de' ? 'de-DE' : 'en-US', { hour: '2-digit', minute: '2-digit', hour12: locale !== 'de', ...tzOpts });
-  const formatDate = (d, isAllDay = false) => {
-    if (isAllDay) return formatAllDayDate(d);
-    const key = dateKey(d);
-    if (key === todayKey) return locale === 'de' ? 'Heute' : 'Today';
-    if (key === tomorrowKey) return locale === 'de' ? 'Morgen' : 'Tomorrow';
-
-    return d.toLocaleDateString(locale === 'de' ? 'de-DE' : 'en-US', {
-      weekday: 'short',
-      day: 'numeric',
-      month: 'short',
-      ...tzOpts,
-    });
-  };
 
   const isBusy = !!currentEvent;
   const statusDe = isBusy ? 'BELEGT' : 'FREI';
@@ -395,7 +328,7 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
   } else if (nextEvent) {
     const nextEventKey = nextEvent.isAllDay ? formatAllDayKey(nextEvent.start) : dateKey(nextEvent.start);
     const nextIsToday = nextEventKey === todayKey;
-    if (nextIsToday) {
+    if (nextIsToday && !nextEvent.isAllDay) {
       statusDetail = locale === 'de'
         ? `Frei bis ${formatTime(nextEvent.start)}`
         : `Free until ${formatTime(nextEvent.start)}`;

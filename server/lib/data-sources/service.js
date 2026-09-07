@@ -246,7 +246,7 @@ function bumpDependentWidgets(row, nowSec) {
     db.prepare(`UPDATE widgets SET updated_at = ? WHERE id IN (${placeholders})`).run(nowSec, ...widgetIds);
 
     // Push the revision change to all displays currently playing any of these widgets
-    const io = ioInstance || global.__deviceIo;
+    const io = ioInstance;
     const deviceNs = io?.of?.('/device');
     if (deviceNs) {
       const { buildPlaylistPayload } = require('../../ws/deviceSocket');
@@ -293,35 +293,10 @@ function getWorkspaceDataMapSync(workspaceId) {
   return map;
 }
 
-/**
- * Get all data sources for a workspace mapped by slug.
- *
- * @param {string} workspaceId Workspace ID
- * @returns {Promise<Map<string, object>>} Map of slug -> dictionary data
- */
-async function getWorkspaceDataMap(workspaceId) {
-  if (!workspaceId) return new Map();
-
-  const rows = db.prepare('SELECT * FROM data_sources WHERE workspace_id = ?').all(workspaceId);
-  const map = new Map();
-
-  for (const r of rows) {
-    try {
-      const synced = await syncDataSource(r, false);
-      if (synced && synced.data) {
-        map.set(r.slug, synced.data);
-      }
-    } catch (_) {}
-  }
-
-  return map;
-}
-
 module.exports = {
   syncDataSource,
   bumpDependentWidgets,
   describeSyncError,
-  getWorkspaceDataMap,
   getWorkspaceDataMapSync,
   withFetchSlot,
   pollDueDataSources,

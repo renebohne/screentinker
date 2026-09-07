@@ -170,7 +170,7 @@ test('renderSlideHtml integrates data source variables into rendered slide HTML'
 
 test('iCal resolver rejects SSRF targets (loopback / private ranges)', async () => {
   const now = new Date('2026-09-04T09:30:00Z');
-  // Loopback and cloud-metadata endpoints must never be fetched.
+  const { SsrfError } = require('../lib/ssrf-guard');
   for (const bad of [
     'http://127.0.0.1:8080/feed.ics',
     'http://127.0.0.1/private.ics',
@@ -181,17 +181,18 @@ test('iCal resolver rejects SSRF targets (loopback / private ranges)', async () 
   ]) {
     await assert.rejects(
       () => resolveIcalData({ url: bad, timezone: 'UTC' }, now),
-      /blocked-ip|SSRF|loopback|private/i,
+      (err) => err instanceof SsrfError && err.reason.startsWith('blocked-ip'),
       `expected SSRF guard to reject ${bad}`,
     );
   }
 });
 
 test('iCal resolver rejects non-HTTP(S) URL schemes', async () => {
+  const { SsrfError } = require('../lib/ssrf-guard');
   const now = new Date('2026-09-04T09:30:00Z');
   await assert.rejects(
     () => resolveIcalData({ url: 'file:///etc/passwd', timezone: 'UTC' }, now),
-    /disallowed-scheme|protocol|SSRF/i,
+    (err) => err instanceof SsrfError && err.reason === 'bad-scheme',
     'file:// scheme must be rejected',
   );
 });
@@ -530,3 +531,115 @@ test('THE BUG: the assembled field is re-capped after interpolation, not only ea
   const emitted = (html.match(/§/g) || []).length;
   assert.ok(emitted <= 2000, `field expanded to ${emitted} chars; the renderer promises MAX_FIELD_CHARS`);
 });
+
+test('interpolateDataSources handles object values safely via JSON.stringify without [object Object]', () => {
+  const tpl = 'Data: {{ds:sensor.metrics}}';
+  const res = interpolateDataSources(tpl, (slug, key) => {
+    if (slug === 'sensor' && key === 'metrics') return { temp: 21.5, humidity: 45 };
+    return null;
+  });
+  assert.equal(res, 'Data: {"temp":21.5,"humidity":45}');
+  assert.ok(!res.includes('[object Object]'));
+});
+
+test('all-day events in America/New_York timezone do not drop events_today_count or emit Free until midnight', async () => {
+  const ALL_DAY_ICS = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//ScreenTinker Test//EN
+BEGIN:VEVENT
+UID:evt-allday-recurr
+SUMMARY:All-Day Planning
+DTSTART;VALUE=DATE:20260907
+DTEND;VALUE=DATE:20260908
+RRULE:FREQ=DAILY
+END:VEVENT
+END:VCALENDAR`;
+
+  // 2026-09-07 at 14:00 EDT (18:00 UTC)
+  const now = new Date('2026-09-07T18:00:00Z');
+  const data = await resolveIcalData({ raw_data: ALL_DAY_ICS, timezone: 'America/New_York', locale: 'en' }, now);
+
+  assert.equal(data.events_today_count, 1, 'today occurrence must be counted in America/New_York');
+  assert.doesNotMatch(data.status_detail, /Free until \d{2}:\d{2}/i, 'all-day event must not produce "Free until XX:XX"');
+  assert.equal(data.status_detail, 'Free all day');
+});
+
+test('guardedRequest enforces SSRF guards, userinfo rejection, and size caps', async () => {
+  const { guardedRequest, SsrfError } = require('../lib/ssrf-guard');
+
+  // Loopback target must throw SsrfError
+  await assert.rejects(
+    () => guardedRequest('http://127.0.0.1:9999/feed.ics'),
+    (err) => err instanceof SsrfError && err.reason.startsWith('blocked-ip'),
+  );
+
+  // URL with credentials must throw SsrfError with reason 'userinfo'
+  await assert.rejects(
+    () => guardedRequest('https://user:pass@example.com/calendar.ics'),
+    (err) => err instanceof SsrfError && err.reason === 'userinfo',
+  );
+
+  // Bad scheme must throw SsrfError with reason 'bad-scheme'
+  await assert.rejects(
+    () => guardedRequest('ftp://example.com/calendar.ics'),
+    (err) => err instanceof SsrfError && err.reason === 'bad-scheme',
+  );
+});
+
+test('data-sources routes reject basic-auth URLs, invalid timezones, and missing workspaceId', async () => {
+  const express = require('express');
+  const dataSourcesRouter = require('../routes/data-sources');
+  const app = express();
+  app.use(express.json());
+  // Mock auth/tenancy
+  app.use((req, res, next) => {
+    req.user = { id: 'u1', role: 'admin' };
+    req.isPlatformAdmin = true;
+    req.workspaceRole = 'workspace_admin';
+    if (!req.headers['x-no-ws']) req.workspaceId = 'ws-test-1';
+    next();
+  });
+  app.use('/api/data-sources', dataSourcesRouter);
+
+  const server = await new Promise((r) => {
+    const s = app.listen(0, '127.0.0.1', () => r(s));
+  });
+  const port = server.address().port;
+  const baseUrl = `http://127.0.0.1:${port}/api/data-sources`;
+
+  try {
+    // 1. Rejects basic-auth URL in POST /test
+    const testRes = await fetch(`${baseUrl}/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'ical', config: { url: 'https://user:pass@example.com/cal.ics' } }),
+    });
+    assert.equal(testRes.status, 400);
+    const testJson = await testRes.json();
+    assert.match(testJson.error, /basic-auth|credentials/i);
+
+    // 2. Rejects invalid timezone in POST /test
+    const tzRes = await fetch(`${baseUrl}/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'ical', config: { timezone: 'Invalid/Non_Existent_TZ', raw_ics: 'BEGIN:VCALENDAR\nEND:VCALENDAR' } }),
+    });
+    assert.equal(tzRes.status, 400);
+    const tzJson = await tzRes.json();
+    assert.match(tzJson.error, /Invalid IANA timezone/i);
+
+    // 3. Rejects missing workspaceId in POST /
+    const noWsRes = await fetch(`${baseUrl}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-no-ws': '1' },
+      body: JSON.stringify({ name: 'Cal', type: 'ical', config: { url: 'https://example.com/cal.ics' } }),
+    });
+    assert.equal(noWsRes.status, 400);
+    const noWsJson = await noWsRes.json();
+    assert.match(noWsJson.error, /Workspace ID is required/i);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+
