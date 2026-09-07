@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const { Jimp } = require('jimp');
 const config = require('../config');
+const { assertSafeUrl, SsrfError } = require('./ssrf-guard');
 
 /*
  * ⚠️ ASK config, DO NOT RE-DERIVE THIS.
@@ -101,6 +102,9 @@ function findChromePath() {
 }
 
 let browserInstance = null;
+// The launch in flight, so three devices polling a cold server share ONE Chromium instead of
+// starting three and keeping the last (the other two lived on, unreferenced, until exit).
+let browserLaunching = null;
 let browserAvailableCached = null;
 let lastBrowserProbe = 0;
 
@@ -128,6 +132,9 @@ async function getBrowser() {
   if (browserInstance && browserInstance.connected) {
     return browserInstance;
   }
+  if (browserLaunching) {
+    return browserLaunching;
+  }
 
   const puppeteer = getPuppeteer();
   if (!puppeteer) {
@@ -143,7 +150,7 @@ async function getBrowser() {
     throw err;
   }
 
-  browserInstance = await puppeteer.launch({
+  browserLaunching = puppeteer.launch({
     executablePath: chromePath,
     headless: true,
     args: [
@@ -154,13 +161,17 @@ async function getBrowser() {
       '--disable-extensions',
       '--hide-scrollbars',
     ],
+  }).then((b) => {
+    browserInstance = b;
+    b.on('disconnected', () => {
+      if (browserInstance === b) browserInstance = null;
+    });
+    return b;
+  }).finally(() => {
+    browserLaunching = null;
   });
 
-  browserInstance.on('disconnected', () => {
-    browserInstance = null;
-  });
-
-  return browserInstance;
+  return browserLaunching;
 }
 
 async function closeBrowser() {
@@ -225,6 +236,17 @@ function releasePageSlot() {
 async function renderRemoteImage(content, profile) {
   const url = content.remote_url;
   if (!url) return null;
+
+  // Same vetting as the page path below: this fetch runs on the server, against a URL a
+  // workspace editor typed. Private ranges and the metadata endpoint are not content.
+  try {
+    await assertSafeUrl(url);
+  } catch (e) {
+    if (e instanceof SsrfError) {
+      throw Object.assign(new Error(`Remote content refused: ${e.message}`), { code: 'BLOCKED_URL' });
+    }
+    throw Object.assign(new Error(`Invalid remote URL: ${e.message}`), { code: 'FETCH_ERROR' });
+  }
 
   let response;
   try {
@@ -300,19 +322,21 @@ async function renderWidgetOrHtml(html, profile, widgetType = '') {
       const iframes = Array.from(document.querySelectorAll('iframe'));
       await Promise.all(iframes.map(iframe => {
         return new Promise((resolve) => {
+          // Listeners and the timer FIRST. Reading contentDocument on a cross-origin zone throws
+          // SecurityError, and a catch that resolved there let a remote dashboard be captured
+          // blank at ~3s while it was still painting. A remote zone now waits for its load
+          // event or the bounded timer, whichever comes first.
+          setTimeout(resolve, isLayout ? 3000 : 5000);
+          iframe.addEventListener('load', resolve, { once: true });
+          iframe.addEventListener('error', resolve, { once: true });
           try {
             const doc = iframe.contentDocument || iframe.contentWindow?.document;
             if (doc && (doc.readyState === 'complete' || doc.readyState === 'interactive')) {
-              try { if (doc.fonts?.ready) doc.fonts.ready; } catch (_) {}
               try { doc.getAnimations().forEach(a => { try { a.finish(); } catch (_) {} }); } catch (_) {}
-              return resolve();
+              const fonts = doc.fonts && doc.fonts.ready;
+              if (fonts && typeof fonts.then === 'function') fonts.then(resolve, resolve); else resolve();
             }
-            iframe.addEventListener('load', resolve, { once: true });
-            iframe.addEventListener('error', resolve, { once: true });
-          } catch (_) {
-            resolve();
-          }
-          setTimeout(resolve, isLayout ? 3000 : 5000);
+          } catch (_) { /* cross-origin: the load event or the timer settles it */ }
         });
       }));
 
@@ -354,6 +378,47 @@ async function renderWidgetOrHtml(html, profile, widgetType = '') {
       }));
     }, widgetType === 'layout').catch(() => {});
 
+    const snap = await page.screenshot({ type: 'png' });
+    return Buffer.from(snap);
+  } finally {
+    if (page) {
+      try { await page.close(); } catch (_) {}
+    }
+    releasePageSlot();
+  }
+}
+
+/*
+ * A remote WEB PAGE is navigated to, not pasted into a document. #331's last round folded the
+ * remote-page branch into renderWidgetOrHtml(), whose only way of loading anything is
+ * page.setContent(html) — so the URL string itself became the document, and a panel pointed at
+ * https://example.com/board received a white frame with that address printed on it, cached for
+ * five minutes. This is the page.goto() path main had before, behind the same slot and lifecycle
+ * the HTML path uses.
+ *
+ * The URL is vetted first. Chromium is a full client running on the server: pointed at
+ * 127.0.0.1, 169.254.169.254, or a LAN address it renders whatever is there into a frame any
+ * device on that workspace can pull. The media proxy and the data-source fetcher already refuse
+ * those through lib/ssrf-guard; this path never did.
+ */
+async function renderRemotePage(url, profile) {
+  try {
+    await assertSafeUrl(url);
+  } catch (e) {
+    if (e instanceof SsrfError) {
+      throw Object.assign(new Error(`Remote page refused: ${e.message}`), { code: 'BLOCKED_URL' });
+    }
+    throw Object.assign(new Error(`Invalid remote URL: ${e.message}`), { code: 'FETCH_ERROR' });
+  }
+  await acquirePageSlot();
+  let page = null;
+  try {
+    const browser = await getBrowser();
+    page = await browser.newPage();
+    await page.setViewport({ width: profile.width, height: profile.height });
+    await page.goto(url, { waitUntil: 'load', timeout: 10000 });
+    // Dashboards and boards usually paint from a fetch after load; give that a bounded chance.
+    await page.waitForNetworkIdle({ idleTime: 200, timeout: 2500 }).catch(() => {});
     const snap = await page.screenshot({ type: 'png' });
     return Buffer.from(snap);
   } finally {
@@ -427,7 +492,7 @@ async function render(item, content, screenProfile) {
     if (png) return { png };
 
     try {
-      const p = await renderWidgetOrHtml(content.remote_url, profile, 'webpage');
+      const p = await renderRemotePage(content.remote_url, profile);
       return { png: p };
     } catch (e) {
       if (e.code === 'BROWSER_UNAVAILABLE' || e.code === 'BROWSER_NOT_FOUND') {
@@ -718,6 +783,7 @@ async function renderLayout(layout, zoneEntries, screenProfile) {
 
 module.exports = {
   render,
+  renderRemotePage,
   renderLayout,
   renderLayoutNative,
   closeBrowser,

@@ -136,31 +136,33 @@ const CURSOR_UPSERT = db.prepare(`
 function dynamicRevFor(item, nowSec) {
   if (!item) return 0;
   const now = typeof nowSec === 'number' ? nowSec : Math.floor(Date.now() / 1000);
-  if (item.widget_type === 'clock') {
-    return `clock_${Math.floor(now / 60)}`;
-  }
-  if (item.widget_type === 'weather') {
-    return `weather_${Math.floor(now / 600)}`;
-  }
-  if (item.widget_type === 'slide') {
-    return `slide_${Math.floor(now / 60)}`;
-  }
-  if (item.widget_type === 'rss') {
-    return `rss_${Math.floor(now / 300)}`;
-  }
-  if (item.widget_type === 'webpage') {
-    return `webpage_${Math.floor(now / 300)}`;
-  }
-  if (item.widget_type === 'social') {
-    return `social_${Math.floor(now / 300)}`;
-  }
-  if (item.widget_type === 'directory-board') {
-    return `directory_${Math.floor(now / 300)}`;
+  /*
+   * ⚠️ THE EDIT REV RIDES ALONG. A time bucket says "this widget's OUTPUT changes on its own every
+   * N seconds"; it does not say "and nobody edits it". The first version of this helper returned
+   * the bucket ALONE for slide/rss/webpage/social/directory-board, so a slide's text edit changed
+   * widgets.updated_at and nothing in the cache key — the panel kept answering 304 with the old
+   * frame until the bucket rolled (a minute, or five). Before that, an edit was the ONLY thing
+   * that changed the key, and it did so immediately. Both signals belong in it.
+   */
+  const edited = item.widget_updated_at || item.content_updated_at || item.updated_at || 0;
+  const bucket = (label, seconds) => `${label}_${Math.floor(now / seconds)}_${edited}`;
+  switch (item.widget_type) {
+    case 'clock':   return bucket('clock', 60);
+    case 'weather': return bucket('weather', 600);
+    // A slide only changes on its own when it binds a data source; a static deck re-rendered
+    // in Chrome every minute is pure cost.
+    case 'slide':   return String(item.widget_config || '').includes('{{ds:') ? bucket('slide', 60) : edited;
+    case 'rss':     return bucket('rss', 300);
+    case 'webpage': return bucket('webpage', 300);
+    case 'social':  return bucket('social', 300);
+    // The board polls its data every 60s (widgets.js); a 300s bucket showed stale rows.
+    case 'directory-board': return bucket('directory', 60);
+    default: break;
   }
   if (item.remote_url && !looksLikeImage(item.remote_url, item.mime_type)) {
-    return `url_${Math.floor(now / 300)}`;
+    return bucket('url', 300);
   }
-  return item.widget_updated_at || item.content_updated_at || item.updated_at || 0;
+  return edited;
 }
 
 /**
@@ -855,5 +857,6 @@ module.exports.resolveLayoutItems = resolveLayoutItems;
 module.exports.resolveDevicePlaylist = resolveDevicePlaylist;
 module.exports.resolvedLayoutId = resolvedLayoutId;
 module.exports.resolveDeviceContext = resolveDeviceContext;
+module.exports.dynamicRevFor = dynamicRevFor;
 
 

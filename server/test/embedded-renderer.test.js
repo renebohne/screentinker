@@ -620,3 +620,109 @@ describe('Embedded HTTP Route & Fallback Handling', () => {
 
 
 
+
+// ---------------------------------------------------------------------------------------------
+// Follow-ups to #331, fixed on main after the merge.
+
+describe('dynamicRevFor: an edit and a time bucket both invalidate', () => {
+  const { dynamicRevFor } = embeddedRouter;
+  const T = 1_700_000_000;
+
+  test('THE BUG: editing a data-bound slide changes its rev inside the same minute', () => {
+    // The first helper returned the bucket alone, so a text edit was invisible until it rolled.
+    const before = dynamicRevFor({ widget_type: 'slide', widget_config: '{"f":"{{ds:room.status}}"}', widget_updated_at: 100 }, T);
+    const after = dynamicRevFor({ widget_type: 'slide', widget_config: '{"f":"{{ds:room.status}}"}', widget_updated_at: 101 }, T);
+    assert.notEqual(before, after);
+  });
+
+  test('the bucket still rolls on its own for an unedited widget', () => {
+    const a = dynamicRevFor({ widget_type: 'rss', widget_updated_at: 5 }, T);
+    const b = dynamicRevFor({ widget_type: 'rss', widget_updated_at: 5 }, T + 300);
+    assert.notEqual(a, b);
+    assert.equal(dynamicRevFor({ widget_type: 'rss', widget_updated_at: 5 }, T + 1), a, 'inside the bucket the rev holds');
+  });
+
+  test('a static slide is keyed on its edit alone, so it is not re-rendered every minute', () => {
+    const a = dynamicRevFor({ widget_type: 'slide', widget_config: '{"f":"Hello"}', widget_updated_at: 7 }, T);
+    const b = dynamicRevFor({ widget_type: 'slide', widget_config: '{"f":"Hello"}', widget_updated_at: 7 }, T + 3600);
+    assert.equal(a, b);
+    assert.notEqual(a, dynamicRevFor({ widget_type: 'slide', widget_config: '{"f":"Hello"}', widget_updated_at: 8 }, T));
+  });
+
+  test('every time-bucketed type carries the edit rev', () => {
+    for (const widget_type of ['clock', 'weather', 'rss', 'webpage', 'social', 'directory-board']) {
+      const a = dynamicRevFor({ widget_type, widget_updated_at: 1 }, T);
+      const b = dynamicRevFor({ widget_type, widget_updated_at: 2 }, T);
+      assert.notEqual(a, b, `${widget_type}: an edit must change the rev`);
+    }
+  });
+
+  test('a directory board rolls with its own 60s poll, not a 300s bucket', () => {
+    const a = dynamicRevFor({ widget_type: 'directory-board', widget_updated_at: 1 }, T);
+    assert.notEqual(a, dynamicRevFor({ widget_type: 'directory-board', widget_updated_at: 1 }, T + 60));
+  });
+
+  test('plain content stays keyed on its own updated_at; a remote page is bucketed', () => {
+    assert.equal(dynamicRevFor({ content_updated_at: 42 }, T), 42);
+    assert.equal(dynamicRevFor({ remote_url: 'https://x/pic.png', mime_type: 'image/png', content_updated_at: 42 }, T), 42);
+    const page = dynamicRevFor({ remote_url: 'https://x/board', mime_type: 'text/html', content_updated_at: 42 }, T);
+    assert.match(String(page), /^url_\d+_42$/);
+  });
+});
+
+describe('remote web pages are navigated, not pasted', () => {
+  const { render, closeBrowser } = require('../lib/embedded-render');
+  const pupPath = require.resolve('puppeteer-core');
+  let hadCache, savedChrome, savedFetch;
+  const calls = { goto: [], setContent: [], fetch: [] };
+  const fakePage = {
+    setViewport: async () => {},
+    goto: async (u) => { calls.goto.push(u); },
+    setContent: async (h) => { calls.setContent.push(h); },
+    waitForNetworkIdle: async () => {},
+    evaluate: async () => {},
+    screenshot: async () => Buffer.from('png'),
+    close: async () => {},
+  };
+  const fakeBrowser = { connected: true, newPage: async () => fakePage, close: async () => {}, on() {}, process() { return null; } };
+
+  before(async () => {
+    await closeBrowser();                                   // never let a real instance answer these
+    hadCache = require.cache[pupPath];
+    require.cache[pupPath] = { id: pupPath, filename: pupPath, loaded: true, exports: { launch: async () => fakeBrowser } };
+    savedChrome = process.env.CHROME_PATH;
+    process.env.CHROME_PATH = process.execPath;             // findChromePath only asks whether it exists
+    savedFetch = global.fetch;
+    global.fetch = async (u) => { calls.fetch.push(String(u)); return new Response('<html></html>', { status: 200, headers: { 'content-type': 'text/html' } }); };
+  });
+  after(async () => {
+    await closeBrowser();
+    if (hadCache) require.cache[pupPath] = hadCache; else delete require.cache[pupPath];
+    if (savedChrome === undefined) delete process.env.CHROME_PATH; else process.env.CHROME_PATH = savedChrome;
+    global.fetch = savedFetch;
+  });
+
+  test('THE BUG: a non-image remote_url is loaded with page.goto, never used as the document', async () => {
+    calls.goto.length = 0; calls.setContent.length = 0;
+    const res = await render({ id: 'i1' }, { remote_url: 'http://8.8.8.8/board', mime_type: 'text/html' }, { width: 800, height: 480 });
+    assert.ok(Buffer.isBuffer(res.png));
+    assert.deepEqual(calls.goto, ['http://8.8.8.8/board']);
+    assert.equal(calls.setContent.length, 0, 'the URL string must never be pasted as HTML');
+  });
+
+  test('a remote page on a private address is refused before the browser sees it', async () => {
+    calls.goto.length = 0;
+    await assert.rejects(
+      () => render({ id: 'i2' }, { remote_url: 'http://127.0.0.1:3001/', mime_type: 'text/html' }, { width: 800, height: 480 }),
+      (e) => e.code === 'BLOCKED_URL');
+    assert.equal(calls.goto.length, 0);
+  });
+
+  test('a remote IMAGE on a private address is refused before it is fetched', async () => {
+    calls.fetch.length = 0;
+    await assert.rejects(
+      () => render({ id: 'i3' }, { remote_url: 'http://169.254.169.254/latest/meta-data/', mime_type: 'image/jpeg' }, { width: 800, height: 480 }),
+      (e) => e.code === 'BLOCKED_URL');
+    assert.equal(calls.fetch.length, 0);
+  });
+});
