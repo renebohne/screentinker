@@ -378,6 +378,40 @@
     const BS = (typeof window !== 'undefined' && window.ScreenTinkerBS) || null;
     const ON_BRIGHTSIGN = !!(BS && BS.isBrightSign());
 
+    /*
+     * ==================== Host bridge ====================
+     * A platform shell that embeds this page in an iframe and does, on its behalf, what a
+     * browser tab cannot: reboot the panel, cut the display, install its own update. The LG
+     * webOS Signage app (webos/) is the first; it opens /player?host=webos. The protocol is
+     * postMessage both ways. The shell announces what it can genuinely do, and ONLY those
+     * capabilities are declared to the server, so the dashboard never shows a button the panel
+     * cannot honour. Messages carry no secrets: a command is one the server already sent us.
+     */
+    const HOST = (() => {
+      let platform = null;
+      try { platform = new URLSearchParams(window.location.search).get('host'); } catch (e) {}
+      if (!platform || window.parent === window) return null;
+      const h = { platform, ready: false, caps: [], info: {} };
+      h.send = (msg) => { try { window.parent.postMessage(Object.assign({ source: 'screentinker-player' }, msg), '*'); } catch (e) {} };
+      h.can = (cap) => h.ready && h.caps.includes(cap);
+      h.command = (action, payload) => { if (!h.ready) return false; h.send({ type: 'host:command', action, payload: payload || null }); return true; };
+      window.addEventListener('message', (ev) => {
+        if (ev.source !== window.parent) return;             // only the shell that embeds us
+        const d = ev.data;
+        if (!d || d.source !== 'screentinker-host') return;
+        if (d.type === 'host:ready') {
+          h.ready = true;
+          h.caps = Array.isArray(d.capabilities) ? d.capabilities.filter((c) => typeof c === 'string') : [];
+          h.info = (d.info && typeof d.info === 'object') ? d.info : {};
+          console.log(`[host] ${h.platform} ready: ${h.caps.join(', ') || 'no capabilities'}`);
+        } else if (d.type === 'host:result') {
+          console.log(`[host] ${d.action}: ${d.ok ? 'ok' : 'failed: ' + (d.error || 'unknown')}`);
+        }
+      });
+      h.send({ type: 'host:hello' });
+      return h;
+    })();
+
     // Per-output storage namespace. A dual-output BrightSign runs TWO widgets against one origin
     // and one SD storage_path, so they share localStorage: without this the second output reads
     // the first one's config and device id and the two collapse into a single device row. Empty
@@ -845,6 +879,7 @@
       const bits = [];
       try { bits.push(`screen ${screen.width}x${screen.height}@${window.devicePixelRatio || 1}x`); } catch (e) {}
       try { if (BS && BS.isBrightSign && BS.isBrightSign()) bits.push('BrightSign'); } catch (e) {}
+      try { if (HOST) bits.push(HOST.platform + (HOST.info.model ? ' ' + HOST.info.model : '')); } catch (e) {}
       try { bits.push(navigator.userAgent); } catch (e) {}
       return bits.join(' — ');
     }
@@ -2521,7 +2556,17 @@
         // dashboard button did nothing on it. A BrightSign can, through the host script.
         if (data.type === 'reboot') {
           if (BS && BS.reboot()) console.log('[bs] reboot requested via host');
+          else if (HOST && HOST.can('system.reboot') && HOST.command('reboot')) console.log('[host] reboot requested');
           else console.log('reboot: not supported on this player');
+        }
+        if (data.type === 'shutdown') {
+          if (HOST && HOST.can('system.reboot') && HOST.command('shutdown')) console.log('[host] shutdown requested');
+          else console.log('shutdown: not supported on this player');
+        }
+        // Self-update: the shell knows where its own package lives; it only needs the nudge.
+        if (data.type === 'update') {
+          if (HOST && HOST.can('system.self_update') && HOST.command('update')) console.log('[host] update requested');
+          else console.log('update: not supported on this player');
         }
         // Media volume. Applies to whatever is playing now and is remembered for items mounted
         // later (see setMediaVolume). The wire parsing is volumeLevelFromCommand().
@@ -3613,6 +3658,12 @@
         if (window.ScreenTinkerBSSync && window.ScreenTinkerBSSync.available()) caps.push('sync.native');
       } catch (e) { /* not on BrightSign */ }
 
+      // What the embedding shell announced it can do (webOS today). Claimed from its
+      // host:ready message and nothing else; before it arrives, or with no shell, nothing extra.
+      // typeof-guarded: the declared-capabilities tests extract this function on its own.
+      if (typeof HOST !== 'undefined' && HOST && HOST.ready) {
+        for (const c of HOST.caps) if (!caps.includes(c)) caps.push(c);
+      }
       return caps;
     }
 
@@ -6246,6 +6297,7 @@
     // display itself to sleep over CEC. Best effort — some displays ignore broadcast CEC — so the
     // overlay is applied regardless and something visible always happens.
     function setDisplayPower(on) {
+      if (HOST && HOST.can('display.power')) return HOST.command(on ? 'screen_on' : 'screen_off');
       if (!BS) return false;
       try { return BS.displayPower(on); } catch (e) { return false; }
     }

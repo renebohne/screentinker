@@ -110,6 +110,10 @@ sed -i -E "s/(versionCode.*\?:[[:space:]]*)\"[0-9]+\"/\1\"$((CODE + 1))\"/" andr
 NUMERIC="${NEW%%-*}"
 sed -i -E "/^<\?xml/! s/([[:space:]]version=\")[0-9][^\"]*(\")/\1${NUMERIC}\2/" tizen/config.xml
 
+# 4b) webOS app version. Same numeric-only rule as Tizen (appinfo.json version is x.y.z), and
+#     build-ipk.sh stamps js/app.js from it, so this is the one place it is written.
+sed -i -E "s/(\"version\": *\")[0-9][^\"]*(\")/\1${NUMERIC}\2/" webos/appinfo.json
+
 # 5) public API spec version. This is the number Redoc prints at the top of the published
 #    API reference (frontend/api-docs.html renders docs/openapi.yaml directly), so leaving it
 #    behind means customers read a version that has not existed for months — it had drifted to

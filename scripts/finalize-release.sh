@@ -115,6 +115,7 @@ server-payload.zip
 server-payload.json
 ScreenTinker.apk
 ScreenTinker.wgt
+ScreenTinker.ipk
 screentinker-$VERSION.tar.gz
 screentinker-sbom-$VERSION.cdx.json
 "

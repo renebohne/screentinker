@@ -140,7 +140,9 @@ Anything with a reasonably modern browser can be a display without installing an
 `/player`. The native players add what a browser cannot: the **Android APK** gives you unattended boot,
 OTA self-update, remote power and touch injection, and a content cache that survives a reboot; the
 **Tizen `.wgt`** gives you an installed app that launches itself on the TV. Tizen does not
-self-update — new versions are installed the same way the first one was.
+self-update — new versions are installed the same way the first one was. The **webOS `.ipk`**
+is the same idea for LG signage panels, installed from USB or an SI server with no vendor
+signature, and it does self-update; see [docs/webos-player.md](docs/webos-player.md).
 
 > **BrightSign** runs the unmodified browser player (verified on Series 5 / Chromium 120) and needs
 > no separate build. One caveat worth knowing before you rely on it: BrightSign's HTML widget does

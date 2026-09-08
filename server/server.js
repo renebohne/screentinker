@@ -1414,7 +1414,9 @@ require('./lib/content-ack-limiter').startSweep();   // #146 Item E: evict idle 
 const apkCache = require('./lib/apk-cache');
 apkCache.start();                                    // #146 Item C: resolve APK path/size/mtime once + refresh on interval (no per-request fs)
 const wgtCache = require('./lib/wgt-cache');
+const ipkCache = require('./lib/ipk-cache');
 wgtCache.start();                                    // Tizen SSSP URL-Launcher: resolve .wgt path/size/mtime once + refresh on interval
+ipkCache.start();                                    // LG webOS Signage: same for the .ipk
 const { getBand } = require('./services/loop-lag');  // #146 Item C: critical-band download shed
 app.get('/api/update/check', (req, res) => {
   const currentVersion = req.query.version;
@@ -2118,6 +2120,49 @@ app.get('/tizen/ScreenTinker.wgt', (req, res) => {
   res.setHeader('Content-Disposition', 'attachment; filename="ScreenTinker.wgt"');
   res.setHeader('Cache-Control', 'no-cache');
   res.sendFile(wgt.path);
+});
+
+// ---- LG webOS Signage ------------------------------------------------------------------------
+// The shell app (webos/) is installed from USB or an SI server and then keeps itself current
+// against these two routes: version.json says what is published, the .ipk is what it installs.
+// No signature is involved, so the CI-built artifact is normally the one served.
+function webosNotAvailable(res) {
+  return res.status(404).send('<!DOCTYPE html><html><head><title>webOS Player Not Available</title>'
+    + '<style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#0f172a;color:#e2e8f0}div{text-align:center;max-width:520px;padding:24px}h1{color:#f87171;font-size:24px}code{background:#1e293b;padding:2px 8px;border-radius:4px;font-size:14px}p{line-height:1.6;color:#94a3b8}</style></head>'
+    + '<body><div><h1>webOS App Not Available</h1><p>No <code>ScreenTinker.ipk</code> is hosted on this instance. Mount one at <code>/data/ScreenTinker.ipk</code> or build it with <code>webos/build-ipk.sh</code>. The panel\u2019s browser can run the web player meanwhile: <a href="/player" style="color:#3b82f6">/player</a>.</p></div></body></html>');
+}
+
+app.get('/webos/version.json', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.json(ipkCache.versionJson());
+});
+
+app.get('/webos/ScreenTinker.ipk', (req, res) => {
+  const ipk = ipkCache.get();
+  if (!ipk.exists) return webosNotAvailable(res);
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', 'attachment; filename="ScreenTinker.ipk"');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(ipk.path);
+});
+
+app.get(['/webos', '/webos/'], (req, res) => {
+  const ipk = ipkCache.get();
+  const base = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send('<!DOCTYPE html><html><head><meta charset="utf-8"><title>ScreenTinker on LG webOS Signage</title>'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<style>body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:40px 20px;line-height:1.6}'
+    + '.w{max-width:640px;margin:0 auto}h1{color:#34d399}code{background:#1e293b;padding:2px 8px;border-radius:4px;font-size:14px}'
+    + 'ol{padding-left:20px}li{margin:8px 0}.mut{color:#94a3b8;font-size:14px}.pill{display:inline-block;background:#1e293b;border-radius:20px;padding:4px 12px;font-size:13px;color:#94a3b8}a{color:#3b82f6}</style></head>'
+    + '<body><div class="w"><h1>ScreenTinker \u2014 LG webOS Signage</h1>'
+    + (ipk.exists ? `<p class="pill">Ready \u00b7 v${ipk.version} \u00b7 ${(ipk.size / 1024 / 1024).toFixed(2)} MB</p>` : '<p class="pill">No .ipk hosted yet</p>')
+    + `<p>Download <a href="${base}/webos/ScreenTinker.ipk">ScreenTinker.ipk</a> and install it on the panel:</p>`
+    + '<ol><li><b>USB:</b> copy the file to a USB stick, plug it into the panel, open <b>Settings \u2192 General \u2192 Install App</b> (the exact path varies by webOS version), and pick it.</li>'
+    + '<li><b>SI server:</b> host the file and point the panel\u2019s SI Server setting at it.</li>'
+    + `<li>Launch ScreenTinker, enter <code>${base}</code>, and claim the pairing code in your dashboard.</li></ol>`
+    + `<p class="mut">The app checks <code>${base}/webos/version.json</code> and installs a newer build itself when the panel\u2019s SCAP library is present. Without it (or from a browser) the web player runs at <a href="${base}/player">${base}/player</a>.</p>`
+    + '</div></body></html>');
 });
 
 // Human-facing landing (a panel appends /sssp_config.xml itself, so it never lands here).

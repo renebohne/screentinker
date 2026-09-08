@@ -79,6 +79,13 @@ jobs:
           cp tizen/ScreenTinker.wgt ScreenTinker.wgt
           ls -la ScreenTinker.wgt
 
+      - name: Build LG webOS .ipk (no SCAP library in CI; see webos/vendor/README.md)
+        run: |
+          chmod +x webos/build-ipk.sh
+          ( cd webos && ./build-ipk.sh )
+          cp webos/ScreenTinker.ipk ScreenTinker.ipk
+          ls -la ScreenTinker.ipk
+
       - name: Build BrightSign autorun.zip (single-file player installer)
         run: |
           chmod +x scripts/build-autorun-zip.sh
@@ -104,7 +111,7 @@ jobs:
             --exclude='*.apk' \
             --exclude='brightsign/*.zip' --exclude='brightsign/server-payload.json' \
             --exclude='.claude' --exclude='.cc-writes' \
-            server frontend scripts docs VERSION README.md LICENSE .env.example ScreenTinker.wgt brightsign
+            server frontend scripts docs VERSION README.md LICENSE .env.example ScreenTinker.wgt ScreenTinker.ipk brightsign
           echo "TARBALL=$OUT" >> "$GITHUB_ENV"
           ls -la "$OUT"
 
@@ -184,6 +191,10 @@ jobs:
             echo "  Sign it with your own Samsung certificate (Tizen Studio + a profile that includes"
             echo "  your TV's DUID) to install, or - easiest - point a Tizen TV browser / URL Launcher"
             echo "  at \`https://<your-instance>/player\` (no signing needed)."
+            echo "- \`ScreenTinker.ipk\` - LG webOS Signage app. Install from USB or an SI server; it then"
+            echo "  updates itself from your instance. Built without LG's SCAP library (not redistributable),"
+            echo "  so power and self-update controls need a build from \`webos/build-ipk.sh\` with the SDK"
+            echo "  files in \`webos/vendor/\`; see \`docs/webos-player.md\`."
               echo "- \`autorun.zip\` - BrightSign player installer. Drop it on the root of a player's"
               echo "  storage (microSD, USB, or internal flash) and power-cycle: it unpacks itself and"
               echo "  reboots into the player. Edit \`screentinker.json\` inside the archive first to"
