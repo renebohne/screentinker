@@ -386,6 +386,7 @@ async function commitStagedAsset(db, edge, entry, stagedPath, deps) {
     }
   });
   commit();
+    try { require('../revisions').recordCurrent(db, 'content', localId, { actor: { userId: null, kind: 'mesh', label: 'mesh hub' }, summary: existing ? 'Synced from hub (bytes changed)' : 'Synced from hub' }); } catch (_) {}
 
   return { ok: true, localId, filepath: finalName, digest, bytes: stat.size, reusedRow: !!existing };
 }

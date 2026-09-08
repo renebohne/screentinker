@@ -43,6 +43,10 @@ const PUBLIC_ROUTERS = [
   // #320: operator-uploaded GLSL transitions. Workspace-scoped like fonts, and for the same reason:
   // it is the customer's content and the customer's licence, not part of the shipped library.
   { path: '/api/transitions/custom', mod: './routes/custom-shaders' },
+  // Content approval and version history. Workspace-scoped through the same tenancy middleware
+  // as everything above; the settings endpoint is admin-only inside the router.
+  { path: '/api/approvals',   mod: './routes/approvals' },
+  { path: '/api/revisions',   mod: './routes/revisions' },
   { path: '/api/activity',    mod: './routes/activity' },
   { path: '/api/kiosk',       mod: './routes/kiosk', renderBypass: true },
   { path: '/api/pip',         mod: './routes/pip' },

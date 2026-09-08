@@ -217,6 +217,7 @@ router.post('/', checkStorageLimit, uploadContentFilesGuarded, async (req, res) 
     }
     // Backward-compatible shape: a single upload still returns the content object (what
     // every existing caller reads); a multi-file upload returns the array of them.
+    for (const c of results) { try { require('../lib/revisions').recordCurrent(db, 'content', c.id, { actor: require('../lib/releases').actorOf(req), summary: 'Uploaded' }); } catch (_) {} }
     res.status(201).json(results.length === 1 ? results[0] : results);
   } catch (err) {
     if (err && err.name === 'UnsupportedUploadError') return res.status(400).json({ error: err.message });
@@ -244,6 +245,7 @@ router.post('/remote', checkRemoteUrl, (req, res) => {
     `).run(id, req.user.id, req.workspaceId, safeFilename(filename), mimeType, url);
 
     const content = db.prepare('SELECT * FROM content WHERE id = ?').get(id);
+    try { require('../lib/revisions').recordCurrent(db, 'content', content.id, { actor: require('../lib/releases').actorOf(req), summary: 'Added' }); } catch (_) {}
     res.status(201).json(content);
   } catch (err) {
     console.error('Remote URL add error:', err);
@@ -295,6 +297,7 @@ router.post('/youtube', async (req, res) => {
     `).run(id, req.user.id, req.workspaceId, safeFilename(filename), embedUrl, thumbnailUrl);
 
     const content = db.prepare('SELECT * FROM content WHERE id = ?').get(id);
+    try { require('../lib/revisions').recordCurrent(db, 'content', content.id, { actor: require('../lib/releases').actorOf(req), summary: 'Added' }); } catch (_) {}
     res.status(201).json(content);
   } catch (err) {
     console.error('YouTube add error:', err);
@@ -569,6 +572,7 @@ router.put('/:id', (req, res) => {
     db.prepare(`UPDATE content SET ${updates.join(', ')} WHERE id = ?`).run(...values);
   }
 
+  require('../lib/revisions').recordCurrent(db, 'content', req.params.id, { actor: require('../lib/releases').actorOf(req), summary: 'Updated details' });
   res.json(db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id));
 });
 
@@ -581,8 +585,26 @@ router.put('/:id/replace', upload.single('file'), async (req, res) => {
   // Delete old file and thumbnail — but only if no other row still points at them. A
   // mesh-received asset is named after its bytes and can legitimately back one row per
   // workspace; replacing one customer's copy must not empty another's screen.
-  unlinkIfUnreferenced(content.filepath, content.id, 'filepath');
-  unlinkIfUnreferenced(content.thumbnail_path, content.id, 'thumbnail_path');
+  /*
+   * Version history: the bytes being replaced are RETAINED under .history (a move when this row
+   * is their only reference, a copy otherwise), and every revision that described them is
+   * repointed there, so the previous version stays restorable. Approval on: the new bytes land as
+   * a DRAFT next to the live file and nothing a screen shows changes until the draft is reviewed
+   * and published (lib/releases.js releaseContentDraft).
+   */
+  const policy = require('../lib/release-policy');
+  const revisions = require('../lib/revisions');
+  const actor = require('../lib/releases').actorOf(req);
+  const approvalOn = !!(content.workspace_id && policy.approvalRequired(db, content.workspace_id));
+  let retainedFile = null, retainedThumb = null;
+  if (!approvalOn) {
+    const prev = revisions.latest(db, 'content', content.id);
+    const tag = prev ? `r${prev.rev_no}` : 'r0';
+    retainedFile = revisions.retainContentFile(db, content.id, content.filepath, tag);
+    retainedThumb = revisions.retainContentFile(db, content.id, content.thumbnail_path, tag);
+    if (!retainedFile) unlinkIfUnreferenced(content.filepath, content.id, 'filepath');
+    if (!retainedThumb) unlinkIfUnreferenced(content.thumbnail_path, content.id, 'thumbnail_path');
+  }
 
   // Same content-derived naming as the main ingest path (lib/upload-sniff) — the caller
   // does not choose the extension here either. A non-media upload 400s.
@@ -659,19 +681,25 @@ router.put('/:id/replace', upload.single('file'), async (req, res) => {
   let newDigest = null;
   try { newDigest = await digestFile(path.join(config.contentDir, filepath)); } catch (e) { newDigest = null; }
 
-  db.prepare(`UPDATE content
-                 SET filepath = ?, mime_type = ?, file_size = ?, thumbnail_path = ?, width = ?, height = ?,
-                     duration_sec = ?, byte_digest = ?, bundle_entry = ?,
-                     updated_at = MAX(CAST(strftime('%s','now') AS INTEGER), COALESCE(NULLIF(updated_at, 0), created_at) + 1)
-               WHERE id = ?`)
-    .run(filepath, mime, req.file.size, thumbnailPath, width, height, durationSec, newDigest, bundleEntry, req.params.id);
+  if (approvalOn) {
+    const draft = { filepath, mime_type: mime, file_size: req.file.size, thumbnail_path: thumbnailPath, width, height, duration_sec: durationSec, byte_digest: newDigest, bundle_entry: bundleEntry };
+    db.prepare('UPDATE content SET draft_json = ? WHERE id = ?').run(JSON.stringify(draft), req.params.id);
+    revisions.recordCurrent(db, 'content', req.params.id, { actor, summary: 'Replaced file (draft)' });
+    return res.json({ ...db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id), draft: true, pending_review: true });
+  }
 
-  // ...and tell the panels, which the old code did not. Without this the new bytes reached a screen
-  // only when something else happened to trigger a playlist refresh — an operator replacing a video
-  // watched the dashboard update and the screen keep playing the old one.
-  // Resolved and nesting-aware (lib/devices-playing.js): the old join used devices.playlist_id,
-  // so a screen inheriting its playlist — or playing this file from a NESTED playlist — kept
-  // showing the old bytes, which is the very failure the comment above describes.
+  db.transaction(() => {
+    if (retainedFile) db.prepare('UPDATE revisions SET file_ref = ? WHERE resource_type = ? AND resource_id = ? AND file_ref = ?').run(retainedFile, 'content', content.id, content.filepath);
+    if (retainedThumb) db.prepare('UPDATE revisions SET thumb_ref = ? WHERE resource_type = ? AND resource_id = ? AND thumb_ref = ?').run(retainedThumb, 'content', content.id, content.thumbnail_path);
+    db.prepare(`UPDATE content
+                   SET filepath = ?, mime_type = ?, file_size = ?, thumbnail_path = ?, width = ?, height = ?,
+                       duration_sec = ?, byte_digest = ?, bundle_entry = ?,
+                       updated_at = MAX(CAST(strftime('%s','now') AS INTEGER), COALESCE(NULLIF(updated_at, 0), created_at) + 1)
+                 WHERE id = ?`)
+      .run(filepath, mime, req.file.size, thumbnailPath, width, height, durationSec, newDigest, bundleEntry, req.params.id);
+    revisions.recordCurrent(db, 'content', req.params.id, { actor, summary: 'Replaced file' });
+  })();
+
   const affected = devicesPlayingContent(req.params.id);
   pushContentUpdates(req, affected);
 
@@ -743,6 +771,11 @@ router.delete('/:id', (req, res) => {
   // #213: shared teardown (file removal + snapshot scrub + row delete). Returns the affected
   // device ids so we can push a refresh.
   const affectedDevices = purgeContentRow(content);
+  // Deleting the item deletes its history and retained bytes with it, consistent with the file.
+  try {
+    db.prepare("DELETE FROM revisions WHERE resource_type = 'content' AND resource_id = ?").run(content.id);
+    fs.rmSync(path.join(require('../lib/revisions').historyDir(), content.id), { recursive: true, force: true });
+  } catch (_) {}
   pushContentUpdates(req, affectedDevices);
   res.json({ success: true, affectedDevices });
 });

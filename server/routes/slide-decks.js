@@ -157,6 +157,7 @@ router.put('/:id', (req, res) => {
 
   db.prepare('UPDATE slide_decks SET name = ?, doc = ?, updated_at = ? WHERE id = ?')
     .run(name, JSON.stringify(doc), nowSec(), deck.id);
+  require('../lib/revisions').recordCurrent(db, 'slide_deck', deck.id, { actor: require('../lib/releases').actorOf(req), summary: 'Saved' });
   res.json(present(db.prepare('SELECT * FROM slide_decks WHERE id = ?').get(deck.id)));
 });
 
@@ -168,41 +169,44 @@ router.put('/:id', (req, res) => {
  * has already built. Dropping them on the floor would make every republish create a fresh set of
  * widgets and leave the old ones orphaned in the library.
  */
+/*
+ * The deck's release, called by lib/releases.js AFTER the release policy has passed. The deck's
+ * own playlist is an internal artefact of the deck (one widget per slide), so the deck is the
+ * unit that is reviewed and this publishes its playlist directly.
+ *
+ * ⚠️ published_widget_ids IS PERSISTED HERE OR NOT AT ALL. It is the server's own record of what
+ * a publish created, and the next publish diffs against it to work out what to remove. Losing it
+ * means a removed slide's widget is never cleaned up; it is also why the drop set is not read
+ * out of the caller's document, where naming a foreign widget id would delete somebody else's.
+ *
+ * ⚠️ Published through the playlist's OWN publish path, not by writing published_snapshot: that
+ * function carries the change-triggered guard which keeps an unchanged resolved list from
+ * restarting every screen showing this playlist.
+ */
+function publishDeckNow(deck, req) {
+  let priorIds = [];
+  try { priorIds = JSON.parse(deck.published_widget_ids || '[]'); } catch (e) { priorIds = []; }
+  const out = deckLib.publishDeck(db, {
+    deck, doc: parseDoc(deck), userId: req.user.id, playlistId: deck.playlist_id,
+    publishedWidgetIds: priorIds,
+  });
+  db.prepare('UPDATE slide_decks SET doc = ?, playlist_id = ?, published_widget_ids = ?, updated_at = ? WHERE id = ?')
+    .run(JSON.stringify(out.doc), out.playlistId, JSON.stringify(out.publishedWidgetIds), nowSec(), deck.id);
+  require('./playlists').publishPlaylist(out.playlistId, req);
+  return out;
+}
+
 router.post('/:id/publish', (req, res) => {
   const deck = checkDeckAccess(req, res);
   if (!deck) return;
 
   let out;
   try {
-    let priorIds = [];
-    try { priorIds = JSON.parse(deck.published_widget_ids || '[]'); } catch (e) { priorIds = []; }
-    out = deckLib.publishDeck(db, {
-      deck, doc: parseDoc(deck), userId: req.user.id, playlistId: deck.playlist_id,
-      publishedWidgetIds: priorIds,
-    });
+    out = require('../lib/releases').releaseSlideDeck(db, deck.id, req, { actor: require('../lib/releases').actorOf(req) });
   } catch (e) {
+    if (e && e.name === 'ReleaseError') return res.status(e.status || 409).json({ error: e.message, code: e.code });
     console.error('[slide-deck] publish failed:', e && e.message);
     return res.status(500).json({ error: 'Could not publish this deck.' });
-  }
-
-  /*
-   * ⚠️ published_widget_ids IS PERSISTED HERE OR NOT AT ALL. It is the server's own record of what
-   * publish created, and the next publish diffs against it to work out what to remove. Losing it
-   * means a removed slide's widget is never cleaned up — and, worse, it is the reason the drop set
-   * is not read out of the caller's document, where naming a foreign widget id would have deleted
-   * somebody else's widget.
-   */
-  db.prepare('UPDATE slide_decks SET doc = ?, playlist_id = ?, published_widget_ids = ?, updated_at = ? WHERE id = ?')
-    .run(JSON.stringify(out.doc), out.playlistId, JSON.stringify(out.publishedWidgetIds), nowSec(), deck.id);
-
-  // ⚠️ Published through the playlist's OWN publish path, not by writing published_snapshot here.
-  // That function carries the change-triggered guard which keeps an unchanged resolved list from
-  // restarting every screen showing this playlist — the #234 shape, estate-wide.
-  try {
-    require('./playlists').publishPlaylist(out.playlistId, req);
-  } catch (e) {
-    console.error('[slide-deck] playlist publish failed:', e && e.message);
-    return res.status(500).json({ error: 'The slides were saved but the playlist could not be published.' });
   }
 
   res.json({
@@ -257,3 +261,4 @@ router.delete('/:id', (req, res) => {
 });
 
 module.exports = router;
+module.exports.publishDeckNow = publishDeckNow;

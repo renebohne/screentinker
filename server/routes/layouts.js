@@ -107,6 +107,7 @@ router.post('/', (req, res) => {
 
   const layout = db.prepare('SELECT * FROM layouts WHERE id = ?').get(id);
   layout.zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(id);
+  require('../lib/revisions').recordCurrent(db, 'layout', layout.id, { actor: require('../lib/releases').actorOf(req), summary: 'Created' });
   res.status(201).json(layout);
 });
 
@@ -117,6 +118,26 @@ router.put('/:id', (req, res) => {
   if (layout.is_template && !PLATFORM_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Cannot edit templates' });
 
   const { name, width, height, zones } = req.body;
+
+  // Approval on: the whole layout is saved as a DRAFT (draft_zones) and screens keep the zones
+  // they have until a reviewed submission publishes it (lib/releases.js releaseLayoutDraft).
+  const policy = require('../lib/release-policy');
+  const revisions = require('../lib/revisions');
+  const actor = require('../lib/releases').actorOf(req);
+  if (layout.workspace_id && policy.approvalRequired(db, layout.workspace_id)) {
+    const base = revisions.parseJson(layout.draft_zones, null)
+      || { name: layout.name, width: layout.width, height: layout.height, zones: db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(layout.id) };
+    const draft = {
+      name: name || base.name, width: width || base.width, height: height || base.height,
+      zones: Array.isArray(zones) ? zones.map((z, i) => ({ ...z, id: z.id || uuidv4(), sort_order: i })) : base.zones,
+    };
+    db.prepare('UPDATE layouts SET draft_zones = ? WHERE id = ?').run(JSON.stringify(draft), req.params.id);
+    revisions.recordCurrent(db, 'layout', req.params.id, { actor, summary: 'Saved draft' });
+    const current = db.prepare('SELECT * FROM layouts WHERE id = ?').get(req.params.id);
+    current.zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(req.params.id);
+    return res.json({ ...current, draft: true, pending_review: true });
+  }
+
   const txn = db.transaction(() => {
     if (name) db.prepare('UPDATE layouts SET name = ?, updated_at = strftime(\'%s\',\'now\') WHERE id = ?').run(name, req.params.id);
     if (width) db.prepare('UPDATE layouts SET width = ? WHERE id = ?').run(width, req.params.id);
@@ -180,6 +201,7 @@ router.put('/:id', (req, res) => {
     }
   });
   txn();
+  revisions.recordCurrent(db, 'layout', req.params.id, { actor, summary: 'Saved' });
 
   const updated = db.prepare('SELECT * FROM layouts WHERE id = ?').get(req.params.id);
   updated.zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(req.params.id);
@@ -214,9 +236,20 @@ router.delete('/:id', (req, res) => {
 
 // Add zone to layout. Phase 2.2h: tightened to write-access; workspace_viewer
 // can read the layout via GET but cannot add zones.
+// Zone-level writes change what screens show in place. With approval on they are refused with
+// the way forward: save the whole layout (PUT /:id), which becomes a draft for review.
+function refuseZoneWriteUnderApproval(req, res, layout) {
+  if (layout.workspace_id && require('../lib/release-policy').approvalRequired(db, layout.workspace_id)) {
+    res.status(409).json({ error: 'This workspace requires review before layout changes go live. Save the layout as a whole to create a draft, then submit it for review.', code: 'approval_required' });
+    return true;
+  }
+  return false;
+}
+
 router.post('/:id/zones', (req, res) => {
   const layout = checkLayoutWrite(req, res);
   if (!layout) return;
+  if (refuseZoneWriteUnderApproval(req, res, layout)) return;
 
   const { name, x_percent, y_percent, width_percent, height_percent, z_index, zone_type, fit_mode, background_color } = req.body;
   const maxOrder = db.prepare('SELECT MAX(sort_order) as m FROM layout_zones WHERE layout_id = ?').get(req.params.id).m || 0;
@@ -239,6 +272,7 @@ router.post('/:id/zones', (req, res) => {
 router.put('/:id/zones/:zoneId', (req, res) => {
   const layout = checkLayoutWrite(req, res);
   if (!layout) return;
+  if (refuseZoneWriteUnderApproval(req, res, layout)) return;
   const zone = db.prepare('SELECT * FROM layout_zones WHERE id = ? AND layout_id = ?').get(req.params.zoneId, req.params.id);
   if (!zone) return res.status(404).json({ error: 'Zone not found' });
 
@@ -263,6 +297,7 @@ router.put('/:id/zones/:zoneId', (req, res) => {
 router.delete('/:id/zones/:zoneId', (req, res) => {
   const layout = checkLayoutWrite(req, res);
   if (!layout) return;
+  if (refuseZoneWriteUnderApproval(req, res, layout)) return;
   db.prepare('DELETE FROM layout_zones WHERE id = ? AND layout_id = ?').run(req.params.zoneId, req.params.id);
   db.prepare("UPDATE layouts SET updated_at = strftime('%s','now') WHERE id = ?").run(req.params.id);
   res.json({ success: true });

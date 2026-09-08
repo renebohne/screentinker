@@ -671,3 +671,66 @@ CREATE TABLE IF NOT EXISTS data_sources (
 );
 CREATE INDEX IF NOT EXISTS idx_data_sources_workspace ON data_sources(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_data_sources_slug ON data_sources(workspace_id, slug);
+
+-- ─── Version history and content approval ────────────────────────────────────────────────
+-- One revision model for every authored resource (content, playlist, layout, slide_deck, widget):
+-- an immutable JSON snapshot of the state that was saved, who saved it and how, and where the
+-- bytes of a replaced media file were retained. lib/revisions.js owns the shape. Approval binds
+-- a submission to exactly one revision (its state hash), so approval can never transfer to
+-- content that changed after review. lib/release-policy.js is the single gate every publish
+-- path consults.
+CREATE TABLE IF NOT EXISTS revisions (
+    id              TEXT PRIMARY KEY,
+    workspace_id    TEXT,
+    resource_type   TEXT NOT NULL,                            -- content | playlist | layout | slide_deck | widget
+    resource_id     TEXT NOT NULL,
+    rev_no          INTEGER NOT NULL,
+    created_at      INTEGER NOT NULL,
+    actor_user_id   TEXT,
+    actor_kind      TEXT NOT NULL DEFAULT 'user',             -- user | api_token | import | mesh | system | baseline | restore
+    actor_label     TEXT,
+    summary         TEXT NOT NULL DEFAULT '',
+    state           TEXT NOT NULL,                            -- JSON, immutable
+    state_hash      TEXT NOT NULL,
+    file_ref        TEXT,                                     -- content: retained bytes, relative to the content dir
+    thumb_ref       TEXT,
+    parent_id       TEXT,
+    submission_id   TEXT,
+    published_at    INTEGER,
+    published_by    TEXT,
+    is_baseline     INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(resource_type, resource_id, rev_no)
+);
+CREATE INDEX IF NOT EXISTS idx_revisions_resource ON revisions(resource_type, resource_id, rev_no);
+CREATE INDEX IF NOT EXISTS idx_revisions_workspace ON revisions(workspace_id, created_at);
+
+CREATE TABLE IF NOT EXISTS submissions (
+    id              TEXT PRIMARY KEY,
+    workspace_id    TEXT NOT NULL,
+    resource_type   TEXT NOT NULL,
+    resource_id     TEXT NOT NULL,
+    revision_id     TEXT NOT NULL REFERENCES revisions(id),
+    state_hash      TEXT NOT NULL,
+    deps            TEXT NOT NULL DEFAULT '{}',               -- JSON: referenced asset revs at submission
+    note            TEXT,
+    submitted_by    TEXT,
+    submitted_at    INTEGER NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'submitted',        -- submitted | changes_requested | approved | withdrawn | superseded | published | cancelled
+    reviewer_id     TEXT,
+    decided_at      INTEGER,
+    comment         TEXT,
+    published_at    INTEGER,
+    published_by    TEXT,
+    version         INTEGER NOT NULL DEFAULT 1,               -- optimistic concurrency for reviews
+    updated_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_submissions_queue ON submissions(workspace_id, status, submitted_at);
+CREATE INDEX IF NOT EXISTS idx_submissions_resource ON submissions(resource_type, resource_id, status);
+
+CREATE TABLE IF NOT EXISTS workspace_reviewers (
+    workspace_id    TEXT NOT NULL,
+    user_id         TEXT NOT NULL,
+    added_by        TEXT,
+    created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (workspace_id, user_id)
+);

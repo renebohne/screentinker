@@ -523,6 +523,10 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
       stats.schedules++;
     }
 
+    // Version history: the imported rows get their first revision, attributed to the import, from
+    // the state that was just written (items and zones included, since this runs after them).
+    try { require('../lib/revisions').recordMissingIn(db, workspaceId, { userId, kind: 'import', label: 'workspace import' }, 'Imported'); } catch (e) { console.warn('[import] revisions:', e.message); }
+
     // Import video walls
     for (const w of (data.video_walls || [])) {
       const newId = uuid.v4();

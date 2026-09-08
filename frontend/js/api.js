@@ -583,6 +583,24 @@ export const api = {
   publishPlaylist: (id) => request(`/playlists/${id}/publish`, { method: 'POST' }),
   discardPlaylistDraft: (id) => request(`/playlists/${id}/discard`, { method: 'POST' }),
 
+  // Content approval (optional per workspace) and version history. See docs/approvals-and-history.md.
+  getApprovalSettings: () => request('/approvals/settings'),
+  updateApprovalSettings: (data) => request('/approvals/settings', { method: 'PUT', body: JSON.stringify(data) }),
+  getReviewQueue: (status = 'open') => request(`/approvals/queue?status=${encodeURIComponent(status)}`),
+  getMySubmissions: (status = 'open') => request(`/approvals/mine?status=${encodeURIComponent(status)}`),
+  getSubmission: (id) => request(`/approvals/${id}`),
+  submitForReview: (resource_type, resource_id, note) => request('/approvals/submit', { method: 'POST', body: JSON.stringify({ resource_type, resource_id, note }) }),
+  withdrawSubmission: (id) => request(`/approvals/${id}/withdraw`, { method: 'POST' }),
+  approveSubmission: (id, comment, version) => request(`/approvals/${id}/approve`, { method: 'POST', body: JSON.stringify({ comment, version }) }),
+  requestChanges: (id, comment, version) => request(`/approvals/${id}/request-changes`, { method: 'POST', body: JSON.stringify({ comment, version }) }),
+  publishSubmission: (id) => request(`/approvals/${id}/publish`, { method: 'POST' }),
+  getHistory: (type, id) => request(`/revisions/${type}/${id}`),
+  getRevision: (type, id, rev) => request(`/revisions/${type}/${id}/${rev}`),
+  diffRevision: (type, id, rev, against) => request(`/revisions/${type}/${id}/${rev}/diff${against ? `?against=${encodeURIComponent(against)}` : ''}`),
+  restoreRevision: (type, id, rev) => request(`/revisions/${type}/${id}/${rev}/restore`, { method: 'POST' }),
+  publishDraft: (type, id) => request(`/revisions/${type}/${id}/publish-draft`, { method: 'POST' }),
+  discardDraft: (type, id) => request(`/revisions/${type}/${id}/discard-draft`, { method: 'POST' }),
+
   // Device Groups - Playlist
   groupAssignPlaylist: (groupId, playlist_id) => request(`/groups/${groupId}/assign-playlist`, { method: 'POST', body: JSON.stringify({ playlist_id }) }),
 
@@ -732,3 +750,18 @@ export const api = {
     method: 'DELETE'
   }),
 };
+
+
+// Raw, authenticated fetches for history previews: a widget revision rendered as HTML (for an
+// srcdoc iframe) and a content revision's retained bytes (for an object URL). Both need the
+// bearer header, which an <img src> or <iframe src> cannot carry.
+export async function fetchRevisionRender(type, id, rev) {
+  const r = await fetch(`${API_BASE}/revisions/${type}/${id}/${rev}/render`, { headers: getAuthHeaders() });
+  if (!r.ok) throw new Error('Preview unavailable');
+  return r.text();
+}
+export async function fetchRevisionFileUrl(type, id, rev, thumb = false) {
+  const r = await fetch(`${API_BASE}/revisions/${type}/${id}/${rev}/file${thumb ? '?thumb=1' : ''}`, { headers: getAuthHeaders() });
+  if (!r.ok) throw new Error('The media for this revision is no longer retained');
+  return URL.createObjectURL(await r.blob());
+}

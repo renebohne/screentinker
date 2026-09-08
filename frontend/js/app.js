@@ -10,6 +10,7 @@ import * as schedule from './views/schedule.js';
 import * as widgets from './views/widgets.js';
 import * as slides from './views/slides.js';
 import * as dataSources from './views/data-sources.js';
+import * as reviews from './views/reviews.js';
 import * as videoWall from './views/video-wall.js';
 import * as reports from './views/reports.js';
 import * as servers from './views/servers.js';
@@ -221,6 +222,7 @@ const NAV_LABEL_KEYS = {
   widgets: 'nav.widgets',
   slides: 'nav.slides',
   'data-sources': 'nav.data_sources',
+  reviews: 'nav.reviews',
   schedule: 'nav.schedule',
   walls: 'nav.walls',
   reports: 'nav.reports',
@@ -581,6 +583,9 @@ function route() {
   } else if (hash === '#/data-sources' || hash.startsWith('#/data-sources/')) {
     currentView = dataSources;
     dataSources.render(app);
+  } else if (hash === '#/reviews') {
+    currentView = reviews;
+    reviews.render(app);
   } else if (hash === '#/widgets') {
     currentView = widgets;
     widgets.render(app);
@@ -805,6 +810,21 @@ function updateWidgetSandboxWarningBanner(user) {
   b.appendChild(link);
   bannersEl.appendChild(b);
 }
+
+// Reviews nav badge: how many submissions are waiting on the signed-in user. Silent when approval
+// is off for the workspace (the endpoint returns an empty queue), so nothing lights up unasked.
+async function refreshReviewsBadge() {
+  const badge = document.getElementById('reviewsNavBadge');
+  if (!badge || !isAuthenticated()) return;
+  try {
+    const s = await api.getApprovalSettings();
+    const n = s && s.require_approval ? Number(s.pending_submissions || 0) : 0;
+    badge.textContent = String(n);
+    badge.style.display = n > 0 ? '' : 'none';
+  } catch { badge.style.display = 'none'; }
+}
+window.addEventListener('hashchange', () => { if (location.hash === '#/reviews' || location.hash === '#/members') refreshReviewsBadge(); });
+setTimeout(refreshReviewsBadge, 1500);
 
 // Initialize
 renderNavLabels();

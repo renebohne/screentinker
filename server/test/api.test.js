@@ -207,6 +207,8 @@ test('partition: the public token surface is exactly the reviewed set (snapshot 
      *     promise siblings on this door already make.
      */
     '/api/data-sources',
+    '/api/approvals',
+    '/api/revisions',
   ].sort();
   assert.deepEqual(PUBLIC_ROUTERS.map(r => r.path).sort(), EXPECTED_PUBLIC);
 });

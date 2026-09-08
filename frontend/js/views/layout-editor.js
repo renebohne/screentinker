@@ -2,6 +2,7 @@ import { api, assertLocalCallAllowed } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { t, tn } from '../i18n.js';
 import { esc } from '../utils.js';
+import { renderApprovalBar } from '../components/approval-actions.js';
 
 // A refused request must reject, not resolve.
 //
@@ -158,6 +159,7 @@ async function renderEditor(container, layoutId) {
         <button class="btn btn-primary btn-sm" id="saveLayoutBtn">${t('common.save')}</button>
       </div>
     </div>
+    <div id="layoutApprovalBar" style="margin:-8px 0 12px"></div>
     <div style="display:flex;gap:20px">
       <div style="flex:1">
         <div id="canvasWrap" style="position:relative;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden">
@@ -360,7 +362,8 @@ async function renderEditor(container, layoutId) {
       layout = updated;
       zones = layout.zones || [];
       selectedZone = null;
-      showToast(t('layout.toast.saved'), 'success');
+      showToast(updated.pending_review ? t('review.toast.saved_as_draft') : t('layout.toast.saved'), 'success');
+      renderApprovalBar(document.getElementById('layoutApprovalBar'), { type: 'layout', id: layoutId, name: layout.name, onChanged: () => renderEditor(container, layoutId) });
       renderZones();
       updateProperties();
     } catch (err) {
@@ -369,6 +372,7 @@ async function renderEditor(container, layoutId) {
   };
 
   renderZones();
+  renderApprovalBar(document.getElementById('layoutApprovalBar'), { type: 'layout', id: layoutId, name: layout.name, onChanged: () => renderEditor(container, layoutId) });
 }
 
 export function cleanup() {}

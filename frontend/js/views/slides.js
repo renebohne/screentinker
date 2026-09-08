@@ -2,6 +2,7 @@ import { api } from '../api.js';
 import { esc } from '../utils.js';
 import { showToast } from '../components/toast.js';
 import { t } from '../i18n.js';
+import { renderApprovalBar } from '../components/approval-actions.js';
 
 /*
  * The slide deck editor.
@@ -532,6 +533,7 @@ function renderEditor(container) {
       </div>
     </div>
     <div id="warnBox"></div>
+    <div id="deckApprovalBar" style="margin:0 0 10px"></div>
     <div class="settings-section" style="padding:10px 12px;margin-bottom:12px">
       <div id="strip" style="display:flex;gap:8px;overflow-x:auto"></div>
     </div>
@@ -651,6 +653,10 @@ function renderEditor(container) {
     window.open(`/player?preview=1&playlist=${encodeURIComponent(d.playlist_id)}`, '_blank', 'noopener');
   });
   container.querySelector('#pubBtn').addEventListener('click', () => publish(container));
+  renderApprovalBar(container.querySelector('#deckApprovalBar'), {
+    type: 'slide_deck', id: state.deck.id, name: state.deck.name,
+    onChanged: async () => { try { state.deck = await api.get(`/slide-decks/${state.deck.id}`); state.dirty = false; paintAll(container); } catch {} },
+  });
   container.querySelector('#playBtn').addEventListener('click', play);
   container.querySelector('#aspectSel').addEventListener('change', (e) => {
     state.deck.doc.aspect = e.target.value;

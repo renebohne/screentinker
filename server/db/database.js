@@ -1492,6 +1492,11 @@ const migrations = [
    * This column is written only by publish, so it is the server's own record of what it created,
    * and diffing against it is both correct and unforgeable. */
   'ALTER TABLE slide_decks ADD COLUMN published_widget_ids TEXT NOT NULL DEFAULT \'[]\'',
+  // Content approval + version history (lib/release-policy.js, lib/revisions.js). Off by default
+  // for every workspace, existing and new; a draft column is NULL until a draft exists.
+  'ALTER TABLE widgets ADD COLUMN draft_config TEXT',
+  'ALTER TABLE layouts ADD COLUMN draft_zones TEXT',
+  'ALTER TABLE content ADD COLUMN draft_json TEXT',
 
   /* Fonts an operator uploaded, to set slides in a brand face the bundled five do not cover.
    *
@@ -2439,6 +2444,28 @@ function pruneScreenshots(deviceId) {
 // stays an idempotent no-op; tiebreak by earliest rowid. One-time; the atomic
 // id-preserving save prevents recurrence.
 try {
+  /*
+   * Version history baseline. Every existing content row, playlist, layout, slide deck and
+   * widget gets revision #1 from its CURRENT state, stamped with the row's own updated_at and no
+   * author: the upgrade did not save anything, so it invents neither a person nor a moment.
+   * Later saves build on this so "what changed since" has an answer from day one. One-shot, so a
+   * baseline is never re-taken over real history.
+   */
+  // workspaces is created by the multitenancy phase, after the migrations array above has run,
+  // so its column is added here where the table exists. Idempotent: a duplicate column throws.
+  try { db.prepare('ALTER TABLE workspaces ADD COLUMN require_approval INTEGER NOT NULL DEFAULT 0').run(); console.log('[migrate] workspaces.require_approval added (default off)'); } catch (_) { /* present */ }
+
+  const BASELINE_ID = 'revisions_baseline_v1';
+  if (!db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(BASELINE_ID)) {
+    try {
+      const n = require('../lib/revisions').baselineAll(db);
+      if (n > 0) console.log(`[migrate] version history: ${n} baseline revision(s) recorded`);
+    } catch (e) {
+      console.warn('[migrate] version history baseline skipped:', e && e.message);
+    }
+    db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(BASELINE_ID);
+  }
+
   const DEDUPE_ID = 'dedupe_template_zones_v1';
   if (!db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(DEDUPE_ID)) {
     const removed = db.prepare(`

@@ -3,6 +3,8 @@ import * as gettingStarted from '../components/getting-started.js';
 import { showToast } from '../components/toast.js';
 import { esc, hydrateAuthImages } from '../utils.js';
 import { t } from '../i18n.js';
+import { openHistoryModal } from '../components/history-modal.js';
+import { renderApprovalBar } from '../components/approval-actions.js';
 
 /* The mime lib/html-bundle.js stamps on an uploaded HTML bundle. Kept as a constant rather than
  * spelled out at each site: it is compared in three places here, and a typo in one of them is a
@@ -513,6 +515,7 @@ async function loadContent() {
             : (exp.dateLabel ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('content.expires_label', { date: exp.dateLabel })}</div>` : '')}
         </div>
         <div class="content-item-actions">
+          <button class="btn btn-secondary btn-sm" data-history-content="${c.id}" title="${t('history.button')}">${t('history.button')}</button>
           <button class="btn btn-secondary btn-sm" data-edit-content="${c.id}" title="${t('content.btn_edit')}">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
@@ -567,6 +570,12 @@ async function loadContent() {
 
     // Delete handler via event delegation
     grid.onclick = async (e) => {
+      const histBtn = e.target.closest('[data-history-content]');
+      if (histBtn) {
+        const c = content.find(x => x.id === histBtn.dataset.historyContent);
+        openHistoryModal('content', histBtn.dataset.historyContent, { name: c?.name || c?.filename, onChanged: () => loadContent() });
+        return;
+      }
       // #213: ignore clicks originating on a selection checkbox (handled above).
       if (e.target.closest('.content-select-wrap')) return;
       // Preview on click (not on delete button)

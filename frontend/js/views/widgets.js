@@ -1,6 +1,8 @@
 import { api, assertLocalCallAllowed } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { t } from '../i18n.js';
+import { openHistoryModal } from '../components/history-modal.js';
+import { renderApprovalBar } from '../components/approval-actions.js';
 
 /*
  * Real IANA zones for the clock widget's picker (#316). Intl.supportedValuesOf is the browser's own
@@ -1169,13 +1171,14 @@ export async function render(container) {
     const name = document.getElementById('wName').value;
     const config = getConfigFromForm(type);
     try {
+      let saved;
       if (editingWidget) {
-        await API(`/widgets/${editingWidget.id}`, { method: 'PUT', body: JSON.stringify({ name, config }) });
+        saved = await API(`/widgets/${editingWidget.id}`, { method: 'PUT', body: JSON.stringify({ name, config }) });
       } else {
-        await API('/widgets', { method: 'POST', body: JSON.stringify({ widget_type: type, name, config }) });
+        saved = await API('/widgets', { method: 'POST', body: JSON.stringify({ widget_type: type, name, config }) });
       }
       document.getElementById('widgetModal').style.display = 'none';
-      showToast(t('widget.toast.saved'), 'success');
+      showToast(saved && saved.pending_review ? t('review.toast.saved_as_draft') : t('widget.toast.saved'), 'success');
       loadWidgets();
     } catch (err) { showToast(err.message, 'error'); }
   };
@@ -1218,13 +1221,31 @@ export async function render(container) {
           </div>
           <div class="content-item-actions">
             <button class="btn btn-secondary btn-sm" data-edit-widget="${escAttr(w.id)}">${t('common.edit')}</button>
+            <button class="btn btn-secondary btn-sm" data-history-widget="${escAttr(w.id)}" title="${t('history.button')}">${t('history.button')}</button>
             <button class="btn btn-danger btn-sm" data-delete-widget="${escAttr(w.id)}">${t('common.delete')}</button>
           </div>
+          <div data-approval-widget="${escAttr(w.id)}" style="padding:0 12px 10px"></div>
         </div>
       `;
     }).join('');
 
+    // Draft / review state per card. Only widgets with a pending draft or open submission render
+    // anything beyond History, so the grid stays quiet when approval is off.
+    for (const w of widgets) {
+      const host = grid.querySelector(`[data-approval-widget="${CSS.escape(w.id)}"]`);
+      if (host) renderApprovalBar(host, { type: 'widget', id: w.id, name: w.name, onChanged: () => loadWidgets() }).then(() => {
+        // Hide the History button the bar renders; the card already has one.
+        const hb = host.querySelector('[data-history]'); if (hb) hb.remove();
+        if (!host.textContent.trim()) host.style.display = 'none';
+      });
+    }
     grid.onclick = async (e) => {
+      const histBtn = e.target.closest('[data-history-widget]');
+      if (histBtn) {
+        const w = widgets.find(x => x.id === histBtn.dataset.historyWidget);
+        openHistoryModal('widget', histBtn.dataset.historyWidget, { name: w?.name, onChanged: () => loadWidgets() });
+        return;
+      }
       const editBtn = e.target.closest('[data-edit-widget]');
       if (editBtn) {
         const w = widgets.find(x => x.id === editBtn.dataset.editWidget);

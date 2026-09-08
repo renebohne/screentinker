@@ -4,6 +4,7 @@ import { showToast } from '../components/toast.js';
 import { esc, hydrateAuthImages } from '../utils.js';
 import { t, tn } from '../i18n.js';
 import { frameDeviceOutput, displayAspectRatio } from '../lib/device-frame.js';
+import { renderApprovalBar } from '../components/approval-actions.js';
 
 function formatDate(ts) {
   if (!ts) return '--';
@@ -442,6 +443,7 @@ function renderDetailContent(container, playlist) {
         <button class="btn btn-secondary" id="deletePlaylistBtn" style="color:var(--danger)">${t('playlist.delete_playlist')}</button>
       </div>
     </div>
+    <div id="playlistApprovalBar" style="margin:-8px 0 12px"></div>
 
     <!-- Step 3 sends you here by creating a playlist, and this is where you fill it. Losing the
          checklist at exactly this hop is what made the flow feel like it ended. -->
@@ -470,6 +472,10 @@ function renderDetailContent(container, playlist) {
 
   renderItems(playlist.items || []);
 
+  renderApprovalBar(document.getElementById('playlistApprovalBar'), {
+    type: 'playlist', id: playlist.id, name: playlist.name,
+    onChanged: async () => { try { renderDetailContent(container, await api.getPlaylist(playlist.id)); } catch {} },
+  });
   const publishBtn = document.getElementById('publishBtn');
   if (publishBtn) {
     publishBtn.addEventListener('click', async () => {

@@ -163,6 +163,7 @@ router.post('/', (req, res) => {
   db.prepare('INSERT INTO widgets (id, user_id, workspace_id, widget_type, name, config) VALUES (?, ?, ?, ?, ?, ?)')
     .run(id, req.user.id, req.workspaceId, widget_type, name, JSON.stringify(config || {}));
 
+  require('../lib/revisions').recordCurrent(db, 'widget', id, { actor: require('../lib/releases').actorOf(req), summary: 'Created' });
   res.status(201).json(db.prepare('SELECT * FROM widgets WHERE id = ?').get(id));
 });
 
@@ -224,8 +225,26 @@ router.put('/:id', (req, res) => {
   const { name, config } = req.body;
   const tzErr = validateTimezone(config);
   if (tzErr) return res.status(400).json({ error: tzErr });
+
+  /*
+   * Approval on: the edit becomes a DRAFT. Players keep rendering `config` (their rev is
+   * updated_at, which does not move), the editor shows the draft, and the draft goes live only
+   * through a reviewed submission (lib/releases.js releaseWidgetDraft). Approval off: in place,
+   * exactly as before, plus a revision so history knows what was saved.
+   */
+  const policy = require('../lib/release-policy');
+  const revisions = require('../lib/revisions');
+  const actor = require('../lib/releases').actorOf(req);
+  if (widget.workspace_id && policy.approvalRequired(db, widget.workspace_id)) {
+    const current = revisions.parseJson(widget.draft_config, null) || { name: widget.name, config: JSON.parse(widget.config || '{}') };
+    const draft = { name: name || current.name, config: config || current.config };
+    db.prepare('UPDATE widgets SET draft_config = ? WHERE id = ?').run(JSON.stringify(draft), req.params.id);
+    revisions.recordCurrent(db, 'widget', req.params.id, { actor, summary: 'Saved draft' });
+    return res.json({ ...db.prepare('SELECT * FROM widgets WHERE id = ?').get(req.params.id), draft: true, pending_review: true });
+  }
   if (name) db.prepare('UPDATE widgets SET name = ?, updated_at = strftime(\'%s\',\'now\') WHERE id = ?').run(name, req.params.id);
   if (config) db.prepare('UPDATE widgets SET config = ?, updated_at = strftime(\'%s\',\'now\') WHERE id = ?').run(JSON.stringify(config), req.params.id);
+  revisions.recordCurrent(db, 'widget', req.params.id, { actor, summary: 'Saved' });
 
   // Push the change to any display currently showing this widget. Editing a widget used to
   // notify nothing at all: the render endpoint serves live config, but a player that already has

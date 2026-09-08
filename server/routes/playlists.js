@@ -492,6 +492,7 @@ router.put('/:id', requirePlaylistWrite, (req, res) => {
     updates.push("updated_at = strftime('%s','now')");
     values.push(req.params.id);
     db.prepare(`UPDATE playlists SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    require('../lib/revisions').recordCurrent(db, 'playlist', req.params.id, { actor: require('../lib/releases').actorOf(req), summary: 'Renamed' });
   }
   res.json(db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id));
 });
@@ -509,7 +510,14 @@ router.post('/:id/publish', requirePlaylistWrite, (req, res) => {
   }
   // Snapshot shape (no pi.id) is intentional — published_snapshot is consumed
   // by devices and stored as JSON; row IDs there would be misleading.
-  publishPlaylist(req.params.id, req);
+  // The release gate: with approval off this is the old direct publish; with approval on it
+  // demands an approval for exactly this state (lib/release-policy.js).
+  try {
+    require('../lib/releases').releasePlaylist(db, req.params.id, req, { actor: require('../lib/releases').actorOf(req) });
+  } catch (e) {
+    if (e && e.name === 'ReleaseError') return res.status(e.status || 409).json({ error: e.message, code: e.code });
+    throw e;
+  }
   // UI response shape must include pi.id so the post-publish render can wire
   // per-row delete/duration listeners. TODO: refactor to share this SELECT
   // with GET /:id (also duplicated in /discard and POST /:id/items/reorder).
@@ -583,6 +591,7 @@ router.post('/:id/discard', requirePlaylistWrite, (req, res) => {
     db.prepare("UPDATE playlists SET status = 'published', updated_at = strftime('%s','now') WHERE id = ?").run(req.params.id);
   });
   transaction();
+  require('../lib/revisions').recordCurrent(db, 'playlist', req.params.id, { actor: require('../lib/releases').actorOf(req), summary: 'Draft discarded' });
 
   const items = db.prepare(`
     SELECT pi.*,

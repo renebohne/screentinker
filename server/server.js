@@ -1417,6 +1417,7 @@ const wgtCache = require('./lib/wgt-cache');
 const ipkCache = require('./lib/ipk-cache');
 wgtCache.start();                                    // Tizen SSSP URL-Launcher: resolve .wgt path/size/mtime once + refresh on interval
 ipkCache.start();                                    // LG webOS Signage: same for the .ipk
+require('./lib/revision-retention').start(require('./db/database').db);   // version history: bounded retention, daily
 const { getBand } = require('./services/loop-lag');  // #146 Item C: critical-band download shed
 app.get('/api/update/check', (req, res) => {
   const currentVersion = req.query.version;

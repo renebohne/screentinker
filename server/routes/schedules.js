@@ -330,7 +330,15 @@ router.post('/', (req, res) => {
     // Publish through the shared path rather than hand-rolling the snapshot: players read
     // denormalized fields (filename, mime_type, filepath, remote_url, schedules...) out of
     // published_snapshot, and duplicating that shape here would rot the moment it changes.
-    require('./playlists').publishPlaylist(genId);
+    try {
+      require('../lib/releases').releasePlaylist(db, genId, req, { actor: require('../lib/releases').actorOf(req), source: 'schedule' });
+    } catch (e) {
+      if (!e || e.name !== 'ReleaseError') throw e;
+      // The workspace requires review: the generated playlist waits in the queue as a draft and
+      // the schedule shows nothing until a reviewer approves and someone publishes it.
+      db.prepare("UPDATE playlists SET status = 'draft' WHERE id = ?").run(genId);
+      require('../lib/approvals').submit(db, { type: 'playlist', id: genId, workspaceId: targetWorkspaceId, actor: require('../lib/releases').actorOf(req), note: 'Scheduled content item', ip: req.ip });
+    }
     effectivePlaylistId = genId;
   }
 
