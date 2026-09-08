@@ -5445,7 +5445,9 @@
       }
       video.muted = true;                               // warm-play MUST be muted (autoplay policy); real mute set at mount
       video.loop = (playlist.length === 1);             // single-item playlist holds by looping
-      video.style.cssText = 'width:100%;height:100%;object-fit:contain;background:#000';
+      // #336: transparent, not #000 — with object-fit:contain the element paints its own letterbox,
+      // and an opaque black here sat on top of the device background colour (#325) for every video.
+      video.style.cssText = 'width:100%;height:100%;object-fit:contain;background:transparent';
       let done = false, watchdog = null;
       // Full teardown + append + resume. The incoming <video> is detached until now, so teardown's
       // container-wide video cleanup can't touch it; we claim currentVideoEl only AFTER teardown (which
@@ -5680,7 +5682,7 @@
           // height. Solo (non-wall) keeps contain to preserve aspect.
           video.style.cssText = wallConfig
             ? 'width:100%;height:100%;object-fit:fill;background:#000'
-            : 'width:100%;height:100%;object-fit:contain;background:#000';
+            : 'width:100%;height:100%;object-fit:contain;background:transparent';   // #336: letterbox shows the device colour
           // Group members loop so a clip shorter than its schedule slot holds until the schedule
           // advances the index (and the tick seeks position % duration to stay aligned).
           video.loop = (playlist.length === 1) || !!groupSync;
@@ -5726,7 +5728,7 @@
         } else if (item.widget_id) {
           const iframe = document.createElement('iframe');
           iframe.src = `${serverUrl}/api/widgets/${item.widget_id}/render?device=${encodeURIComponent(config.deviceId||'')}&rev=${item.widget_rev||0}`;
-          iframe.style.cssText = 'width:100%;height:100%;border:none;background:#000';
+          iframe.style.cssText = 'width:100%;height:100%;border:none;background:transparent';   // #336: a widget paints its own background
           iframe.allow = 'autoplay; fullscreen';
           // Sandbox into a unique origin so widget scripts can't read window.parent
           // state (localStorage / JWT). allow-scripts keeps inline widget code running.

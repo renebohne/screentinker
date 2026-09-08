@@ -87,3 +87,44 @@ test('#325: it travels in the socket payload like orientation does', () => {
   assert.match(ds, /background_color: background_color \|\| null/, 'included in the assembled payload');
   assert.match(ds, /background_color: device\?\.background_color \|\| null/, 'read from the device row');
 });
+
+/*
+ * #336: "The background color is not working." Saved fine, showed red in the dashboard, screen
+ * stayed black through a client and a server reboot. The SELECT that feeds assemblePayload is an
+ * explicit column list and background_color was never in it, so the payload carried null on every
+ * push and the player kept its default. The test above matched the JavaScript text
+ * `device?.background_color || null` and passed the whole time. This one runs the actual query.
+ */
+test('#336: the device query that feeds the payload actually selects background_color', () => {
+  const ds = fs.readFileSync(path.join(__dirname, '..', 'ws', 'deviceSocket.js'), 'utf8');
+  const m = ds.match(/const device = db\.prepare\(`(SELECT r\.playlist_id AS playlist_id[\s\S]*?WHERE d\.id = \?)`\)\.get\(deviceId\);/);
+  assert.ok(m, 'the device SELECT in buildPlaylistPayload was not found -- did it restructure?');
+  const sql = m[1];
+
+  const mem = new Database(':memory:');
+  mem.exec(`
+    CREATE TABLE devices (
+      id TEXT PRIMARY KEY, orientation TEXT, background_color TEXT, wall_id TEXT, timezone TEXT,
+      reported_timezone TEXT, triggers_accept_http INTEGER, triggers_accept_udp INTEGER,
+      trigger_secret TEXT, trigger_http_port INTEGER, trigger_udp_port INTEGER,
+      trigger_multicast_group TEXT, trigger_clear_all_token TEXT, playlist_id TEXT, layout_id TEXT
+    );
+    CREATE VIEW device_resolved_playlist AS
+      SELECT id AS device_id, playlist_id, 'device' AS source, layout_id FROM devices;
+    INSERT INTO devices (id, orientation, background_color) VALUES ('d1', 'landscape', '#ff0000');
+    INSERT INTO devices (id, orientation, background_color) VALUES ('d2', 'landscape', NULL);
+  `);
+  const red = mem.prepare(sql).get('d1');
+  const unset = mem.prepare(sql).get('d2');
+  mem.close();
+  assert.equal(red.background_color, '#ff0000', 'a saved colour must come out of the query the payload is built from');
+  assert.equal(unset.background_color, null, 'and an unset one stays null, which the player treats as its default');
+});
+
+test('#336: the fullscreen video and widget surfaces no longer paint their own black over it', () => {
+  const player = fs.readFileSync(path.join(__dirname, '..', 'player', 'index.html'), 'utf8');
+  // object-fit:contain letterboxes inside the element, so an opaque element background hides the
+  // stage colour for every video that does not fill the frame. Wall tiles keep fill+black.
+  assert.doesNotMatch(player, /object-fit:contain;background:#000/, 'a contain-fitted video must not carry an opaque black');
+  assert.doesNotMatch(player, /border:none;background:#000'/, 'the widget iframe must not carry an opaque black');
+});

@@ -477,8 +477,17 @@ function buildPlaylistPayload(deviceId) {
    * directly here would show a screen whatever the last writer happened to leave behind — which is
    * the bug this replaced. See lib/resolve-device-playlist.js.
    */
+  /*
+   * ⚠️ #336: EVERY COLUMN assemblePayload READS OFF `device` MUST BE SELECTED HERE. This is an
+   * explicit column list, not `d.*`, and background_color (#325) was never added to it — so
+   * `device?.background_color` below was undefined on every payload, the player took its
+   * "absent value leaves the stylesheet's black" branch, and a screen whose dashboard showed a
+   * red swatch stayed black through two reboots. The test that "proved" the field travelled
+   * matched the JavaScript text, not the SQL; device-background-colour.test.js now runs this
+   * query.
+   */
   const device = db.prepare(`SELECT r.playlist_id AS playlist_id, r.source AS playlist_source,
-      r.layout_id AS layout_id, d.orientation, d.wall_id, d.timezone, d.reported_timezone,
+      r.layout_id AS layout_id, d.orientation, d.background_color, d.wall_id, d.timezone, d.reported_timezone,
       d.triggers_accept_http, d.triggers_accept_udp, d.trigger_secret, d.trigger_http_port,
       d.trigger_udp_port, d.trigger_multicast_group, d.trigger_clear_all_token
       FROM devices d JOIN device_resolved_playlist r ON r.device_id = d.id
