@@ -130,6 +130,26 @@ test('settings: only a workspace admin may change them, and a reviewer is requir
   assert.equal(db.prepare('SELECT require_approval FROM workspaces WHERE id = ?').get(WS2).require_approval, 0, 'the other workspace is untouched');
 });
 
+test('a lone admin cannot enable approval and lock the workspace out of publishing', async () => {
+  /*
+   * WS2 has exactly one member. Assigning themselves as the reviewer satisfies "at least one
+   * reviewer", which used to be the whole gate - and approval then wedged the workspace forever,
+   * because every submission is authored by the only person who could approve it.
+   */
+  const self = await call('PUT', '/api/approvals/settings', 'other', { reviewers: [users.other] }, WS2);
+  assert.equal(self.status, 200, 'assigning yourself as a reviewer is allowed');
+  assert.equal(self.json.can_enable, false, 'but it does not unlock the toggle');
+  assert.ok(self.json.enable_blockers.includes('single_user'));
+
+  const on = await call('PUT', '/api/approvals/settings', 'other', { require_approval: true }, WS2);
+  assert.equal(on.status, 400); assert.equal(on.json.code, 'single_user');
+  assert.equal(db.prepare('SELECT require_approval FROM workspaces WHERE id = ?').get(WS2).require_approval, 0);
+
+  // And the other workspace, which has five members, is unaffected by the stricter gate.
+  const s = await call('GET', '/api/approvals/settings', 'admin');
+  assert.ok(s.json.eligible.length >= 2);
+});
+
 test('enabling approval changes nothing on screens: the published playlist stays published', () => {
   const p = plRow();
   assert.equal(p.status, 'published'); assert.ok(p.published_snapshot);
@@ -159,6 +179,31 @@ test('approval on: publish is refused on the server, edits become drafts, the ot
 
   const other = await call('POST', `/api/playlists/${PL2}/publish`, 'other', null, WS2);
   assert.equal(other.status, 200, 'the workspace without approval publishes directly');
+});
+
+test('the editor is shown its own draft, not the live version it would overwrite', async () => {
+  /*
+   * Both editors assign the API response straight onto their canvas/form. When those responses
+   * carried the LIVE record, the author's saved-but-unreviewed work appeared to vanish and the
+   * next save posted the stale state back over the draft.
+   */
+  const put = await call('PUT', `/api/layouts/${LID}`, 'alice', { name: 'Lobby draft', zones: [{ id: 'z-appr-1', name: 'Main', width_percent: 25, height_percent: 100 }] });
+  assert.equal(put.status, 200); assert.equal(put.json.draft, true);
+  assert.equal(put.json.zones[0].width_percent, 25, 'PUT echoes the draft it just saved');
+  assert.equal(put.json.name, 'Lobby draft');
+
+  const got = await call('GET', `/api/layouts/${LID}`, 'alice');
+  assert.equal(got.json.zones[0].width_percent, 50, 'zones stays LIVE - renderers read this route');
+  assert.equal(got.json.draft.zones[0].width_percent, 25, 'and the draft is offered alongside it');
+  assert.equal(got.json.draft.name, 'Lobby draft');
+
+  // Widgets carry theirs on the row itself; the dashboard reads draft_config when present.
+  // Keep api_key in the payload: later tests assert this widget's newest revision redacts it.
+  const w = await call('PUT', `/api/widgets/${WID}`, 'alice', { name: 'Welcome v4', config: { text: 'Hello v4', api_key: 'sk-secret-123' } });
+  assert.equal(w.json.pending_review, true);
+  const row = db.prepare('SELECT config, draft_config FROM widgets WHERE id = ?').get(WID);
+  assert.equal(JSON.parse(row.draft_config).config.text, 'Hello v4');
+  assert.notEqual(JSON.parse(row.config).text, 'Hello v4', 'live config untouched');
 });
 
 const CURL = 'c-appr-url';

@@ -79,6 +79,11 @@ router.get('/:id', (req, res) => {
   if (!layout) return;
 
   layout.zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(layout.id);
+  // `zones` stays the LIVE set - renderers and assignments read this route too. A pending draft is
+  // offered alongside it so the editor can open on the author's unpublished work instead of
+  // showing them the live layout and quietly discarding the draft on their next save.
+  const pending = require('../lib/revisions').parseJson(layout.draft_zones, null);
+  if (pending) layout.draft = pending;
   res.json(layout);
 });
 
@@ -159,9 +164,16 @@ router.put('/:id', (req, res) => {
     };
     db.prepare('UPDATE layouts SET draft_zones = ? WHERE id = ?').run(JSON.stringify(draft), req.params.id);
     revisions.recordCurrent(db, 'layout', req.params.id, { actor, summary: 'Saved draft' });
+    /*
+     * ⚠️ ECHO THE DRAFT BACK, NOT THE LIVE ZONES.
+     *
+     * The editor assigns the response straight onto its canvas. Returning the live rows made the
+     * zones visibly snap back to their pre-edit positions the instant the "saved as draft" toast
+     * appeared, and a second Save then serialised those reverted positions over the draft.
+     */
     const current = db.prepare('SELECT * FROM layouts WHERE id = ?').get(req.params.id);
-    current.zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(req.params.id);
-    return res.json({ ...current, draft: true, pending_review: true });
+    current.zones = draft.zones;
+    return res.json({ ...current, name: draft.name, width: draft.width, height: draft.height, draft: true, pending_review: true });
   }
 
   const txn = db.transaction(() => {

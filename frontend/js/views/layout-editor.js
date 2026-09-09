@@ -151,7 +151,7 @@ async function renderEditor(container, layoutId) {
       <!-- Editable in place. Duplicating a template names the copy "<template> (Copy)" and there
            was nowhere at all to change it — the only name field in this editor belongs to the
            selected ZONE, which is easy to mistake for the layout's own. Reported on #234. -->
-      <input id="layoutName" class="input" value="${esc(layout.name)}"
+      <input id="layoutName" class="input" value="${esc((layout.draft && layout.draft.name) || layout.name)}"
              aria-label="${t('layout.rename')}" title="${t('layout.rename')}"
              style="font-size:24px;font-weight:600;background:transparent;border:1px solid transparent;padding:2px 6px;max-width:420px">
       <div style="display:flex;gap:8px">
@@ -199,7 +199,10 @@ async function renderEditor(container, layoutId) {
     </div>
   `;
 
-  let zones = layout.zones || [];
+  // A pending draft (workspace approval on) is the author's unpublished work; the editor opens on
+  // it rather than on the live zones, which are what screens are still showing. GET /layouts/:id
+  // sends both - `zones` live, `draft` when one exists.
+  let zones = (layout.draft && Array.isArray(layout.draft.zones)) ? layout.draft.zones : (layout.zones || []);
   let selectedZone = null;
   let dragging = null;
 

@@ -62,7 +62,16 @@ function settings(db, workspaceId) {
   if (eligible.length < 2) reasons.push('single_user');
   if (activeReviewers.length === 0) reasons.push('no_reviewer');
   const pending = db.prepare(`SELECT COUNT(*) AS n FROM submissions WHERE workspace_id = ? AND status IN ('submitted','changes_requested','approved')`).get(workspaceId).n;
-  return { require_approval: !!ws.require_approval, reviewers: list, eligible, can_enable: activeReviewers.length > 0, enable_blockers: reasons, pending_submissions: pending };
+  /*
+   * ⚠️ BOTH blockers gate enabling, not just the reviewer one.
+   *
+   * A lone admin can tick themselves as the reviewer, which satisfies "at least one reviewer" and
+   * used to be enough. Approval then turns on and the workspace can never publish again: every
+   * submission is authored by the only person who could review it, decide() refuses it as
+   * self_approval, and assertReleasable refuses every release. The only way out is an admin
+   * turning the setting back off, which is not discoverable from the error.
+   */
+  return { require_approval: !!ws.require_approval, reviewers: list, eligible, can_enable: reasons.length === 0, enable_blockers: reasons, pending_submissions: pending };
 }
 
 function updateSettings(db, { workspaceId, requireApproval, reviewerIds, actor, ip }) {
@@ -92,8 +101,13 @@ function updateSettings(db, { workspaceId, requireApproval, reviewerIds, actor, 
     if (requireApproval !== undefined) {
       const want = requireApproval ? 1 : 0;
       if (want && !ws.require_approval) {
+        // Server-side twin of settings().can_enable. The dashboard disables the checkbox, but the
+        // API is the thing that has to hold: enabling on a single-member workspace is a lockout.
         const active = reviewers(db, workspaceId).filter((r) => r.eligible);
         if (active.length === 0) throw new ApprovalError('Assign at least one reviewer with edit or admin access before requiring approval', 400, 'no_reviewer');
+        if (eligible.size < 2) {
+          throw new ApprovalError('This workspace has only one member with edit or admin access, so nobody could review anyone else\'s work. Add a second editor or admin before requiring approval.', 400, 'single_user');
+        }
       }
       if (want !== ws.require_approval) {
         db.prepare('UPDATE workspaces SET require_approval = ? WHERE id = ?').run(want, workspaceId);

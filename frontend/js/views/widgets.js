@@ -1250,7 +1250,17 @@ export async function render(container) {
       if (editBtn) {
         const w = widgets.find(x => x.id === editBtn.dataset.editWidget);
         if (w) {
-          const config = JSON.parse(w.config || '{}');
+          /*
+           * ⚠️ THE DRAFT IS WHAT THE EDITOR MUST SHOW, when there is one.
+           *
+           * Under workspace approval a save does not touch `config`; the server parks it in
+           * `draft_config` as {name, config} and the live widget keeps playing. Reading `config`
+           * here reopened the editor on the LIVE version, so the author's saved-but-unreviewed
+           * work looked lost - and saving again posted the stale form back, silently overwriting
+           * the pending draft and any submission built on it.
+           */
+          const draft = w.draft_config ? (() => { try { return JSON.parse(w.draft_config); } catch { return null; } })() : null;
+          const config = draft ? (draft.config || {}) : JSON.parse(w.config || '{}');
           // Reopen designer-made widgets IN the designer for visual editing instead of the raw HTML form.
           // New designs carry a `design` source; legacy ones (HTML only) are detected by the designer's
           // signature output (every element is absolutely positioned) — the designer reconstructs their
@@ -1263,7 +1273,7 @@ export async function render(container) {
           }
           editingWidget = w;
           creatingType = w.widget_type;
-          config._name = w.name;
+          config._name = draft && draft.name ? draft.name : w.name;
           showConfigForm(w.widget_type, config);
         }
         return;
