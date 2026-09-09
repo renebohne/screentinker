@@ -105,6 +105,16 @@ function captureDeck(db, row) {
 
 const CONTENT_FIELDS = ['filename', 'mime_type', 'file_size', 'duration_sec', 'width', 'height', 'remote_url', 'subtitle_url',
   'subtitle_lang', 'expires_at', 'folder_id', 'bundle_entry', 'byte_digest', 'captions_enabled', 'captions_lang', 'unstable_connection'];
+/*
+ * The fields a content DRAFT can carry and a release applies, in one place so that what a restore
+ * writes into the draft and what publishing the draft copies to the live row cannot drift apart
+ * (they did: remote_url was captured, restored into the draft, and then ignored on release, so a
+ * "successful" restore left the new URL playing). Everything captured except folder_id, which
+ * organises the library rather than describing the item.
+ */
+const CONTENT_DRAFT_FIELDS = CONTENT_FIELDS.filter((k) => k !== 'folder_id');
+/* Of those, the ones that change what a screen shows. Under approval, edits to these are drafts. */
+const CONTENT_PLAYBACK_FIELDS = ['remote_url', 'mime_type', 'subtitle_url', 'subtitle_lang', 'captions_enabled', 'captions_lang', 'unstable_connection'];
 function captureContent(db, row) {
   const draft = parseJson(row.draft_json, null);
   const src = draft ? { ...row, ...draft } : row;
@@ -270,6 +280,31 @@ function retainContentFile(db, contentId, relPath, tag) {
   return rel;
 }
 
+/**
+ * Drop a superseded content draft's files WITHOUT breaking history. A pending file that some
+ * revision still points at (the "Restored from #n" revision of a restore, the "Replaced file
+ * (draft)" revision of a replace) moves into .history and the revisions follow it; a file nothing
+ * describes is deleted; the live row's own files are never touched. Discarding a draft used to
+ * unlink blindly, and the next restore of that revision answered 409 "no longer retained".
+ */
+function disposeDraftFiles(db, contentId, draft, live) {
+  if (!draft) return;
+  for (const [key, refCol] of [['filepath', 'file_ref'], ['thumbnail_path', 'thumb_ref']]) {
+    const p = draft[key];
+    if (!p) continue;
+    if (live && (p === live.filepath || p === live.thumbnail_path)) continue;
+    if (String(p).replace(/\\/g, '/').startsWith(HISTORY_DIR + '/')) continue;
+    const referenced = db.prepare(`SELECT COUNT(*) AS n FROM revisions WHERE ${refCol} = ?`).get(p).n
+      + db.prepare('SELECT COUNT(*) AS n FROM content WHERE (filepath = ? OR thumbnail_path = ?) AND id != ?').get(p, p, contentId).n;
+    if (referenced) {
+      const rel = retainContentFile(db, contentId, p, 'draft');
+      if (rel) db.prepare(`UPDATE revisions SET ${refCol} = ? WHERE ${refCol} = ?`).run(rel, p);
+    } else {
+      try { fs.unlinkSync(path.join(config.contentDir, path.basename(String(p)))); } catch (_) { /* already gone */ }
+    }
+  }
+}
+
 /** Absolute path for a revision's retained file, or the live file when the ref IS the live one. */
 function resolveFileRef(ref) {
   if (!ref) return null;
@@ -372,7 +407,17 @@ function restoreToDraft(db, { type, id, revisionId, actor }) {
       thumbPath = `thumb_restore-${rev.rev_no}-${crypto.randomBytes(6).toString('hex')}${path.extname(thumbAbs)}`;
       fs.copyFileSync(thumbAbs, path.join(config.contentDir, thumbPath));
     }
-    const draft = { ...state, filepath: pendingPath || state.filepath || row.filepath, thumbnail_path: thumbPath || null, restored_from: rev.id };
+    // A draft that was already pending (an earlier restore, a replaced file) is superseded: its
+    // bytes are retained if any revision still describes them, otherwise removed.
+    disposeDraftFiles(db, id, parseJson(row.draft_json, null), row);
+    const { folder_id: _folder, ...fields } = state;
+    const draft = {
+      ...fields,
+      filepath: pendingPath || state.filepath || row.filepath,
+      // No retained thumbnail: keep the live one when the bytes are unchanged (a URL restore), drop it when they are not.
+      thumbnail_path: thumbPath || (pendingPath ? null : row.thumbnail_path),
+      restored_from: rev.id,
+    };
     db.prepare('UPDATE content SET draft_json = ? WHERE id = ?').run(JSON.stringify(draft), id);
   } else if (type === 'playlist') {
     const txn = db.transaction(() => {
@@ -436,7 +481,7 @@ function lastPublished(db, type, id) {
   return db.prepare('SELECT * FROM revisions WHERE resource_type = ? AND resource_id = ? AND published_at IS NOT NULL ORDER BY published_at DESC, rev_no DESC LIMIT 1').get(type, id) || null;
 }
 
-module.exports = {
+module.exports = { CONTENT_DRAFT_FIELDS, CONTENT_PLAYBACK_FIELDS, disposeDraftFiles,
   RESOURCE_TYPES, TABLE, HISTORY_DIR,
   captureState, captureLiveState, hashState, stable, record, recordCurrent, recordMissingIn, markPublished, baselineAll,
   retainContentFile, resolveFileRef, historyDir, redactState, diffStates, restoreToDraft, hasDraft, list, get, latest, lastPublished, parseJson,

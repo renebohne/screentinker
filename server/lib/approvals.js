@@ -79,6 +79,14 @@ function updateSettings(db, { workspaceId, requireApproval, reviewerIds, actor, 
       for (const u of new Set(reviewerIds)) ins.run(workspaceId, u, actor && actor.userId || null, nowSec());
       const after = new Set(reviewerIds);
       const added = [...after].filter((u) => !before.has(u)), removed = [...before].filter((u) => !after.has(u));
+      if (removed.length) {
+        // An approval is only as good as the reviewer's current standing. Reopen theirs, visibly.
+        const now = nowSec();
+        const reopen = db.prepare(`UPDATE submissions SET status = 'submitted', reviewer_id = NULL, decided_at = NULL,
+                                     comment = COALESCE(comment, '') || ' [Approved by a reviewer who was since removed; another review is required]',
+                                     updated_at = ?, version = version + 1 WHERE workspace_id = ? AND status = 'approved' AND reviewer_id = ?`);
+        for (const u of removed) reopen.run(now, workspaceId, u);
+      }
       if (added.length || removed.length) audit('approval:reviewers_changed', { userId: actor && actor.userId, workspaceId, ip, details: { added, removed } });
     }
     if (requireApproval !== undefined) {

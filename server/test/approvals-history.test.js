@@ -161,6 +161,29 @@ test('approval on: publish is refused on the server, edits become drafts, the ot
   assert.equal(other.status, 200, 'the workspace without approval publishes directly');
 });
 
+const CURL = 'c-appr-url';
+test('approval on: changing what a remote item points at is a draft, not a live edit', async () => {
+  db.prepare("INSERT OR IGNORE INTO content (id,user_id,workspace_id,filename,remote_url,mime_type,updated_at) VALUES (?,?,?,?,?,?,100)")
+    .run(CURL, users.alice, WS, 'Weather page', 'https://example.com/old', 'text/html');
+  revisions.recordCurrent(db, 'content', CURL, { actor: { userId: users.alice }, summary: 'Added' });
+  const r = await call('PUT', `/api/content/${CURL}`, 'alice', { remote_url: 'https://example.com/new', filename: 'Weather page 2' });
+  assert.equal(r.status, 200); assert.equal(r.json.pending_review, true);
+  const live = db.prepare('SELECT * FROM content WHERE id = ?').get(CURL);
+  assert.equal(live.remote_url, 'https://example.com/old', 'the live URL did not move');
+  assert.equal(live.filename, 'Weather page 2', 'a name is a detail and applies live');
+  assert.equal(JSON.parse(live.draft_json).remote_url, 'https://example.com/new');
+  const direct = await call('POST', `/api/revisions/content/${CURL}/publish-draft`, 'alice');
+  assert.equal(direct.status, 409); assert.equal(direct.json.code, 'approval_required');
+  const sub = await call('POST', '/api/approvals/submit', 'alice', { resource_type: 'content', resource_id: CURL });
+  assert.equal(sub.status, 201);
+  assert.equal((await call('POST', `/api/approvals/${sub.json.id}/approve`, 'carol')).status, 200);
+  const pub = await call('POST', `/api/approvals/${sub.json.id}/publish`, 'alice');
+  assert.equal(pub.status, 200);
+  const after = db.prepare('SELECT * FROM content WHERE id = ?').get(CURL);
+  assert.equal(after.remote_url, 'https://example.com/new', 'released: the URL is applied');
+  assert.equal(after.draft_json, null);
+});
+
 let submissionId;
 test('submit, review queue, approve by a reviewer, publish by the creator', async () => {
   const sub = await call('POST', '/api/approvals/submit', 'alice', { resource_type: 'playlist', resource_id: PL, note: 'Please review' });
@@ -187,11 +210,56 @@ test('submit, review queue, approve by a reviewer, publish by the creator', asyn
   assert.equal(live.id, s.revision_id, 'the exact reviewed revision is what went live');
 });
 
+test('every playlist item mutation is a revision with its author', async () => {
+  const before = revisions.list(db, 'playlist', PL).length;
+  const add = await call('POST', `/api/playlists/${PL}/items`, 'alice', { widget_id: WID, duration_sec: 5 });
+  assert.equal(add.status, 201);
+  const itemId = add.json.id;
+  assert.equal((await call('PUT', `/api/playlists/${PL}/items/${itemId}`, 'alice', { duration_sec: 9 })).status, 200);
+  assert.equal((await call('POST', `/api/playlists/${PL}/items/reorder`, 'alice', { order: db.prepare('SELECT id FROM playlist_items WHERE playlist_id = ? ORDER BY sort_order DESC').all(PL).map((r) => r.id) })).status, 200);
+  assert.equal((await call('DELETE', `/api/playlists/${PL}/items/${itemId}`, 'alice')).status, 200);
+  const list = revisions.list(db, 'playlist', PL);
+  const mine = list.slice(0, list.length - before);
+  assert.deepEqual(mine.map((r) => r.summary).sort(), ['Added item', 'Edited item', 'Removed item', 'Reordered items']);
+  assert.ok(mine.every((r) => r.actor_user_id === users.alice));
+});
+
+test('removing a reviewer, or their write access, voids their pending approval at publish time', async () => {
+  // Carol approves; the admin then drops Carol from the reviewer list before anyone publishes.
+  assert.equal((await call('PUT', `/api/playlists/${PL}`, 'alice', { name: 'Lobby loop v2' })).status, 200);
+  let sub = await call('POST', '/api/approvals/submit', 'alice', { resource_type: 'playlist', resource_id: PL });
+  assert.equal(sub.status, 201);
+  assert.equal((await call('POST', `/api/approvals/${sub.json.id}/approve`, 'carol')).status, 200);
+  assert.equal((await call('PUT', '/api/approvals/settings', 'admin', { reviewers: [users.bob] })).status, 200);
+  const reopened = await call('GET', `/api/approvals/${sub.json.id}`, 'alice');
+  assert.equal(reopened.json.status, 'submitted', 'back in the queue, visibly'); assert.equal(reopened.json.reviewer_id, null);
+  let pub = await call('POST', `/api/playlists/${PL}/publish`, 'alice');
+  assert.equal(pub.status, 409); assert.equal(pub.json.code, 'awaiting_review');
+  assert.equal(plRow().status, 'draft', 'nothing went live');
+
+  // The gate itself rechecks too: a reviewer downgraded outside the settings page (members admin).
+  assert.equal((await call('PUT', '/api/approvals/settings', 'admin', { reviewers: [users.bob, users.carol] })).status, 200);
+  assert.equal((await call('POST', `/api/approvals/${sub.json.id}/approve`, 'carol')).status, 200);
+  db.prepare("UPDATE workspace_members SET role = 'workspace_viewer' WHERE workspace_id = ? AND user_id = ?").run(WS, users.carol);
+  pub = await call('POST', `/api/playlists/${PL}/publish`, 'alice');
+  assert.equal(pub.status, 409); assert.equal(pub.json.code, 'approver_ineligible');
+  assert.equal(approvals.getSubmission(db, sub.json.id).status, 'submitted', 'returned to the queue');
+  assert.equal(plRow().status, 'draft');
+  db.prepare("UPDATE workspace_members SET role = 'workspace_editor' WHERE workspace_id = ? AND user_id = ?").run(WS, users.carol);
+  // With a standing reviewer it publishes.
+  assert.equal((await call('POST', `/api/approvals/${sub.json.id}/approve`, 'bob')).status, 200);
+  pub = await call('POST', `/api/playlists/${PL}/publish`, 'alice');
+  assert.equal(pub.status, 200); assert.equal(plRow().status, 'published');
+});
+
 test('self-approval is refused, for the submitter and for anyone who authored part of the submission', async () => {
-  // Bob edits the playlist (a revision by Bob), Alice submits it: Bob may not approve it either.
-  db.prepare("INSERT INTO playlist_items (playlist_id,content_id,sort_order,duration_sec) VALUES (?,?,2,7)").run(PL, CID);
-  db.prepare("UPDATE playlists SET status = 'draft' WHERE id = ?").run(PL);
-  revisions.recordCurrent(db, 'playlist', PL, { actor: { userId: users.bob, kind: 'user' }, summary: 'Bob added an item' });
+  // Bob edits the playlist THROUGH THE ITEM ROUTE (the way a person does), Alice submits it: Bob
+  // may not approve it. The route must have recorded Bob as the author or the check is blind.
+  const add = await call('POST', `/api/playlists/${PL}/items`, 'bob', { content_id: CID, duration_sec: 7 });
+  assert.equal(add.status, 201, JSON.stringify(add.json));
+  const bobsRev = revisions.latest(db, 'playlist', PL);
+  assert.equal(bobsRev.actor_user_id, users.bob, 'the item add is a revision by Bob');
+  assert.equal(bobsRev.summary, 'Added item');
   const sub = await call('POST', '/api/approvals/submit', 'alice', { resource_type: 'playlist', resource_id: PL });
   assert.equal(sub.status, 201);
   const own = await call('POST', `/api/approvals/${sub.json.id}/approve`, 'alice');
@@ -368,6 +436,48 @@ test('content: replaced bytes are retained, previewable, restorable, and publish
   fs.unlinkSync(revisions.resolveFileRef(v2rev.file_ref));
   const gone = await call('POST', `/api/revisions/content/${CID}/${v2rev.id}/restore`, 'bob');
   assert.equal(gone.status, 409);
+});
+
+test('restoring a URL revision and publishing it actually releases that URL (every captured field, not just bytes)', async () => {
+  // Approval is off here. A -> B live; restore A; publish; the live row must equal A.
+  const a = revisions.latest(db, 'content', CURL);            // https://example.com/new after the release above
+  assert.equal(JSON.parse(a.state).remote_url, 'https://example.com/new');
+  const r = await call('PUT', `/api/content/${CURL}`, 'alice', { remote_url: 'https://example.com/b', captions_enabled: true });
+  assert.equal(r.status, 200); assert.equal(r.json.pending_review, undefined, 'approval off: live edit');
+  assert.equal(db.prepare('SELECT remote_url FROM content WHERE id = ?').get(CURL).remote_url, 'https://example.com/b');
+  const restore = await call('POST', `/api/revisions/content/${CURL}/${a.id}/restore`, 'bob');
+  assert.equal(restore.status, 200); assert.equal(restore.json.next, 'publish_draft');
+  assert.equal(db.prepare('SELECT remote_url FROM content WHERE id = ?').get(CURL).remote_url, 'https://example.com/b', 'restore alone changes nothing live');
+  const pub = await call('POST', `/api/revisions/content/${CURL}/publish-draft`, 'bob');
+  assert.equal(pub.status, 200);
+  const releasedState = revisions.captureLiveState(db, 'content', CURL);
+  const wanted = JSON.parse(a.state);
+  for (const k of revisions.CONTENT_DRAFT_FIELDS) assert.equal(releasedState[k] ?? null, wanted[k] ?? null, `released ${k} matches the restored revision`);
+  assert.equal(releasedState.remote_url, 'https://example.com/new');
+  assert.equal(releasedState.captions_enabled, 0);
+});
+
+test('discarding a draft keeps the bytes that history still references', async () => {
+  const list = revisions.list(db, 'content', CID);
+  const withBytes = list.filter((r) => r.file_ref && revisions.resolveFileRef(r.file_ref) && fs.existsSync(revisions.resolveFileRef(r.file_ref)));
+  const target = withBytes.find((r) => r.file_ref.startsWith('.history/')) || withBytes[0];
+  assert.ok(target, 'a restorable revision exists');
+  const r = await call('POST', `/api/revisions/content/${CID}/${target.id}/restore`, 'bob');
+  assert.equal(r.status, 200);
+  const pending = JSON.parse(db.prepare('SELECT draft_json FROM content WHERE id = ?').get(CID).draft_json).filepath;
+  const restoredRev = revisions.latest(db, 'content', CID);
+  assert.equal(restoredRev.file_ref, pending, 'the restore revision points at the pending copy');
+  const d = await call('POST', `/api/revisions/content/${CID}/discard-draft`, 'bob');
+  assert.equal(d.status, 200);
+  assert.ok(!fs.existsSync(path.join(config.contentDir, pending)), 'the pending copy left the live directory');
+  const moved = revisions.get(db, restoredRev.id);
+  assert.ok(moved.file_ref.startsWith('.history/'), 'and was retained for the revision that describes it');
+  assert.ok(fs.existsSync(revisions.resolveFileRef(moved.file_ref)));
+  const again = await call('POST', `/api/revisions/content/${CID}/${restoredRev.id}/restore`, 'bob');
+  assert.equal(again.status, 200, 'that revision restores after the discard');
+  assert.equal((await call('POST', `/api/revisions/content/${CID}/discard-draft`, 'bob')).status, 200);
+  const liveFile = db.prepare('SELECT filepath FROM content WHERE id = ?').get(CID).filepath;
+  assert.ok(fs.existsSync(path.join(config.contentDir, liveFile)), 'the live file is never touched by a discard');
 });
 
 test('retention keeps the newest, the live release, pending reviews and the baseline; prunes the rest and their files', () => {

@@ -227,8 +227,15 @@ function schedulesForItem(itemId) {
 }
 
 // Mark playlist as draft (called after item mutations from the playlist detail UI)
-function markDraft(playlistId) {
+/*
+ * Every item mutation lands here, so this is where the playlist's history is written. The
+ * revision carries WHO made the change, which is what the approval workflow's no-self-approval
+ * rule reads: an item added by Bob and submitted by Alice must still be un-approvable by Bob.
+ * Without the record the check only knew the submitter.
+ */
+function markDraft(playlistId, req, summary) {
   db.prepare("UPDATE playlists SET status = 'draft', updated_at = strftime('%s','now') WHERE id = ?").run(playlistId);
+  if (req) require('../lib/revisions').recordCurrent(db, 'playlist', playlistId, { actor: require('../lib/releases').actorOf(req), summary: summary || 'Edited' });
 }
 
 // Push playlist update to all devices using this playlist. Accepts either an Express `req`
@@ -727,7 +734,7 @@ router.put('/:id/items/:itemId/schedules', requirePlaylistWrite, (req, res) => {
     db.prepare('DELETE FROM playlist_item_schedules WHERE playlist_item_id = ?').run(item.id);
     blocks.forEach((b, i) => ins.run(uuidv4(), item.id, b.days.join(','), b.start, b.end, b.start_date || null, b.end_date || null, i));
   })();
-  markDraft(req.params.id); // schedule changes affect playback -> draft until re-published
+  markDraft(req.params.id, req, 'Changed item schedule'); // schedule changes affect playback -> draft until re-published
   res.json(schedulesForItem(item.id));
 });
 
@@ -873,7 +880,7 @@ router.post('/:id/items', requirePlaylistWrite, async (req, res) => {
            zone_id || null, order, duration_sec);
 
     // Mark as draft (items changed since last publish)
-    markDraft(req.params.id);
+    markDraft(req.params.id, req, 'Added item');
 
     const item = db.prepare(`
       SELECT pi.*,
@@ -982,7 +989,7 @@ router.put('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
     values.push(req.params.itemId);
     db.prepare(`UPDATE playlist_items SET ${updates.join(', ')} WHERE id = ?`).run(...values);
     if (mutedChanged) emitMuteChanged(req, existing, muted ? 1 : 0);
-    markDraft(req.params.id);
+    markDraft(req.params.id, req, 'Edited item');
   }
 
   const updated = db.prepare(`
@@ -1007,7 +1014,7 @@ router.delete('/:id/items/:itemId', requirePlaylistWrite, (req, res) => {
   if (!item) return res.status(404).json({ error: 'item not found' });
 
   db.prepare('DELETE FROM playlist_items WHERE id = ?').run(req.params.itemId);
-  markDraft(req.params.id);
+  markDraft(req.params.id, req, 'Removed item');
   res.json({ success: true });
 });
 
@@ -1035,7 +1042,7 @@ router.post('/:id/items/:itemId/duplicate', requirePlaylistWrite, (req, res) => 
     return newId;
   });
   const newId = copy();
-  markDraft(req.params.id);
+  markDraft(req.params.id, req, 'Duplicated item');
 
   const newItem = db.prepare(`
     SELECT pi.*,
@@ -1145,7 +1152,7 @@ router.post('/:id/items/bulk', requirePlaylistWrite, async (req, res) => {
         WHERE pi.id = ?
       `);
       inserted = ids.map((id) => sel.get(id));
-      markDraft(req.params.id);
+      markDraft(req.params.id, req, `Added ${ids.length} item(s)`);
     }
 
     res.status(inserted.length ? 201 : 400).json({ added: inserted, skipped });
@@ -1167,7 +1174,7 @@ router.post('/:id/items/reorder', requirePlaylistWrite, (req, res) => {
   });
   transaction();
 
-  markDraft(req.params.id);
+  markDraft(req.params.id, req, 'Reordered items');
 
   const items = db.prepare(`
     SELECT pi.*,

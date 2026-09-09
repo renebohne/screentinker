@@ -101,6 +101,16 @@ function assertReleasable(db, { workspaceId, type, id }) {
   if (changed.length) {
     throw new ReleaseError(`Something this depends on changed after approval (${changed.slice(0, 3).join(', ')}${changed.length > 3 ? ', ...' : ''}). Submit it again for review.`, 'deps_changed');
   }
+  // The approver's standing is rechecked NOW, not just when they decided: a reviewer removed from
+  // the list, or downgraded to viewer, takes their approval with them. The submission goes back
+  // to the queue so the state is visible rather than a dead end.
+  if (!require('./approvals').isReviewer(db, workspaceId, sub.reviewer_id)) {
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(`UPDATE submissions SET status = 'submitted', reviewer_id = NULL, decided_at = NULL,
+                  comment = COALESCE(comment, '') || ' [The approving reviewer no longer has reviewer access; another review is required]',
+                  updated_at = ?, version = version + 1 WHERE id = ? AND status = 'approved'`).run(now, sub.id);
+    throw new ReleaseError('The reviewer who approved this no longer has reviewer access. It has been returned to the review queue.', 'approver_ineligible');
+  }
   return { mode: 'approved', submission: sub };
 }
 

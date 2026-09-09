@@ -117,7 +117,7 @@ function releaseLayoutDraft(db, layoutId, req, { actor } = {}) {
 
 // ─── content ─────────────────────────────────────────────────────────────────────────────────
 
-const CONTENT_DRAFT_COLS = ['filename', 'mime_type', 'file_size', 'duration_sec', 'width', 'height', 'bundle_entry', 'byte_digest'];
+const CONTENT_DRAFT_COLS = revisions.CONTENT_DRAFT_FIELDS;
 
 /**
  * Swap the draft bytes in for the live ones. The live file is RETAINED under .history first and
@@ -149,6 +149,7 @@ function releaseContentDraft(db, contentId, req, { actor } = {}) {
     }
     const sets = [], vals = [];
     for (const k of CONTENT_DRAFT_COLS) if (k in draft && draft[k] !== undefined) { sets.push(`${k} = ?`); vals.push(draft[k]); }
+    if ('expires_at' in draft && draft.expires_at !== undefined) sets.push('is_active = 1');   // same reset the details route does
     if (draft.filepath) { sets.push('filepath = ?'); vals.push(draft.filepath); }
     if ('thumbnail_path' in draft) { sets.push('thumbnail_path = ?'); vals.push(draft.thumbnail_path || null); }
     sets.push('draft_json = NULL');
@@ -175,10 +176,8 @@ function discardDraft(db, type, id) {
   if (type === 'widget') db.prepare('UPDATE widgets SET draft_config = NULL WHERE id = ?').run(id);
   else if (type === 'layout') db.prepare('UPDATE layouts SET draft_zones = NULL WHERE id = ?').run(id);
   else if (type === 'content') {
-    const c = db.prepare('SELECT draft_json FROM content WHERE id = ?').get(id);
-    const d = revisions.parseJson(c && c.draft_json, null);
-    if (d && d.filepath) { try { fs.unlinkSync(path.join(config.contentDir, path.basename(d.filepath))); } catch (_) {} }
-    if (d && d.thumbnail_path) { try { fs.unlinkSync(path.join(config.contentDir, path.basename(d.thumbnail_path))); } catch (_) {} }
+    const c = db.prepare('SELECT * FROM content WHERE id = ?').get(id);
+    revisions.disposeDraftFiles(db, id, revisions.parseJson(c && c.draft_json, null), c);
     db.prepare('UPDATE content SET draft_json = NULL WHERE id = ?').run(id);
   } else { const e = new Error('Only widgets, layouts and content hold a separate draft'); e.status = 400; throw e; }
 }

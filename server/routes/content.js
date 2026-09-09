@@ -501,15 +501,29 @@ router.put('/:id', (req, res) => {
           captions_enabled, captions_lang, subtitle_url, subtitle_lang } = req.body;
   const updates = [];
   const values = [];
+  /*
+   * Under approval, the fields that change WHAT PLAYS (the URL a remote item points at, its type,
+   * captions, subtitles, the quality ceiling) are not "details": a new remote_url is new content
+   * on every screen that shows the item. Those land in the draft beside the live row and go
+   * through review like replaced bytes do. Name, folder and expiry stay live: they organise and
+   * schedule the item without changing what it shows.
+   */
+  const policy = require('../lib/release-policy');
+  const revisionsLib = require('../lib/revisions');
+  const approvalOn = !!(content.workspace_id && policy.approvalRequired(db, content.workspace_id));
+  const draftPatch = {};
+  const set = (col, val) => {
+    if (approvalOn && revisionsLib.CONTENT_PLAYBACK_FIELDS.includes(col)) draftPatch[col] = val;
+    else { updates.push(`${col} = ?`); values.push(val); }
+  };
   if (filename !== undefined) { updates.push('filename = ?'); values.push(safeFilename(filename)); }
-  if (mime_type !== undefined) { updates.push('mime_type = ?'); values.push(mime_type); }
+  if (mime_type !== undefined) set('mime_type', mime_type);
   if (remote_url !== undefined) {
     if (remote_url) {
       const urlErr = validateRemoteUrl(remote_url);
       if (urlErr) return res.status(urlErr.status).json({ error: urlErr.error });
     }
-    updates.push('remote_url = ?');
-    values.push(remote_url || null);
+    set('remote_url', remote_url || null);
   }
   if (folder !== undefined) { updates.push('folder = ?'); values.push(folder || null); }
   if (folder_id !== undefined) {
@@ -547,32 +561,30 @@ router.put('/:id', (req, res) => {
   }
   // #217: force a lower YouTube quality ceiling for weak/unstable WiFi. Stored 0/1;
   // accepts booleans or 0/1 from the client and coerces to an integer.
-  if (unstable_connection !== undefined) {
-    updates.push('unstable_connection = ?');
-    values.push(unstable_connection ? 1 : 0);
-  }
+  if (unstable_connection !== undefined) set('unstable_connection', unstable_connection ? 1 : 0);
   // #216: caption/subtitle metadata. The subtitle FILE is uploaded via POST /:id/subtitle;
   // these fields toggle YouTube captions, set languages, or clear a subtitle (subtitle_url=null).
-  if (captions_enabled !== undefined) {
-    updates.push('captions_enabled = ?'); values.push(captions_enabled ? 1 : 0);
-  }
-  if (captions_lang !== undefined) {
-    updates.push('captions_lang = ?'); values.push(captions_lang ? String(captions_lang).slice(0, 10) : null);
-  }
+  if (captions_enabled !== undefined) set('captions_enabled', captions_enabled ? 1 : 0);
+  if (captions_lang !== undefined) set('captions_lang', captions_lang ? String(captions_lang).slice(0, 10) : null);
   if (subtitle_url !== undefined) {
     // Only null (clear) is accepted here — a real subtitle_url is set by the upload endpoint.
-    updates.push('subtitle_url = ?'); values.push(subtitle_url ? String(subtitle_url).slice(0, 255) : null);
+    set('subtitle_url', subtitle_url ? String(subtitle_url).slice(0, 255) : null);
   }
-  if (subtitle_lang !== undefined) {
-    updates.push('subtitle_lang = ?'); values.push(subtitle_lang ? String(subtitle_lang).slice(0, 10) : null);
-  }
+  if (subtitle_lang !== undefined) set('subtitle_lang', subtitle_lang ? String(subtitle_lang).slice(0, 10) : null);
 
   if (updates.length > 0) {
     values.push(req.params.id);
     db.prepare(`UPDATE content SET ${updates.join(', ')} WHERE id = ?`).run(...values);
   }
 
-  require('../lib/revisions').recordCurrent(db, 'content', req.params.id, { actor: require('../lib/releases').actorOf(req), summary: 'Updated details' });
+  const actor = require('../lib/releases').actorOf(req);
+  if (Object.keys(draftPatch).length) {
+    const existing = revisionsLib.parseJson(content.draft_json, null) || {};
+    db.prepare('UPDATE content SET draft_json = ? WHERE id = ?').run(JSON.stringify({ ...existing, ...draftPatch }), req.params.id);
+    revisionsLib.recordCurrent(db, 'content', req.params.id, { actor, summary: 'Updated details (draft)' });
+    return res.json({ ...db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id), draft: true, pending_review: true });
+  }
+  revisionsLib.recordCurrent(db, 'content', req.params.id, { actor, summary: 'Updated details' });
   res.json(db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id));
 });
 
@@ -682,7 +694,10 @@ router.put('/:id/replace', upload.single('file'), async (req, res) => {
   try { newDigest = await digestFile(path.join(config.contentDir, filepath)); } catch (e) { newDigest = null; }
 
   if (approvalOn) {
-    const draft = { filepath, mime_type: mime, file_size: req.file.size, thumbnail_path: thumbnailPath, width, height, duration_sec: durationSec, byte_digest: newDigest, bundle_entry: bundleEntry };
+    const prevDraft = revisions.parseJson(content.draft_json, null) || {};
+    revisions.disposeDraftFiles(db, content.id, prevDraft, content);
+    const { filepath: _f, thumbnail_path: _t, ...prevFields } = prevDraft;   // keep pending URL/caption edits, drop the old bytes
+    const draft = { ...prevFields, filepath, mime_type: mime, file_size: req.file.size, thumbnail_path: thumbnailPath, width, height, duration_sec: durationSec, byte_digest: newDigest, bundle_entry: bundleEntry };
     db.prepare('UPDATE content SET draft_json = ? WHERE id = ?').run(JSON.stringify(draft), req.params.id);
     revisions.recordCurrent(db, 'content', req.params.id, { actor, summary: 'Replaced file (draft)' });
     return res.json({ ...db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id), draft: true, pending_review: true });

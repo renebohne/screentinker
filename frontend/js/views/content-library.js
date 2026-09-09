@@ -890,13 +890,17 @@ function showEditModal(contentItem, onSave) {
         if (contentItem.subtitle_url && subLang !== (contentItem.subtitle_lang || 'en')) updateData.subtitle_lang = subLang;
       }
 
+      let pendingReview = false;
       if (Object.keys(updateData).length > 0) {
         assertLocalCallAllowed('/content', 'PUT');
-        await fetch('/api/content/' + contentItem.id, {
+        const r = await fetch('/api/content/' + contentItem.id, {
           method: 'PUT',
           headers: { ...headers, 'Content-Type': 'application/json' },
           body: JSON.stringify(updateData)
         });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.error || 'Update failed');
+        pendingReview = !!body.pending_review;
       }
 
       // Replace file if provided
@@ -925,7 +929,7 @@ function showEditModal(contentItem, onSave) {
       }
 
       overlay.remove();
-      showToast(t('content.toast.updated'), 'success');
+      showToast(pendingReview ? t('review.toast.saved_as_draft') : t('content.toast.updated'), 'success');
       if (onSave) onSave();
     } catch (err) {
       showToast(err.message || t('content.error_update_failed'), 'error');
