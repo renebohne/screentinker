@@ -146,7 +146,10 @@ function dynamicRevFor(item, nowSec) {
    * frame until the bucket rolled (a minute, or five). Before that, an edit was the ONLY thing
    * that changed the key, and it did so immediately. Both signals belong in it.
    */
-  const edited = item.widget_updated_at || item.content_updated_at || item.updated_at || 0;
+  // Both shapes: the live join used *_updated_at, the snapshot reader carries *_rev for players.
+  // Reading only one set is how an edit stopped invalidating the cache entirely.
+  const edited = item.widget_updated_at || item.content_updated_at
+    || item.widget_rev || item.content_rev || item.updated_at || 0;
   const bucket = (label, seconds) => `${label}_${Math.floor(now / seconds)}_${edited}`;
   switch (item.widget_type) {
     case 'clock':   return bucket('clock', 60);
@@ -199,21 +202,41 @@ function getPublishedPlaylistItems(playlistId) {
   } catch (_) {
     return [];
   }
+  /*
+   * ⚠️ THE SNAPSHOT IS NOT A SUPERSET OF WHAT THE RENDERER NEEDS.
+   *
+   * published_snapshot is built for players (ws/deviceSocket.js), and it omits four columns the
+   * embedded renderer reads. Each omission fails silently and differently:
+   *
+   *   thumbnail_path      a video item hands Jimp the .mp4, which throws, and isLayoutImageOnly
+   *                       drops the whole layout to Chromium or to 501 where no browser exists
+   *   widget_workspace_id every {{ds:...}} token resolves empty and workspace fonts fall back
+   *   the *_updated_at    dynamicRevFor sees 0, the cache key never moves, and the panel is
+   *   pair               answered 304 with a stale frame until the time bucket rolls
+   *
+   * Anything added to the renderer's read set has to be added here too.
+   */
   for (const a of items) {
     if (a.widget_id) {
       try {
-        const w = db.prepare('SELECT updated_at FROM widgets WHERE id = ?').get(a.widget_id);
-        if (w) a.widget_rev = w.updated_at ?? a.widget_rev ?? 0;
+        const w = db.prepare('SELECT updated_at, workspace_id FROM widgets WHERE id = ?').get(a.widget_id);
+        if (w) {
+          a.widget_rev = w.updated_at ?? a.widget_rev ?? 0;
+          a.widget_updated_at = w.updated_at ?? null;
+          a.widget_workspace_id = w.workspace_id ?? null;
+        }
       } catch (_) {}
     }
     if (a.content_id) {
       try {
-        const c = db.prepare('SELECT COALESCE(NULLIF(updated_at, 0), created_at) AS rev, filepath, mime_type, file_size FROM content WHERE id = ?').get(a.content_id);
+        const c = db.prepare('SELECT COALESCE(NULLIF(updated_at, 0), created_at) AS rev, filepath, mime_type, file_size, thumbnail_path FROM content WHERE id = ?').get(a.content_id);
         if (c) {
           a.content_rev = c.rev ?? a.content_rev ?? 0;
+          a.content_updated_at = c.rev ?? null;
           if (c.filepath) a.filepath = c.filepath;
           if (c.mime_type) a.mime_type = c.mime_type;
           if (c.file_size != null) a.file_size = c.file_size;
+          if (c.thumbnail_path) a.thumbnail_path = c.thumbnail_path;
         }
       } catch (_) {}
     }

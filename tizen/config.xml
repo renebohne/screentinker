@@ -10,23 +10,54 @@
     <content src="index.html"/>
 
     <!--
-      ⚠️ DECLARED EXPLICITLY, BECAUSE THE DEFAULT ONE BLOCKS data: AND THAT IS WHAT A BUNDLE IS.
+      ⚠️ THERE IS DELIBERATELY NO <tizen:content-security-policy> HERE. #330.
 
-      A widget declaring required_version 2.4 with no policy of its own gets the WRT default, which
-      permits 'self' and 'unsafe-inline' for scripts but NOT the data: scheme. An offline HTML
-      bundle is mounted as srcdoc, a srcdoc frame INHERITS THIS POLICY, and a flattened bundle is
-      nothing but data: URIs — so under the default every script and stylesheet in it is dropped and
-      the frame renders a styled, DEAD page with nothing in any log. That is not a guess: the same
-      document was measured running on the web player's CSP-exempt /player and doing exactly this on
-      the CSP-bearing dashboard.
+      One was declared in 9eee571 and shipped in 2.0.0 through 2.0.7. It BLACK-SCREENED an OM55B on
+      Tizen 5.0 / SSSP v6 (Chromium 63): the app installed, the panel menu still responded, and
+      nothing rendered. Proven by bisect on the panel, not reasoned about. A control build identical
+      to 2.0.7 except with this one element deleted rendered correctly; 1.9.24, which never had the
+      element, has always worked.
 
-      data: is granted to script/style/img/font/media and NOT to connect-src or frame-src — a
-      bundle may carry its own assets; it may not open channels or nest frames.
+      WHAT REMOVING IT COSTS. player.js renderBundle mounts a CACHED offline bundle as f.srcdoc, a
+      srcdoc frame inherits this document policy, and lib/bundle-inline.js turns a bundle EXTERNAL
+      <script src>, <img>, fonts and CSS url() into data: URIs. The WRT default does not grant
+      data:, so those specific resources drop. NOT the whole page: bundle-inline.js flattens
+      stylesheets into inline <style> and never rewrites inline <script>, and the WRT default
+      permits unsafe-inline for both. Layout and inline JS survive. It only affects a SECOND play of
+      a revision already warmed into wgt-private; the first play and every zone bundle use f.src =
+      and never consulted a policy here.
 
-      ⚠️ SHIPPING THIS NEEDS A NEW .wgt. There is no in-app OTA for this player (README), so a panel
-      already in the field keeps the old policy until somebody reinstalls it.
+      ⚠️ WHAT THE ORIGINAL COMMENT GOT WRONG, so nobody repeats it. It claimed the default renders
+      a "styled, DEAD page", citing a measurement taken against the DASHBOARD policy in
+      server/server.js. That policy has no unsafe-inline in script-src; the WRT default does. The
+      dashboard result therefore says nothing about the axis that decides this, and the element was
+      shipped to a fleet on the strength of it.
+
+      ⚠️ THE POLICY ALSO BROKE THE MEDIA CACHE, which is the reason a corrected policy is not the
+      fix. img-src and media-src were declared without file:, while media-cache.js hands the DOM a
+      file:// URI from toURI() and player.js contentUrl() prefers it with no network fallback. A
+      relaxed script-src would have booted the app and then black-screened it on any cached item,
+      on a 5 second skipSoon retry loop. Moving the failure, not removing it.
+
+      ⚠️ BEFORE ANY POLICY GOES BACK IN, measure three things ON A PANEL:
+        1. The real origin of this document. Three files here assert app:// and none verifies it.
+           If WRT serves the package over file://, the origin is opaque, self matches NOTHING, and
+           every <script src="js/..."> in index.html is blocked. That predicts the exact #330
+           symptom and would mean no self-based policy can ever be safe here.
+        2. index.html loads $WEBAPIS and $B2BAPIS from OUTSIDE the package. No hand-written
+           script-src can match those, so any explicit policy silently removes the Samsung B2B
+           surface device-control.js depends on.
+        3. Ship a securitypolicyviolation listener FIRST. There is none anywhere in this repo, which
+           is why #330 produced a black screen with nothing in any log.
+
+      The better fix for the data: dependency is to stop needing a policy at all: mount the cached
+      render by its wgt-private file:// URI instead of srcdoc, so it becomes a separate document
+      with no inherited policy. The frame already carries sandbox="allow-scripts" with no
+      allow-same-origin, so it keeps an opaque origin either way.
+
+      ⚠️ REMOVING THIS NEEDS A NEW .wgt. There is no in-app OTA for this player, so a panel in the
+      field keeps the 2.0.x policy until somebody reinstalls it.
     -->
-    <tizen:content-security-policy>default-src 'self' *; script-src 'self' 'unsafe-inline' 'unsafe-eval' data:; style-src 'self' 'unsafe-inline' data:; img-src 'self' data: blob: https: http:; font-src 'self' data:; media-src 'self' data: blob: https: http:; connect-src 'self' https: http: ws: wss:; frame-src 'self' https: http:; object-src 'none'</tizen:content-security-policy>
 
     <!-- Landscape signage, no context menu, allow background, keep app full-screen -->
     <tizen:setting screen-orientation="landscape" context-menu="disable"

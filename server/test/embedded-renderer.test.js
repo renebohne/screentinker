@@ -52,6 +52,10 @@ db.exec(`
     id TEXT PRIMARY KEY, workspace_id TEXT, type TEXT, mime_type TEXT, filepath TEXT,
     filename TEXT, file_size INTEGER DEFAULT 0, duration_sec REAL, remote_url TEXT,
     thumbnail_path TEXT, updated_at INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1,
+    -- created_at is NOT decoration: getPublishedPlaylistItems reads
+    -- COALESCE(NULLIF(updated_at,0), created_at) inside a bare catch, so a fixture without this
+    -- column made that whole refresh branch throw and be swallowed, silently untested.
+    created_at INTEGER NOT NULL DEFAULT 0,
     expires_at INTEGER, unstable_connection INTEGER DEFAULT 0,
     captions_enabled INTEGER DEFAULT 0, captions_lang TEXT, subtitle_url TEXT, subtitle_lang TEXT
   );
@@ -652,6 +656,45 @@ describe('Embedded HTTP Route & Fallback Handling', () => {
 
 // ---------------------------------------------------------------------------------------------
 // Follow-ups to #331, fixed on main after the merge.
+
+describe('the published snapshot carries every column the renderer reads', () => {
+  const { resolveCurrentItem, dynamicRevFor } = embeddedRouter;
+
+  /*
+   * published_snapshot is built for players and omits four columns the embedded renderer needs.
+   * Each omission fails silently: a video loses its poster and Jimp is handed the .mp4, widget
+   * data-source tokens resolve empty, and dynamicRevFor sees 0 so an edit never invalidates the
+   * panel's cached frame. Assert the shape rather than the symptoms.
+   */
+  test('a widget item keeps its workspace and its edit stamp', () => {
+    const plId = 'pl-cols-w';
+    db.prepare("INSERT INTO widgets (id, workspace_id, widget_type, name, config, updated_at) VALUES ('w-cols', 'ws-1', 'slide', 'W', '{\"f\":\"{{ds:room.status}}\"}', 4242)").run();
+    db.prepare("INSERT INTO playlists (id, workspace_id, name, status) VALUES (?, 'ws-1', 'Cols W', 'published')").run(plId);
+    db.prepare("INSERT INTO playlist_items (id, playlist_id, widget_id, sort_order, duration_sec) VALUES ('pi-cols-w', ?, 'w-cols', 0, 30)").run(plId);
+    publishPlaylist(plId);
+    db.prepare("INSERT INTO devices (id, name, workspace_id, playlist_id) VALUES ('dev-cols-w', 'D', 'ws-1', ?)").run(plId);
+
+    const r = resolveCurrentItem('dev-cols-w');
+    assert.ok(r, 'the item resolves');
+    assert.equal(r.item.widget_workspace_id, 'ws-1', 'workspace survives the snapshot, or {{ds:}} resolves empty');
+    assert.equal(r.item.widget_updated_at, 4242, 'edit stamp survives, or the cache never invalidates');
+    assert.notEqual(dynamicRevFor(r.item, 1_000_000), 0);
+  });
+
+  test('a video item keeps its poster frame', () => {
+    const plId = 'pl-cols-v';
+    db.prepare("INSERT INTO content (id, workspace_id, type, mime_type, filepath, thumbnail_path, updated_at, is_active) VALUES ('c-cols', 'ws-1', 'video', 'video/mp4', 'clip.mp4', 'clip.jpg', 77, 1)").run();
+    db.prepare("INSERT INTO playlists (id, workspace_id, name, status) VALUES (?, 'ws-1', 'Cols V', 'published')").run(plId);
+    db.prepare("INSERT INTO playlist_items (id, playlist_id, content_id, sort_order, duration_sec) VALUES ('pi-cols-v', ?, 'c-cols', 0, 30)").run(plId);
+    publishPlaylist(plId);
+    db.prepare("INSERT INTO devices (id, name, workspace_id, playlist_id) VALUES ('dev-cols-v', 'D', 'ws-1', ?)").run(plId);
+
+    const r = resolveCurrentItem('dev-cols-v');
+    assert.ok(r);
+    assert.equal(r.item.thumbnail_path, 'clip.jpg', 'without this Jimp is handed the .mp4 and the layout drops to Chromium');
+    assert.equal(r.item.content_updated_at, 77);
+  });
+});
 
 describe('dynamicRevFor: an edit and a time bucket both invalidate', () => {
   const { dynamicRevFor } = embeddedRouter;

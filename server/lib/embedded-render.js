@@ -501,7 +501,7 @@ async function render(item, content, screenProfile, options = {}) {
       let wsId;
       if (item.widget_id) {
         wsId = item.widget_workspace_id !== undefined ? item.widget_workspace_id : null;
-        if (wsId === undefined) {
+        if (wsId == null) {
           try {
             const w = db.prepare('SELECT workspace_id FROM widgets WHERE id = ?').get(item.widget_id);
             wsId = w ? w.workspace_id : null;
@@ -751,7 +751,7 @@ async function renderLayout(layout, zoneEntries, screenProfile, options = {}) {
       let wsId;
       if (item.widget_id) {
         wsId = item.widget_workspace_id !== undefined ? item.widget_workspace_id : null;
-        if (wsId === undefined) {
+        if (wsId == null) {
           try {
             const row = db.prepare('SELECT workspace_id FROM widgets WHERE id = ?').get(item.widget_id);
             wsId = row ? row.workspace_id : null;

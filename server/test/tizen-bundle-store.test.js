@@ -138,17 +138,24 @@ test('prune drops bundles that left the playlist and keeps the ones that did not
   assert.equal(store.load('drop', 1), null);
 });
 
-test('⚠️ the manifest grants data: to scripts, or an offline bundle renders dead', () => {
+test('⚠️ tizen/config.xml declares NO content-security-policy (#330)', () => {
   /*
-   * The store is only half the offline path; the other half is that the mounted document is allowed
-   * to run. A srcdoc frame inherits the widget's CSP, and a flattened bundle is entirely data: URIs
-   * — under the WRT default policy (no data: in script-src) it renders styled and does nothing.
+   * This assertion is INVERTED from what it used to say, and the inversion is the lesson.
+   *
+   * It used to require a CSP that granted data:, on the reasoning that a srcdoc-mounted offline
+   * bundle is full of data: URIs and the WRT default blocks them. That reasoning came from a
+   * measurement taken against the DASHBOARD policy (server/server.js), which unlike the WRT
+   * default has no unsafe-inline in script-src. The extrapolation did not hold, and the policy it
+   * justified BLACK-SCREENED an OM55B on Tizen 5.0 for the whole 2.0.0 to 2.0.7 range.
+   *
+   * Proven on hardware: a control build identical to 2.0.7 except with the element deleted
+   * rendered correctly on the same panel. So this test now guards the shipped state instead of the
+   * theory, and it is deliberately a hard "absent" rather than "present but permissive", because
+   * a corrected policy cannot be validated from here. See the comment in tizen/config.xml for the
+   * three things that must be measured on a panel before one goes back in.
    */
   const cfg = fs.readFileSync(path.join(__dirname, '..', '..', 'tizen', 'config.xml'), 'utf8');
   const m = cfg.match(/<tizen:content-security-policy>([\s\S]*?)<\/tizen:content-security-policy>/);
-  assert.ok(m, 'tizen/config.xml declares no CSP, so the WRT default applies and blocks data:');
-  const policy = m[1];
-  assert.match(policy, /script-src[^;]*\bdata:/, 'script-src does not permit data:');
-  assert.match(policy, /style-src[^;]*\bdata:/, 'style-src does not permit data:');
-  assert.match(policy, /img-src[^;]*\bdata:/, 'img-src does not permit data:');
+  assert.ok(!m, 'a widget CSP black-screened an OM55B on Tizen 5.0 (#330); do not add one without '
+    + 'a securitypolicyviolation listener shipped first and a panel to test it on');
 });
