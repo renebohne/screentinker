@@ -1,5 +1,88 @@
 # Changelog
 
+## 2.0.8
+
+The first release since 2.0.7, and a large one: two new subsystems, a new player platform, and
+every open issue on the tracker.
+
+### Added
+
+**Content approval workflows and version history.** A workspace admin can require approval before
+anything goes live. It is off by default for every existing and new workspace, and turning it on
+changes nothing that is already playing. Draft, Submitted, Approved, Published, with a Changes
+requested path and a reviewer comment. Approval binds to an immutable revision and to the stamps of
+everything it depends on, both rechecked at the decision and again at publish, so an edit after
+approval invalidates it rather than shipping unreviewed. Nobody can approve their own submission or
+one containing changes they authored. A single release policy in `lib/release-policy.js` is
+consulted by every path that can change a screen: playlist and deck publish, widget, layout and
+content edits, agency auto-publish, and schedule-generated playlists.
+
+Version history is always on, for content, playlists, layouts, slide decks and widgets, with one
+revision model. Every revision records who made it, including whether it came from a person, an API
+token, an import, a mesh peer or a restore. Revisions can be previewed, compared and restored, and a
+restore creates a new draft attributed to the restorer rather than rewriting anything. Replaced
+media bytes are retained so an older revision stays viewable, under a bounded retention that never
+prunes what is live, pending review or a migration baseline. Widget config secrets are redacted in
+every history response. Documented in `docs/approvals-and-history.md`.
+
+**Data sources.** A workspace can register an external source and bind widget and slide fields to
+it with `{{ds:name.field}}`. iCal is the first integration, aimed at room booking panels: a sign
+knows whether the room is busy, what is on next and when it frees up. Fetches go through the SSRF
+guard with pinned DNS, a body cap, redirect limits and a per-workspace concurrency bound.
+
+**LG webOS player.** An installed shell around the web player, so a webOS signage panel is a first
+class display alongside Android, Tizen, BrightSign and the browser.
+
+**Embedded renderer: multi-zone layouts.** The e-paper and microcontroller path can now render a
+full layout, not just a single item, compositing zones natively with Jimp where every zone is an
+image and falling back to a browser render otherwise.
+
+### Fixed
+
+**Samsung Tizen panels black-screened on 2.0.x (#330).** A content security policy added in 2.0.0
+blocked the player's own scripts on Tizen 5.0. The panel installed the app, the shell stayed
+responsive, and nothing rendered, with nothing in any log. Proven on hardware by a control build.
+The policy is removed rather than corrected: it also omitted the `file:` scheme from `img-src` and
+`media-src`, so a corrected script policy would have booted the app and then black-screened it again
+on any cached media. The reasoning that justified the policy, and what would have to be measured on
+a panel before one is ever added back, is recorded in `tizen/config.xml`.
+
+**Playback froze mid-playlist on some Android TV chipsets (#333).** With group sync on, the player
+warms the next clip on a second decoder six seconds before each boundary. Where the chipset allows
+only one decoder, that reclaimed the one already playing: the picture held and the playlist never
+advanced. The stall watchdog did fire, but reported through the path a video uses when it ends
+normally, which a synced group deliberately ignores. A stalled or errored video is now a fault
+distinct from a normal finish, a failed warm-up is no longer promoted at the boundary, and a clip
+that faults on every attempt is held rather than looped.
+
+**Screen background colour never reached the player (#336).** The query that builds the device
+payload lists its columns explicitly and the colour added in 2.0.7 was never added to the list, so
+every push carried no colour and players kept their default black. Two places that painted their own
+black over it, the letterbox around a fullscreen video and the frame around a widget, are fixed with
+it.
+
+**Android displays reinstalled the same build forever (#341).** The OTA check advertised the
+server's own version rather than the version of the APK it would serve. A server whose mounted APK
+is older offers an update, Android accepts the download as a same-version reinstall, and the display
+returns on the old version to be offered again. Two field displays did this 493 times over five
+days with nothing failing anywhere. The server now reads `versionName` out of the APK itself, so it
+cannot advertise a version it does not hold, and the update-check breaker gained a progress axis:
+the same target offered repeatedly to a display that never moves stops being offered. This is the
+skip-after-N that #144 identified and left out.
+
+**The SSSP manifest reported the .wgt size in bytes (#329).** Samsung expects kilobytes, and the
+mismatch failed the install with a message that named neither.
+
+**Raspberry Pi kiosk installs ran two launchers.** Each supervised the other's browser, so a
+restart left an orphaned renderer holding the display. One launcher per install now, supervising
+itself.
+
+### Also
+
+Slide decks, playlists, layouts and widgets all record history whether or not approval is enabled.
+The embedded renderer reads the published snapshot rather than live playlist rows, so an e-paper
+panel no longer shows a draft. `pinnedLookup` handles `options.all` for modern Node request paths.
+
 ## 2.0.7
 
 ### Fixed — 2.0.6 broke the dashboard for everyone

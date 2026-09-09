@@ -14,6 +14,17 @@
   ],
   "releases": [
     {
+      "version": "2.0.8",
+      "date": "2026-09-09",
+      "notes": [
+        "You can now require approval before anything goes live. An admin turns it on, picks who reviews, and changes are then submitted, reviewed and published. It is off unless you switch it on, and switching it on leaves everything already playing alone. Nobody can approve their own work.",
+        "Everything you edit now keeps a history. Content, playlists, layouts, slide decks and widgets all record who changed what and when, and you can look at an older version, compare it with the current one and restore it. Restoring makes a new draft, so nothing on screen changes until you publish it.",
+        "Signs can pull in live information from outside. Point a workspace at a calendar feed and a widget or slide can show whether a room is free, what is booked next and when it frees up.",
+        "Samsung panels running the 2.0 app showed a black screen. That is fixed, and it needs the panel to be reinstalled with the new build. Screens on some Android TV boxes could also freeze part way through a playlist when screens were synced together, which is fixed too.",
+        "Screen background colour works again, LG webOS panels are now supported, and Android displays that were reinstalling the same update over and over will stop."
+      ]
+    },
+    {
       "version": "2.0.7",
       "date": "2026-09-04",
       "notes": [
