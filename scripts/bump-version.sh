@@ -135,7 +135,14 @@ if ! grep -q "^## ${NEW}$" CHANGELOG.md 2>/dev/null; then
 fi
 
 # 7) commit + annotated tag (no push)
-git add VERSION server/package.json server/package-lock.json android/app/build.gradle.kts tizen/config.xml docs/openapi.yaml
+# ⚠️ EVERY FILE STAMPED ABOVE MUST BE LISTED HERE. webos/appinfo.json was stamped at step 4b and
+#    left out of this line, so v2.0.8 was tagged with appinfo.json still on the previous version.
+#    webos-player.test.js asserts that parity, which means the tagged commit failed its own test
+#    suite and the release job never ran. A stamp that is not staged is worse than no stamp: the
+#    working tree looks correct and only CI sees the truth.
+#    js/app.js is stamped from appinfo.json by webos/build-ipk.sh, which the test suite runs, so it
+#    is listed too and the tree stays clean after a test run.
+git add VERSION server/package.json server/package-lock.json android/app/build.gradle.kts tizen/config.xml docs/openapi.yaml webos/appinfo.json webos/js/app.js
 git commit -q -m "chore(release): v$NEW"
 git tag -a "v$NEW" -m "ScreenTinker v$NEW"
 
