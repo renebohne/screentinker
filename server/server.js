@@ -2193,11 +2193,41 @@ app.get(['/tizen', '/tizen/'], (req, res) => {
     + '</div></body></html>');
 });
 
+/*
+ * Prefixes that hold REAL FILES on disk (express.static serves them above), so a miss under one is
+ * a genuine 404 rather than an app route.
+ *
+ * The dashboard is hash-routed: every app route is `/#/something`, and the path is always `/`.
+ * Nothing legitimate lives under these. Before this, an unknown /guides/* fell through to the SPA
+ * and answered 200 with 60KB of dashboard HTML, which is a textbook soft-404. That is worse than a
+ * missing page: sitemap.xml lists six guide URLs, and a crawler that finds a typo'd or retired one
+ * answering 200 with unrelated markup learns to distrust the whole directory. Flagged in
+ * docs/seo-directory-listings.md and unfixed until now.
+ */
+const CONTENT_PREFIXES = ['/guides/', '/integrations/'];
+
+const NOT_FOUND_PAGE = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+  + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+  + '<meta name="robots" content="noindex">'
+  + '<title>Page not found | ScreenTinker</title>'
+  + '<style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;justify-content:center;'
+  + 'align-items:center;min-height:100vh;margin:0;background:#0f172a;color:#e2e8f0}'
+  + 'div{text-align:center;max-width:460px;padding:32px 24px}h1{font-size:22px;margin:0 0 8px}'
+  + 'p{line-height:1.6;color:#94a3b8;font-size:14px}a{color:#3b82f6;text-decoration:none}'
+  + 'a:hover{text-decoration:underline}</style></head><body><div>'
+  + '<h1>Page not found</h1>'
+  + '<p>That page does not exist. Try the <a href="/">home page</a>, or the '
+  + '<a href="/guides/what-is-digital-signage.html">guides</a>.</p>'
+  + '</div></body></html>';
+
 // SPA fallback for app routes. Unmatched /api/ paths return 404 so misrouted
 // clients fail fast instead of hanging until Cloudflare's 15s upstream timeout.
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api/')) {
     return res.status(404).json({ error: 'Not found' });
+  }
+  if (CONTENT_PREFIXES.some((prefix) => req.path.startsWith(prefix))) {
+    return res.status(404).type('html').send(NOT_FOUND_PAGE);
   }
   res.sendFile(path.join(config.frontendDir, 'index.html'));
 });
