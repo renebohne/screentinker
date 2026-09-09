@@ -234,7 +234,8 @@ jobs:
             server-payload.zip \
             server-payload.json \
             "screentinker-sbom-${{ steps.ver.outputs.version }}.cdx.json" \
-            tizen/ScreenTinker.wgt
+            tizen/ScreenTinker.wgt \
+            ScreenTinker.ipk
 
   docker:
     name: Docker image (amd64 + arm64) -> ghcr
