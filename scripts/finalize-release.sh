@@ -20,12 +20,17 @@ TAG="v$VERSION"
 : "${KEYSTORE_PASSWORD:?set KEYSTORE_PASSWORD}"
 : "${KEY_PASSWORD:?set KEY_PASSWORD}"
 
-cleanup() { rm -f ScreenTinker.apk ScreenTinker.wgt "screentinker-$VERSION.tar.gz"; }
+cleanup() { rm -f ScreenTinker.apk ScreenTinker.apk.version ScreenTinker.wgt "screentinker-$VERSION.tar.gz"; }
 trap cleanup EXIT
 
 echo "==> Building signed APK $VERSION"
 ( cd android && KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD" KEY_PASSWORD="$KEY_PASSWORD" ./gradlew assembleRelease )
 cp android/app/build/outputs/apk/release/app-release.apk ScreenTinker.apk
+# #341: the APK declares its own version beside it, so a server never advertises a version it
+# cannot actually serve. lib/apk-cache.js reads this; without it the server falls back to its own
+# VERSION, which is only correct while server and APK ship together. An operator who mounts an
+# older APK at /data/ScreenTinker.apk without a sidecar puts their displays in a reinstall loop.
+printf '%s\n' "$VERSION" > ScreenTinker.apk.version
 
 echo "==> Pulling the CI-built unsigned .wgt from release $TAG"
 gh release download "$TAG" -p ScreenTinker.wgt --clobber
@@ -54,7 +59,7 @@ tar cf "$TMPTAR" \
   --exclude='.claude' --exclude='.cc-writes' \
   --exclude='brightsign/*.zip' --exclude='brightsign/server-payload.json' \
   server frontend scripts VERSION README.md LICENSE \
-  ScreenTinker.apk ScreenTinker.wgt
+  ScreenTinker.apk ScreenTinker.apk.version ScreenTinker.wgt
 tar rf "$TMPTAR" .env.example      # the one .env* that is meant to ship
 gzip -f "$TMPTAR"                  # -> $OUT
 
@@ -90,7 +95,7 @@ fi
 echo "    clean ($(tar tzf "$OUT" | wc -l) files, .env.example present)"
 
 echo "==> Uploading APK + complete tarball to $TAG"
-gh release upload "$TAG" "$OUT" ScreenTinker.apk --clobber
+gh release upload "$TAG" "$OUT" ScreenTinker.apk ScreenTinker.apk.version --clobber
 
 echo "==> Done: $TAG now carries the standalone APK and a tarball bundling apk + wgt."
 

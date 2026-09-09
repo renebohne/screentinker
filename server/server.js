@@ -1422,7 +1422,13 @@ const { getBand } = require('./services/loop-lag');  // #146 Item C: critical-ba
 app.get('/api/update/check', (req, res) => {
   const currentVersion = req.query.version;
   const deviceId = req.query.device_id || null;   // #144: optional; beta4+ clients send it for per-device keying
-  let latestVersion = VERSION;   // replaced by the beta build's declared version for opted-in displays
+  /*
+   * #341: the version we ADVERTISE must describe the bytes we would SERVE, never the server's own
+   * build. Where the stable APK declares its version in a sidecar, that wins; otherwise fall back
+   * to VERSION, which is correct whenever server and APK shipped together and is what every
+   * deployment did before the sidecar existed.
+   */
+  let latestVersion = apkCache.get().version || VERSION;   // replaced by the beta build's declared version for opted-in displays
   let betaChannel = false;   // per-display pre-release opt-in, set from the device row below
   let wasOnBeta = false;     // whether we have actually served this display the beta channel
 

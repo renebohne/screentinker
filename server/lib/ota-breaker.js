@@ -33,6 +33,10 @@ const COOLDOWNS_MS = (process.env.OTA_BREAKER_COOLDOWNS_MS
   ? process.env.OTA_BREAKER_COOLDOWNS_MS.split(',').map(s => parseInt(s, 10))
   : [30_000, 120_000, 480_000, 1_800_000]);                               // 30s -> 2m -> 8m -> cap 30m
 const IDLE_RESET_MS = parseInt(process.env.OTA_BREAKER_IDLE_RESET_MS) || 60 * 60 * 1000;
+// #341 — how many times the same target may be offered to the same key before we accept that it
+// is not landing. Forgiving on purpose: a display can legitimately check once or twice mid-install
+// or across the reboot, so this is not 1. It is a progress check, not a rate check.
+const NO_PROGRESS_LIMIT = parseInt(process.env.OTA_BREAKER_NO_PROGRESS_LIMIT) || 6;
 
 const state = new Map();          // key -> { hits:number[], blockedUntil, level, lastSeen }
 const loggedBad = new Set();      // log unrecognized/superseded versions once
@@ -145,6 +149,31 @@ function decide(clientVersion, latestVersion, deviceId = null, now = Date.now(),
     bump(rateBackoffCtr, now);
     return { update_available: false, reason: 'rate-backoff', retry_after_seconds: Math.ceil(cd / 1000),
              log: `[ota] breaker tripped key=${key} (>${THRESHOLD} checks/${Math.round(WINDOW_MS / 1000)}s, looping) -> backoff ${Math.round(cd / 1000)}s [level ${b.level}]` };
+  }
+
+  /*
+   * #341 — PROGRESS axis. This is the "skip-after-N" that #144 named as option 3 and deliberately
+   * left out; see the scope test in ota-breaker.test.js. The rate breaker above assumes
+   * "slow == safe", and that is wrong for a loop that never terminates: two field displays polled every ~15 minutes, well under the rate
+   * threshold, and reinstalled the same APK 493 times over five days. Nothing failed, so nothing
+   * backed off.
+   *
+   * So count offers of THE SAME target to THE SAME key while the reported version does not move.
+   * Any real progress resets it: the display coming back on a new version, or the server starting
+   * to advertise a different target (an operator fixing the APK). An update that genuinely cannot
+   * be applied - signing mismatch, an OTA client too old to install it, a same-version reinstall -
+   * stops being offered instead of looping forever.
+   */
+  if (b.offerFrom !== clientVersion || b.offerTo !== latestVersion) {
+    b.offerFrom = clientVersion; b.offerTo = latestVersion; b.offers = 0;
+  }
+  b.offers = (b.offers || 0) + 1;
+  if (b.offers > NO_PROGRESS_LIMIT) {
+    return {
+      update_available: false, reason: 'no-progress',
+      log: logOnce('np:' + key + ':' + clientVersion + '>' + latestVersion,
+        `[ota] no progress key=${key}: offered ${latestVersion} to a device still reporting ${clientVersion} ${b.offers} times -> holding off. The served APK probably is not ${latestVersion}, or the display cannot install it.`),
+    };
   }
   return { update_available: true, reason: 'offer' };
 }

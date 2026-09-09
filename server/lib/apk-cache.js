@@ -56,6 +56,23 @@ function readDeclaredVersion(apkPath) {
 
 function refresh() {
   stable = statFirst('ScreenTinker.apk');
+  /*
+   * #341: THE STABLE SLOT DECLARES ITS VERSION TOO, when it can.
+   *
+   * The header above assumed "server and APK ship together", so latest_version on stable was the
+   * server's own VERSION. That assumption breaks the moment an operator mounts their own APK at
+   * /data/ScreenTinker.apk, and it breaks silently and expensively: a server on 2.0.7 serving a
+   * 2.0.0 APK offers 2.0.7 to a 2.0.0 device, Android accepts the download as a same-version
+   * reinstall, the device returns on 2.0.0, and is offered again. Reported in the field as two
+   * displays looping for five days and 493 downloads with nothing failing anywhere.
+   *
+   * Same sidecar mechanism as beta. Unlike beta this does NOT fail closed: an existing deployment
+   * where server and APK really did ship together has no sidecar and must keep working, so an
+   * absent sidecar falls back to the server VERSION as before. The caller reads `version` and
+   * decides. CI writes the sidecar on release, so from then on the served bytes are self-describing
+   * and the fallback only covers hand-mounted APKs.
+   */
+  stable.version = stable.exists ? readDeclaredVersion(stable.path) : null;
   const b = statFirst('ScreenTinker-beta.apk');
   b.version = b.exists ? readDeclaredVersion(b.path) : null;
   beta = b.exists && b.version ? b : { ...EMPTY };   // no declared version -> no beta channel

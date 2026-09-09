@@ -79,14 +79,31 @@ test('(f) legacy client without device_id is caught by the version-keyed path (a
   assert.equal(v(30_000).update_available, false, 'combined version-keyed rate trips without any device_id');
 });
 
-test('(scope) slow #144 drip: stable 1.7.12 polling ~every 12 min is NEVER throttled (fast-flood only)', () => {
-  // documents the deliberate scope: this build catches the fast flood + phantoms, NOT the
-  // slow 1.7.12 drip (that needs #144 option-3 skip-after-N, not included here).
-  for (let i = 0; i < 10; i++) {
+test('(scope) slow drip: offered a bounded number of times, then held off (#144 option-3, added for #341)', () => {
+  /*
+   * SCOPE CHANGED. #144 shipped fast-flood + phantom protection only and recorded here that the
+   * slow drip "needs #144 option-3 skip-after-N, not included here". #341 is the field evidence
+   * that it was needed: two displays polling every ~15 min reinstalled the same APK 493 times
+   * across five days, far under the rate threshold, with nothing failing anywhere to back it off.
+   *
+   * So a slow poller is still offered - a rollout is not throttled - but not forever.
+   */
+  for (let i = 0; i < 6; i++) {
     const v = ota.decide('1.7.12', LATEST, null, T0 + i * 12 * 60_000);
-    assert.equal(v.update_available, true, `12-min drip poll #${i + 1} still offered (not throttled)`);
+    assert.equal(v.update_available, true, `12-min drip poll #${i + 1} still offered`);
     assert.equal(v.reason, 'offer');
   }
+  const held = ota.decide('1.7.12', LATEST, null, T0 + 6 * 12 * 60_000);
+  assert.equal(held.update_available, false, 'the same target stops being offered once it plainly is not landing');
+  assert.equal(held.reason, 'no-progress');
+});
+
+test('(scope) progress resets the budget: a device that moves version is never held off', () => {
+  for (let i = 0; i < 8; i++) ota.decide('1.7.12', LATEST, 'devP', T0 + i * 12 * 60_000);
+  assert.equal(ota.decide('1.7.12', LATEST, 'devP', T0 + 8 * 12 * 60_000).reason, 'no-progress');
+  // The operator corrects the served APK, so the advertised target changes: budget resets.
+  const v = ota.decide('1.7.12', '1.9.3', 'devP', T0 + 9 * 12 * 60_000);
+  assert.equal(v.update_available, true); assert.equal(v.reason, 'offer');
 });
 
 test('state Map is bounded: sweep() evicts idle buckets, keeps recent', () => {
