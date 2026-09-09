@@ -17,14 +17,12 @@
 //  * Single-flight per cache key: 50 panels advancing to the same cold asset => 1 upstream fetch.
 
 const express = require('express');
-const http = require('http');
-const https = require('https');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { db } = require('../db/database');
 const config = require('../config');
-const { assertSafeUrl, pinnedLookup, SsrfError, guardedRequest } = require('../lib/ssrf-guard');
+const { SsrfError, guardedRequest } = require('../lib/ssrf-guard');
 
 const router = express.Router();
 
@@ -80,16 +78,17 @@ function resolveWithRedirects(rawUrl, redirectsLeft, validators) {
     maxRedirects: redirectsLeft,
     validators,
     headers: { 'user-agent': 'ScreenTinker-media-proxy', accept: 'image/*,video/*' },
+    idleTimeoutMs: IDLE_TIMEOUT_MS,
     timeoutMs: IDLE_TIMEOUT_MS,
   }).then((r) => {
     if (r.notModified) return { notModified: true };
     return { res: r.res };
   }).catch((err) => {
     if (err instanceof SsrfError) throw err;
-    if (err.message === 'Too many redirects') throw new MediaError('too-many-redirects');
-    if (err.message === 'Invalid redirect location') throw new MediaError('bad-redirect');
-    if (err.statusCode) throw new MediaError('upstream-status-' + err.statusCode);
-    if (/timeout/i.test(err.message)) throw new MediaError('timeout');
+    if (err.code === 'too-many-redirects') throw new MediaError('too-many-redirects');
+    if (err.code === 'bad-redirect') throw new MediaError('bad-redirect');
+    if (err.code === 'upstream-status') throw new MediaError('upstream-status-' + err.statusCode);
+    if (err.code === 'timeout') throw new MediaError('timeout');
     throw new MediaError(err.message || 'fetch-failed');
   });
 }

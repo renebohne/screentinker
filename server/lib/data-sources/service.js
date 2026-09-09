@@ -84,6 +84,23 @@ function stopDataSourcesPoller() {
   }
 }
 
+// Per-workspace forced refresh limiter. Protects background slots from being monopolized
+// by rapid manual syncs in a single workspace while allowing multitenant fairness.
+const forcedSyncs = new Map(); // workspaceId -> { winStart, count }
+const FORCED_SYNC_WINDOW_MS = 60000;
+const FORCED_SYNC_MAX_PER_WINDOW = 30; // 30 forced syncs per minute per workspace
+
+function checkForcedSyncBudget(workspaceId, now = Date.now()) {
+  if (!workspaceId) return true;
+  let b = forcedSyncs.get(workspaceId);
+  if (!b || (now - b.winStart) >= FORCED_SYNC_WINDOW_MS) {
+    b = { winStart: now, count: 0 };
+    forcedSyncs.set(workspaceId, b);
+  }
+  b.count++;
+  return b.count <= FORCED_SYNC_MAX_PER_WINDOW;
+}
+
 /**
  * Fetch and refresh a data source by ID or row object.
  *
@@ -98,6 +115,10 @@ async function syncDataSource(sourceOrId, force = false) {
 
   if (!row) {
     throw new Error('Data source not found');
+  }
+
+  if (force && row.workspace_id && !checkForcedSyncBudget(row.workspace_id)) {
+    throw Object.assign(new Error('Rate limit exceeded for manual syncs in this workspace'), { code: 'rate-limit' });
   }
 
   let config = {};
@@ -198,21 +219,36 @@ async function syncDataSource(sourceOrId, force = false) {
  * fixed string for exactly that reason. One vocabulary, no addresses.
  */
 function describeSyncError(err) {
-  const m = String((err && err.message) || '');
-  if (err && err.name === 'SsrfError') return 'The calendar address is not allowed';
-  if (/^blocked:/i.test(m)) return 'The calendar address is not allowed';
-  if (/No valid iCal URL/i.test(m)) return 'No calendar URL or data configured';
-  if (/timed out/i.test(m)) return 'The calendar host did not respond in time';
-  if (/size limit/i.test(m)) return 'The calendar feed is too large';
-  if (/responded (\d{3})|HTTP (\d{3})/i.test(m)) {
-    const code = (m.match(/(\d{3})/) || [])[1];
-    return code ? `The calendar host responded with HTTP ${code}` : 'The calendar host responded with an error';
+  if (!err) return 'Sync failed';
+  const m = String(err.message || '');
+  if (err.name === 'SsrfError' || err.code === 'ssrf' || /^blocked:/i.test(m)) {
+    return 'The calendar address is not allowed';
   }
-  if (/could not be parsed|parse/i.test(m)) return 'The calendar data could not be parsed';
+  if (err.code === 'timeout' || /timed out/i.test(m)) {
+    return 'The calendar host did not respond in time';
+  }
+  if (err.code === 'size-limit' || /size limit/i.test(m)) {
+    return 'The calendar feed is too large';
+  }
+  if (err.code === 'upstream-status' || err.statusCode || /responded (\d{3})|HTTP (\d{3})/i.test(m)) {
+    const sc = err.statusCode || (m.match(/responded (\d{3})/i) || [])[1] || (m.match(/HTTP (\d{3})/i) || [])[1] || (m.match(/(\d{3})/) || [])[1];
+    return sc ? `The calendar host responded with HTTP ${sc}` : 'The calendar host responded with an error';
+  }
+  if (err.code === 'too-many-redirects' || err.code === 'bad-redirect') {
+    return 'The calendar host could not be reached';
+  }
+  if (/No valid iCal URL/i.test(m)) {
+    return 'No calendar URL or data configured';
+  }
+  if (/could not be parsed|parse/i.test(m)) {
+    return 'The calendar data could not be parsed';
+  }
   if (/ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|ENETUNREACH|certificate/i.test(m)) {
     return 'The calendar host could not be reached';
   }
-  if (/Unsupported data source type/i.test(m)) return 'Unsupported data source type';
+  if (/Unsupported data source type/i.test(m)) {
+    return 'Unsupported data source type';
+  }
   return 'Sync failed';
 }
 

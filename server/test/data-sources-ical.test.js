@@ -642,4 +642,79 @@ test('data-sources routes reject basic-auth URLs, invalid timezones, and missing
   }
 });
 
+test('all-day events evaluated across multiple timezones (Europe/Berlin, America/Los_Angeles, Asia/Tokyo, UTC)', async () => {
+  const ALL_DAY_ICS = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//ScreenTinker Test//EN
+BEGIN:VEVENT
+UID:evt-allday-tz-matrix
+SUMMARY:Team Offsite
+DTSTART;VALUE=DATE:20260907
+DTEND;VALUE=DATE:20260908
+RRULE:FREQ=DAILY;COUNT=3
+END:VEVENT
+END:VCALENDAR`;
+
+  const timezones = ['UTC', 'Europe/Berlin', 'America/Los_Angeles', 'Asia/Tokyo', 'America/New_York'];
+  for (const tz of timezones) {
+    // 2026-09-07 at midday in target timezone
+    const nowTarget = new Date('2026-09-07T12:00:00Z');
+    const data = await resolveIcalData({ raw_data: ALL_DAY_ICS, timezone: tz, locale: 'en' }, nowTarget);
+
+    assert.equal(data.events_today_count, 1, `events_today_count must be 1 in ${tz}`);
+    assert.equal(data.is_busy, false, `all-day event should not make room busy in ${tz}`);
+    assert.equal(data.status_detail, 'Free all day', `status_detail in ${tz}`);
+    assert.match(data.event_0_date, /Today/i, `event_0_date should be Today in ${tz}`);
+  }
+});
+
+test('parseSafeUrl trims whitespace, normalizes webcal, and rejects blocked targets', () => {
+  const { parseSafeUrl } = require('../lib/ssrf-guard');
+
+  const p1 = parseSafeUrl('  webcal://example.com/feed.ics  ');
+  assert.equal(p1.url.protocol, 'https:');
+  assert.equal(p1.url.hostname, 'example.com');
+  assert.equal(p1.url.pathname, '/feed.ics');
+
+  const p2 = parseSafeUrl('https://example.org/calendar.ics');
+  assert.equal(p2.url.hostname, 'example.org');
+
+  assert.throws(() => parseSafeUrl('https://user:pass@example.com/cal.ics'), (err) => err.reason === 'userinfo');
+  assert.throws(() => parseSafeUrl('http://127.0.0.1/cal.ics'), (err) => err.reason.startsWith('blocked-ip'));
+  assert.throws(() => parseSafeUrl('ftp://example.com/cal.ics'), (err) => err.reason === 'bad-scheme');
+});
+
+test('lookahead_days boundary: lookahead_days=1 lists only today and tomorrow', async () => {
+  const THREE_DAY_ICS = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//ScreenTinker Test//EN
+BEGIN:VEVENT
+UID:evt-day0
+SUMMARY:Today Event
+DTSTART:20260907T100000Z
+DTEND:20260907T110000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-day1
+SUMMARY:Tomorrow Event
+DTSTART:20260908T100000Z
+DTEND:20260908T110000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-day2
+SUMMARY:Day After Tomorrow Event
+DTSTART:20260909T100000Z
+DTEND:20260909T110000Z
+END:VEVENT
+END:VCALENDAR`;
+
+  const now = new Date('2026-09-07T08:00:00Z');
+  const data = await resolveIcalData({ raw_data: THREE_DAY_ICS, lookahead_days: 1, timezone: 'UTC' }, now);
+
+  assert.equal(data.event_count, 2, 'lookahead_days=1 should only include today (Sep 7) and tomorrow (Sep 8)');
+  assert.equal(data.event_0_title, 'Today Event');
+  assert.equal(data.event_1_title, 'Tomorrow Event');
+});
+
+
 

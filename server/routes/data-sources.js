@@ -11,6 +11,8 @@ const { db } = require('../db/database');
 const { syncDataSource, withFetchSlot, bumpDependentWidgets } = require('../lib/data-sources/service');
 const { resolveIcalData } = require('../lib/data-sources/ical-resolver');
 const { requireWorkspaceWrite, canWrite } = require('../lib/permissions');
+const { parseSafeUrl } = require('../lib/ssrf-guard');
+const { isRealTimezone } = require('../lib/device-timezone');
 
 const SUPPORTED_TYPES = new Set(['ical']);
 
@@ -46,30 +48,34 @@ function sanitizeConfigForRole(cfg, req) {
 }
 
 function validateDataSourceConfig(type, config) {
-  if (!config || typeof config !== 'object') return;
-  if (type === 'ical') {
-    if (config.url) {
-      let u;
-      try {
-        u = new URL(String(config.url).replace(/^webcal:\/\//i, 'https://'));
-      } catch (_) {
-        throw new Error('Invalid URL format');
-      }
-      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-        throw new Error('URL must use HTTP, HTTPS, or webcal protocol');
-      }
-      if (u.username || u.password) {
-        throw new Error('Calendar URLs with basic-auth credentials (username/password) are not allowed');
-      }
-    }
-    if (config.timezone) {
-      try {
-        new Intl.DateTimeFormat(undefined, { timeZone: String(config.timezone).trim() });
-      } catch (_) {
-        throw new Error(`Invalid IANA timezone: "${config.timezone}"`);
-      }
+  if (!config || typeof config !== 'object') return null;
+
+  if (config.timezone) {
+    const tzStr = String(config.timezone).trim();
+    if (!isRealTimezone(tzStr)) {
+      return `Invalid IANA timezone: "${config.timezone}"`;
     }
   }
+
+  const hasInline = Boolean(config.ics_data || config.raw_data || config.raw_ics);
+  if (config.url && !hasInline) {
+    try {
+      parseSafeUrl(config.url);
+    } catch (err) {
+      if (err.reason === 'userinfo') {
+        return 'Calendar URLs with basic-auth credentials (username/password) are not allowed';
+      }
+      if (err.reason === 'bad-scheme') {
+        return 'URL must use HTTP, HTTPS, or webcal protocol';
+      }
+      if (err.reason && err.reason.startsWith('blocked-ip')) {
+        return 'The calendar address is not allowed';
+      }
+      return 'Invalid URL format';
+    }
+  }
+
+  return null;
 }
 
 // ─── GET /api/data-sources (List all in current workspace) ─────────────────────
@@ -138,10 +144,9 @@ router.post('/test', requireWorkspaceWrite, async (req, res, next) => {
     return res.status(400).json({ error: 'Config must be an object' });
   }
 
-  try {
-    validateDataSourceConfig(type, parsedConfig);
-  } catch (valErr) {
-    return res.status(400).json({ error: valErr.message });
+  const valErr = validateDataSourceConfig(type, parsedConfig);
+  if (valErr) {
+    return res.status(400).json({ error: valErr });
   }
 
   try {
@@ -191,10 +196,9 @@ router.post('/', requireWorkspaceWrite, (req, res) => {
     return res.status(400).json({ error: 'Config must be an object' });
   }
 
-  try {
-    validateDataSourceConfig(type, parsedConfig);
-  } catch (valErr) {
-    return res.status(400).json({ error: valErr.message });
+  const valErr = validateDataSourceConfig(type, parsedConfig);
+  if (valErr) {
+    return res.status(400).json({ error: valErr });
   }
 
   const cleanName = String(name).trim();
@@ -264,10 +268,9 @@ router.put('/:id', requireWorkspaceWrite, (req, res) => {
     if (!parsedConfig || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) {
       return res.status(400).json({ error: 'Config must be an object' });
     }
-    try {
-      validateDataSourceConfig(existing.type, parsedConfig);
-    } catch (valErr) {
-      return res.status(400).json({ error: valErr.message });
+    const valErr = validateDataSourceConfig(existing.type, parsedConfig);
+    if (valErr) {
+      return res.status(400).json({ error: valErr });
     }
     configJson = JSON.stringify(parsedConfig);
   } else {
@@ -282,11 +285,14 @@ router.put('/:id', requireWorkspaceWrite, (req, res) => {
     WHERE id = ? AND workspace_id = ?
   `).run(cleanName, cleanSlug, configJson, nowSec, req.params.id, wsId);
 
-  // Trigger refresh with new config in background
-  const updatedRow = db.prepare('SELECT * FROM data_sources WHERE id = ?').get(req.params.id);
-  syncDataSource(updatedRow, true).catch(err => {
-    console.warn(`[data-sources] background update sync failed for ${req.params.id}:`, err.message);
-  });
+  // Trigger refresh with new config in background ONLY if config actually changed
+  const configChanged = config !== undefined && configJson !== existing.config;
+  if (configChanged) {
+    const updatedRow = db.prepare('SELECT * FROM data_sources WHERE id = ?').get(req.params.id);
+    syncDataSource(updatedRow, true).catch(err => {
+      console.warn(`[data-sources] background update sync failed for ${req.params.id}:`, err.message);
+    });
+  }
 
   let existingData = null;
   try { existingData = JSON.parse(existing.cached_data || 'null'); } catch (_) {}
