@@ -128,6 +128,10 @@ function buildSnapshotItems(playlistId) {
       )
     ORDER BY pi.sort_order ASC
   `).all(playlistId);
+  // #74/#75: attach per-item schedule blocks (the player honours these in its own
+  // local time via the shared evaluator). An item with zero blocks gets no
+  // `schedules` field -> always on. Additive: old players ignore the field. _iid is
+  // only used here to fetch blocks and is then dropped (snapshot stays id-free).
   // widget_rev is widgets.updated_at, and a data-source change bumps that for the widgets bound
   // to the changed slug (lib/data-sources/service.js bumpDependentWidgets); no workspace-wide
   // MAX(data_sources.updated_at) here, which re-revved unrelated widgets on any rename.
@@ -179,7 +183,12 @@ function expandChildPlaylists(items, depth) {
     // Recurse through buildSnapshotItems so the child gets the SAME treatment as a top-level
     // playlist: the same is_active/expiry filter, the same per-item schedule blocks. Anything less
     // and a nested item would obey different rules from the identical item played directly.
-    for (const child of buildSnapshotItems(it.child_playlist_id)) out.push(child);
+    for (const child of buildSnapshotItems(it.child_playlist_id)) {
+      out.push({
+        ...child,
+        zone_id: child.zone_id || it.zone_id,
+      });
+    }
   }
   return out;
 }
@@ -1234,5 +1243,5 @@ module.exports = router;
  * published_snapshot itself would have neither, and would look correct until the first nested deck
  * or the first no-op republish.
  */
-module.exports.publishPlaylist = publishPlaylist;
 module.exports.publishPlaylist = publishPlaylist; // #73: shared with the agency auto-publish path
+module.exports.buildSnapshotItems = buildSnapshotItems;

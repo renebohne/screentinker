@@ -28,23 +28,32 @@ db.exec(`
     id TEXT PRIMARY KEY, user_id TEXT, workspace_id TEXT, name TEXT,
     pairing_code TEXT, claim_secret TEXT, status TEXT,
     device_token TEXT, blocked INTEGER DEFAULT 0, screen_profile TEXT,
-    playlist_id TEXT, playlist_source TEXT, layout_id TEXT
+    playlist_id TEXT, playlist_source TEXT, layout_id TEXT,
+    timezone TEXT, reported_timezone TEXT, background_color TEXT DEFAULT '#000000'
   );
   CREATE TABLE playlists (
-    id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, status TEXT DEFAULT 'published'
+    id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, status TEXT DEFAULT 'published',
+    published_snapshot TEXT, published_structure TEXT, updated_at INTEGER DEFAULT 0
   );
   CREATE TABLE playlist_items (
     id TEXT PRIMARY KEY, playlist_id TEXT, content_id TEXT,
     sort_order INTEGER DEFAULT 0, duration_sec INTEGER DEFAULT 30, updated_at INTEGER DEFAULT 0,
-    zone_id TEXT, widget_id TEXT, child_playlist_id TEXT
+    zone_id TEXT, widget_id TEXT, child_playlist_id TEXT, muted INTEGER DEFAULT 0
+  );
+  CREATE TABLE playlist_item_schedules (
+    id TEXT PRIMARY KEY, playlist_item_id TEXT, active_days TEXT,
+    start_time TEXT, end_time TEXT, start_date TEXT, end_date TEXT,
+    sort_order INTEGER DEFAULT 0, created_at INTEGER DEFAULT 0
   );
   CREATE TABLE widgets (
     id TEXT PRIMARY KEY, workspace_id TEXT, widget_type TEXT, name TEXT, config TEXT, updated_at INTEGER DEFAULT 0
   );
   CREATE TABLE content (
     id TEXT PRIMARY KEY, workspace_id TEXT, type TEXT, mime_type TEXT, filepath TEXT,
-    remote_url TEXT, thumbnail_path TEXT, updated_at INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1,
-    expires_at INTEGER
+    filename TEXT, file_size INTEGER DEFAULT 0, duration_sec REAL, remote_url TEXT,
+    thumbnail_path TEXT, updated_at INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1,
+    expires_at INTEGER, unstable_connection INTEGER DEFAULT 0,
+    captions_enabled INTEGER DEFAULT 0, captions_lang TEXT, subtitle_url TEXT, subtitle_lang TEXT
   );
   CREATE TABLE embedded_cursor (
     device_id TEXT PRIMARY KEY, item_index INTEGER DEFAULT 0, started_at INTEGER DEFAULT 0
@@ -54,11 +63,13 @@ db.exec(`
     PRIMARY KEY(device_id, zone_id)
   );
   CREATE TABLE layouts (
-    id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, is_template INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0
+    id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, is_template INTEGER DEFAULT 0,
+    width INTEGER DEFAULT 1920, height INTEGER DEFAULT 1080, updated_at INTEGER DEFAULT 0
   );
   CREATE TABLE layout_zones (
     id TEXT PRIMARY KEY, layout_id TEXT, name TEXT, x_percent REAL, y_percent REAL,
-    width_percent REAL, height_percent REAL, z_index INTEGER DEFAULT 0, sort_order INTEGER DEFAULT 0
+    width_percent REAL, height_percent REAL, z_index INTEGER DEFAULT 0, sort_order INTEGER DEFAULT 0,
+    fit_mode TEXT DEFAULT 'contain', background_color TEXT DEFAULT '#000000'
   );
   CREATE VIEW device_resolved_playlist AS
   SELECT d.id AS device_id, d.playlist_id, 'device' AS source, d.layout_id
@@ -71,6 +82,7 @@ const { parseProfile, getPreset, listPresets } = require('../lib/embedded-profil
 const { cacheKey, toETag, isNotModified, get: cacheGet, set: cacheSet } = require('../lib/embedded-cache');
 const { postprocess } = require('../lib/embedded-postprocess');
 const { deviceTokenAuth } = require('../middleware/deviceTokenAuth');
+const { publishPlaylist } = require('../routes/playlists');
 const embeddedRouter = require('../routes/embedded');
 
 describe('Embedded Profiles', () => {
@@ -449,6 +461,7 @@ describe('Embedded Edge Cases & Robustness', () => {
     db.prepare("INSERT INTO playlists (id, workspace_id, name, status) VALUES (?, 'ws-1', 'Test PL', 'published')").run(plId);
     db.prepare("INSERT INTO content (id, workspace_id, type, is_active) VALUES ('c1', 'ws-1', 'image', 1)").run();
     db.prepare("INSERT INTO playlist_items (id, playlist_id, content_id, sort_order, duration_sec) VALUES ('pi1', ?, 'c1', 0, 30)").run(plId);
+    publishPlaylist(plId);
     db.prepare("INSERT INTO devices (id, name, workspace_id, playlist_id) VALUES ('dev-edge-1', 'Edge Dev', 'ws-1', ?)").run(plId);
 
     // Non-integer inputs must not produce NaN index
@@ -463,6 +476,17 @@ describe('Embedded Edge Cases & Robustness', () => {
     const resOverflow = resolveCurrentItem('dev-edge-1', 999);
     assert.ok(resOverflow);
     assert.equal(resOverflow.itemIndex, 0);
+  });
+
+  test('resolveCurrentItem returns null for draft/unpublished playlists', () => {
+    const plId = 'pl-draft-test';
+    db.prepare("INSERT INTO playlists (id, workspace_id, name, status, published_snapshot) VALUES (?, 'ws-1', 'Draft PL', 'draft', NULL)").run(plId);
+    db.prepare("INSERT INTO content (id, workspace_id, type, is_active) VALUES ('c-draft', 'ws-1', 'image', 1)").run();
+    db.prepare("INSERT INTO playlist_items (id, playlist_id, content_id, sort_order, duration_sec) VALUES ('pi-draft', ?, 'c-draft', 0, 30)").run(plId);
+    db.prepare("INSERT INTO devices (id, name, workspace_id, playlist_id) VALUES ('dev-draft-1', 'Draft Dev', 'ws-1', ?)").run(plId);
+
+    const res = resolveCurrentItem('dev-draft-1');
+    assert.equal(res, null, 'draft/unpublished playlist must never be served to embedded devices');
   });
 
   test('resolveLayoutItems returns null for empty or unpublished playlist (yields 404, not black 200)', () => {
@@ -499,6 +523,8 @@ describe('Embedded Edge Cases & Robustness', () => {
     db.prepare("INSERT INTO playlist_items (id, playlist_id, content_id, sort_order, duration_sec) VALUES ('pi_orphan', ?, 'c_orphan', 2, 30)").run(plId);
     db.exec("UPDATE playlist_items SET zone_id = 'z_deleted' WHERE id = 'pi_orphan'");
 
+    publishPlaylist(plId);
+
     db.prepare("INSERT INTO devices (id, name, workspace_id, playlist_id, layout_id, screen_profile) VALUES ('dev-parity-1', 'Parity Dev', 'ws-1', ?, ?, '{\"preset\":\"seeed-reterminal-sticky\"}')").run(plId, layoutId);
 
     const res = resolveLayoutItems('dev-parity-1');
@@ -510,8 +536,8 @@ describe('Embedded Edge Cases & Robustness', () => {
 
     assert.ok(smallEntry);
     assert.ok(largeEntry);
-    assert.equal(smallEntry.item.id, 'pi_unassigned', 'unassigned item should land in first empty zone (z_small)');
-    assert.equal(largeEntry.item.id, 'pi_assigned', 'assigned item should land in z_large');
+    assert.equal(smallEntry.item.content_id, 'c_unassigned', 'unassigned item should land in first empty zone (z_small)');
+    assert.equal(largeEntry.item.content_id, 'c_assigned', 'assigned item should land in z_large');
   });
 });
 
@@ -550,6 +576,7 @@ describe('Embedded HTTP Route & Fallback Handling', () => {
     db.prepare("INSERT INTO playlists (id, workspace_id, name, status) VALUES (?, 'ws-1', 'Single PL', 'published')").run(plId);
     db.prepare("INSERT INTO content (id, workspace_id, type, mime_type, filepath, is_active) VALUES ('c-rt-1', 'ws-1', 'image', 'image/png', 'route-test-single.png', 1)").run();
     db.prepare("INSERT INTO playlist_items (id, playlist_id, content_id, sort_order, duration_sec) VALUES ('pi-rt-1', ?, 'c-rt-1', 0, 30)").run(plId);
+    publishPlaylist(plId);
     db.prepare("INSERT INTO devices (id, name, workspace_id, playlist_id, device_token, screen_profile) VALUES (?, 'Single Dev', 'ws-1', ?, ?, '{\"preset\":\"seeed-reterminal-sticky\"}')").run(devId, plId, token);
 
     const res = await fetch(`${baseUrl}/render?device_id=${devId}`, {
@@ -591,6 +618,8 @@ describe('Embedded HTTP Route & Fallback Handling', () => {
     db.prepare("INSERT INTO playlist_items (id, playlist_id, widget_id, zone_id, sort_order, duration_sec) VALUES ('pi-rt-w', ?, 'w-rt-fb', 'z-w-1', 0, 30)").run(plId);
     // Item 2: image
     db.prepare("INSERT INTO playlist_items (id, playlist_id, content_id, zone_id, sort_order, duration_sec) VALUES ('pi-rt-img', ?, 'c-rt-fb', 'z-w-2', 1, 30)").run(plId);
+
+    publishPlaylist(plId);
 
     db.prepare("INSERT INTO devices (id, name, workspace_id, playlist_id, layout_id, device_token, screen_profile) VALUES (?, 'Fallback Dev', 'ws-1', ?, ?, ?, '{\"preset\":\"seeed-reterminal-sticky\"}')").run(devId, plId, layId, token);
 
@@ -726,3 +755,210 @@ describe('remote web pages are navigated, not pasted', () => {
     assert.equal(calls.fetch.length, 0);
   });
 });
+
+describe('Issue #337 Follow-ups: Robustness, Parity & Deduplication', () => {
+  const { resolveCurrentItem, resolveLayoutItems } = embeddedRouter;
+  const {
+    safeLocalImagePath,
+    parseColorToRgba,
+    withTimeout,
+    renderLayoutNative,
+    safeDimension,
+  } = require('../lib/embedded-render');
+  const { parseProfile } = require('../lib/embedded-profiles');
+
+  test('parseProfile enforces 10000 dimension ceiling', () => {
+    assert.equal(parseProfile({ width: 10001, height: 480 }), null);
+    assert.equal(parseProfile({ width: 800, height: 10001 }), null);
+    const valid = parseProfile({ width: 10000, height: 10000 });
+    assert.ok(valid);
+    assert.equal(valid.width, 10000);
+    assert.equal(valid.height, 10000);
+    assert.equal(safeDimension(10001, 800), 800);
+    assert.equal(safeDimension(500, 800), 500);
+  });
+
+  test('safeLocalImagePath rejects path traversal and returns safe absolute path', () => {
+    assert.equal(safeLocalImagePath(null), null);
+    assert.throws(() => safeLocalImagePath('../../../etc/passwd'), (e) => e.code === 'NOT_FOUND' || e.code === 'INVALID_PATH');
+
+    const tmpUpload = path.join(require('../config').contentDir);
+    fs.mkdirSync(tmpUpload, { recursive: true });
+    const imgPath = path.join(tmpUpload, 'safe-path-test.png');
+    fs.writeFileSync(imgPath, Buffer.from('test'));
+
+    const resolved = safeLocalImagePath('safe-path-test.png');
+    assert.equal(resolved, imgPath);
+
+    try { fs.unlinkSync(imgPath); } catch (_) {}
+  });
+
+  test('parseColorToRgba converts hex and numbers to uint32 RGBA', () => {
+    assert.equal(parseColorToRgba('#ffffff'), 0xFFFFFFFF);
+    assert.equal(parseColorToRgba('#fff'), 0xFFFFFFFF);
+    assert.equal(parseColorToRgba('#ff0000'), 0xFF0000FF);
+    assert.equal(parseColorToRgba('#00ff0080'), 0x00FF0080);
+    assert.equal(parseColorToRgba(0x12345678), 0x12345678);
+    assert.equal(parseColorToRgba('invalid', 0x000000FF), 0x000000FF);
+  });
+
+  test('withTimeout rejects on deadline exceeded', async () => {
+    const slow = new Promise((resolve) => setTimeout(resolve, 200));
+    await assert.rejects(
+      () => withTimeout(slow, 50, 'Deadline reached'),
+      (e) => e.code === 'RENDER_TIMEOUT' && e.message === 'Deadline reached'
+    );
+
+    const fast = Promise.resolve('ok');
+    const res = await withTimeout(fast, 1000);
+    assert.equal(res, 'ok');
+  });
+
+  test('renderLayoutNative handles per-zone failure gracefully without failing composite', async () => {
+    const tmpUpload = path.join(require('../config').contentDir);
+    fs.mkdirSync(tmpUpload, { recursive: true });
+    const imgPath = path.join(tmpUpload, 'zone-valid.png');
+    const validImg = new Jimp({ width: 100, height: 100, color: 0x00FF00FF });
+    fs.writeFileSync(imgPath, await validImg.getBuffer('image/png'));
+
+    const layout = { id: 'lay-resilient', background_color: '#112233' };
+    const zoneEntries = [
+      // Zone 1: Missing / bad file
+      {
+        zone: { id: 'z1', x_percent: 0, y_percent: 0, width_percent: 50, height_percent: 100, background_color: '#445566' },
+        item: { id: 'i1' },
+        content: { filepath: 'non-existent-file.png', mime_type: 'image/png' },
+      },
+      // Zone 2: Valid file with contain fit_mode
+      {
+        zone: { id: 'z2', x_percent: 50, y_percent: 0, width_percent: 50, height_percent: 100, fit_mode: 'contain', background_color: '#000000' },
+        item: { id: 'i2' },
+        content: { filepath: 'zone-valid.png', mime_type: 'image/png' },
+      },
+    ];
+
+    const res = await renderLayoutNative(layout, zoneEntries, { width: 400, height: 200 });
+    assert.ok(res);
+    assert.ok(Buffer.isBuffer(res.png));
+
+    const rendered = await Jimp.fromBuffer(res.png);
+    assert.equal(rendered.bitmap.width, 400);
+    assert.equal(rendered.bitmap.height, 200);
+
+    try { fs.unlinkSync(imgPath); } catch (_) {}
+  });
+
+  test('embedded playlist resolution honors per-item ScheduleEval schedule blocks and timezone', () => {
+    const devId = 'dev-sched-test';
+    const plId = 'pl-sched-test';
+    const token = 'tok-sched-test';
+
+    db.prepare("INSERT INTO playlists (id, workspace_id, name, status) VALUES (?, 'ws-1', 'Sched PL', 'published')").run(plId);
+    db.prepare("INSERT INTO content (id, workspace_id, type, mime_type, filepath, is_active) VALUES ('c-on', 'ws-1', 'image', 'image/png', 'on.png', 1)").run();
+    db.prepare("INSERT INTO content (id, workspace_id, type, mime_type, filepath, is_active) VALUES ('c-off', 'ws-1', 'image', 'image/png', 'off.png', 1)").run();
+
+    // Item 1: Always on (no schedule blocks)
+    db.prepare("INSERT INTO playlist_items (id, playlist_id, content_id, sort_order, duration_sec) VALUES ('pi-always-on', ?, 'c-on', 0, 30)").run(plId);
+
+    // Item 2: Dayparting block for 01:00-02:00 UTC only (inactive outside that window)
+    db.prepare("INSERT INTO playlist_items (id, playlist_id, content_id, sort_order, duration_sec) VALUES ('pi-scheduled-off', ?, 'c-off', 1, 30)").run(plId);
+    db.prepare("INSERT INTO playlist_item_schedules (id, playlist_item_id, active_days, start_time, end_time) VALUES ('pis-1', 'pi-scheduled-off', '0,1,2,3,4,5,6', '01:00', '02:00')").run();
+
+    publishPlaylist(plId);
+
+    db.prepare("INSERT INTO devices (id, name, workspace_id, playlist_id, device_token, timezone, screen_profile) VALUES (?, 'Sched Dev', 'ws-1', ?, ?, 'UTC', '{\"preset\":\"seeed-reterminal-sticky\"}')").run(devId, plId, token);
+
+    // If current UTC time is outside 01:00-02:00, pi-scheduled-off is filtered out, leaving only pi-always-on
+    const resolved = resolveCurrentItem(devId);
+    assert.ok(resolved);
+    assert.ok(resolved.total >= 1);
+    assert.equal(resolved.content.content_id, 'c-on');
+  });
+
+  test('nested playlist items propagate zone_id and respect parent layout', () => {
+    const parentPlId = 'pl-parent-test';
+    const childPlId = 'pl-child-test';
+    const layId = 'lay-nest-test';
+    const devId = 'dev-nest-test';
+
+    db.prepare("INSERT INTO layouts (id, workspace_id, name) VALUES (?, 'ws-1', 'Nest Lay')").run(layId);
+    db.prepare("INSERT INTO layout_zones (id, layout_id, name, x_percent, y_percent, width_percent, height_percent) VALUES ('z-nest-1', ?, 'Z1', 0, 0, 100, 100)").run(layId);
+
+    db.prepare("INSERT INTO playlists (id, workspace_id, name, status) VALUES (?, 'ws-1', 'Child PL', 'published')").run(childPlId);
+    db.prepare("INSERT INTO playlists (id, workspace_id, name, status) VALUES (?, 'ws-1', 'Parent PL', 'published')").run(parentPlId);
+
+    db.prepare("INSERT INTO content (id, workspace_id, type, mime_type, filepath, is_active) VALUES ('c-child-item', 'ws-1', 'image', 'image/png', 'child.png', 1)").run();
+    db.prepare("INSERT INTO playlist_items (id, playlist_id, content_id, sort_order, duration_sec) VALUES ('pi-child-1', ?, 'c-child-item', 0, 30)").run(childPlId);
+
+    // Parent item points to child playlist and assigns zone_id = 'z-nest-1'
+    db.prepare("INSERT INTO playlist_items (id, playlist_id, child_playlist_id, zone_id, sort_order, duration_sec) VALUES ('pi-parent-ref', ?, ?, 'z-nest-1', 0, 30)").run(parentPlId, childPlId);
+
+    publishPlaylist(childPlId);
+    publishPlaylist(parentPlId);
+
+    db.prepare("INSERT INTO devices (id, name, workspace_id, playlist_id, layout_id, screen_profile) VALUES (?, 'Nest Dev', 'ws-1', ?, ?, '{\"preset\":\"seeed-reterminal-sticky\"}')").run(devId, parentPlId, layId);
+
+    const layoutResolved = resolveLayoutItems(devId);
+    assert.ok(layoutResolved);
+    assert.equal(layoutResolved.zoneEntries.length, 1);
+    assert.equal(layoutResolved.zoneEntries[0].zone.id, 'z-nest-1');
+    assert.equal(layoutResolved.zoneEntries[0].content.content_id, 'c-child-item');
+  });
+
+  test('renderLayoutNative stretches image in fit_mode fill', async () => {
+    const tmpUpload = path.join(require('../config').contentDir);
+    fs.mkdirSync(tmpUpload, { recursive: true });
+    const imgPath = path.join(tmpUpload, 'fill-mode-test.png');
+    // Create a 200x100 source image
+    const srcImg = new Jimp({ width: 200, height: 100, color: 0xFF0000FF });
+    fs.writeFileSync(imgPath, await srcImg.getBuffer('image/png'));
+
+    const layout = { id: 'lay-fill' };
+    const zoneEntries = [
+      {
+        zone: { id: 'z-fill', x_percent: 0, y_percent: 0, width_percent: 100, height_percent: 100, fit_mode: 'fill' },
+        item: { id: 'it-fill' },
+        content: { filepath: 'fill-mode-test.png', mime_type: 'image/png' },
+      },
+    ];
+
+    const res = await renderLayoutNative(layout, zoneEntries, { width: 300, height: 300 });
+    assert.ok(res);
+    assert.ok(Buffer.isBuffer(res.png));
+
+    const rendered = await Jimp.fromBuffer(res.png);
+    assert.equal(rendered.bitmap.width, 300);
+    assert.equal(rendered.bitmap.height, 300);
+
+    try { fs.unlinkSync(imgPath); } catch (_) {}
+  });
+
+  test('renderLayout accepts device.background_color for composite background', async () => {
+    const tmpUpload = path.join(require('../config').contentDir);
+    fs.mkdirSync(tmpUpload, { recursive: true });
+    const imgPath = path.join(tmpUpload, 'bg-color-test.png');
+    const srcImg = new Jimp({ width: 100, height: 100, color: 0x0000FFFF });
+    fs.writeFileSync(imgPath, await srcImg.getBuffer('image/png'));
+
+    const layout = { id: 'lay-bg' };
+    const zoneEntries = [
+      {
+        zone: { id: 'z-bg', x_percent: 0, y_percent: 0, width_percent: 50, height_percent: 50, fit_mode: 'contain' },
+        item: { id: 'it-bg' },
+        content: { filepath: 'bg-color-test.png', mime_type: 'image/png' },
+      },
+    ];
+
+    const res = await renderLayoutNative(layout, zoneEntries, { width: 200, height: 200 }, { device: { background_color: '#FFFFFF' } });
+    assert.ok(res);
+    assert.ok(Buffer.isBuffer(res.png));
+
+    const rendered = await Jimp.fromBuffer(res.png);
+    // Upper-right quadrant (150, 50) is background: should be white (0xFFFFFFFF)
+    const color = rendered.getPixelColor(150, 50);
+    assert.equal(color, 0xFFFFFFFF);
+
+    try { fs.unlinkSync(imgPath); } catch (_) {}
+  });
+});
+

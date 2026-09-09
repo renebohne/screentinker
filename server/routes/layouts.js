@@ -82,18 +82,44 @@ router.get('/:id', (req, res) => {
   res.json(layout);
 });
 
-// Create layout in the caller's current workspace.
+const VALID_FIT_MODES = new Set(['cover', 'contain', 'fill']);
+function safeFitMode(m) {
+  return (typeof m === 'string' && VALID_FIT_MODES.has(m.toLowerCase())) ? m.toLowerCase() : 'contain';
+}
+function safeHexColor(c, fallback = '#000000') {
+  if (!c || typeof c !== 'string') return fallback;
+  const s = c.trim();
+  return /^#[0-9a-fA-F]{3,8}$/.test(s) ? s : fallback;
+}
+
+// Create layout
 router.post('/', (req, res) => {
-  if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before creating layouts.' });
-  const { name, width, height, zones } = req.body;
-  if (!name) return res.status(400).json({ error: 'name required' });
+  const { name, width, height, zones, is_template, template_category } = req.body;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+
+  // Templates are platform-wide; only platform_admin can create them.
+  if (is_template && !PLATFORM_ROLES.includes(req.user.role)) {
+    return res.status(403).json({ error: 'Only platform admins can create templates' });
+  }
+  // Owned layouts require an active workspace.
+  if (!is_template && !req.workspaceId) {
+    return res.status(400).json({ error: 'Workspace ID is required' });
+  }
 
   const id = uuidv4();
-  db.prepare('INSERT INTO layouts (id, user_id, workspace_id, name, width, height) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(id, req.user.id, req.workspaceId, name, width || 1920, height || 1080);
+  const w = width || 1920;
+  const h = height || 1080;
+  const tpl = is_template ? 1 : 0;
+  const cat = is_template ? (template_category || 'general') : null;
+  const wsId = is_template ? null : req.workspaceId;
+  const userId = is_template ? null : req.user.id;
 
-  // Create zones if provided
-  if (zones && Array.isArray(zones)) {
+  db.prepare(`
+    INSERT INTO layouts (id, name, width, height, is_template, template_category, user_id, workspace_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, name, w, h, tpl, cat, userId, wsId);
+
+  if (Array.isArray(zones) && zones.length > 0) {
     const stmt = db.prepare(`
       INSERT INTO layout_zones (id, layout_id, name, x_percent, y_percent, width_percent, height_percent, z_index, zone_type, fit_mode, background_color, sort_order)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -101,7 +127,7 @@ router.post('/', (req, res) => {
     zones.forEach((z, i) => {
       stmt.run(uuidv4(), id, z.name || `Zone ${i + 1}`, z.x_percent || 0, z.y_percent || 0,
         z.width_percent || 100, z.height_percent || 100, z.z_index || 0,
-        z.zone_type || 'content', z.fit_mode || 'contain', z.background_color || '#000000', i);
+        z.zone_type || 'content', safeFitMode(z.fit_mode), safeHexColor(z.background_color, '#000000'), i);
     });
   }
 
@@ -183,8 +209,8 @@ router.put('/:id', (req, res) => {
         const vals = [
           z.name || `Zone ${i + 1}`,
           z.x_percent || 0, z.y_percent || 0, z.width_percent || 100, z.height_percent || 100,
-          z.z_index || 0, z.zone_type || 'content', z.fit_mode || 'contain',
-          z.background_color || '#000000', i,
+          z.z_index || 0, z.zone_type || 'content', safeFitMode(z.fit_mode),
+          safeHexColor(z.background_color, '#000000'), i,
         ];
         if (existingSet.has(zid)) updateZone.run(...vals, zid, req.params.id);
         else insertZone.run(zid, req.params.id, ...vals);
@@ -260,7 +286,7 @@ router.post('/:id/zones', (req, res) => {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(id, req.params.id, name || 'New Zone', x_percent || 0, y_percent || 0,
     width_percent || 50, height_percent || 50, z_index || 0,
-    zone_type || 'content', fit_mode || 'contain', background_color || '#000000', maxOrder + 1);
+    zone_type || 'content', safeFitMode(fit_mode), safeHexColor(background_color, '#000000'), maxOrder + 1);
 
   db.prepare("UPDATE layouts SET updated_at = strftime('%s','now') WHERE id = ?").run(req.params.id);
 
@@ -280,7 +306,13 @@ router.put('/:id/zones/:zoneId', (req, res) => {
   const updates = [];
   const values = [];
   fields.forEach(f => {
-    if (req.body[f] !== undefined) { updates.push(`${f} = ?`); values.push(req.body[f]); }
+    if (req.body[f] !== undefined) {
+      let val = req.body[f];
+      if (f === 'fit_mode') val = safeFitMode(val);
+      if (f === 'background_color') val = safeHexColor(val, '#000000');
+      updates.push(`${f} = ?`);
+      values.push(val);
+    }
   });
 
   if (updates.length > 0) {
