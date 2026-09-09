@@ -500,17 +500,51 @@ router.post('/check-update', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/admin/trigger-update — run docker compose pull && up -d,
-// or return manual instructions when docker is disabled.
+/*
+ * How this instance is actually installed, so "Update Now" can hand back a command that works.
+ *
+ * This used to build a `docker compose` line unconditionally, with composeFilePath defaulting to
+ * /opt/screentinker/docker-compose.yml whether or not that file existed. Self-hosters running the
+ * git + systemd install documented in docs/operations.md were therefore told to run a docker
+ * command against a compose file they do not have. One of them upgraded 1.9.39 to 2.0.8 only
+ * because he had written his own update script; the dashboard's advice was useless to him.
+ *
+ * /.dockerenv is the reliable in-container signal, and it matters because the compose file lives
+ * on the HOST, so testing for it from inside the container always fails. Outside a container, a
+ * checkout with scripts/upgrade.sh in it is the documented path and that script already does the
+ * right thing (backup, checkout the tag, npm ci --omit=dev, restart, report the running version).
+ */
+function detectInstall() {
+  const fs = require('fs');
+  const path = require('path');
+  const config = require('../config');
+  const appRoot = path.join(__dirname, '..', '..');
+  const exists = (p) => { try { return fs.existsSync(p); } catch (_) { return false; } };
+
+  if (exists('/.dockerenv') || exists(config.composeFilePath)) {
+    const f = config.composeFilePath;
+    return { kind: 'docker', command: `docker compose -f ${f} pull && docker compose -f ${f} up -d` };
+  }
+  if (exists(path.join(appRoot, '.git')) && exists(path.join(appRoot, 'scripts', 'upgrade.sh'))) {
+    return { kind: 'git', command: `cd ${appRoot} && scripts/upgrade.sh` };
+  }
+  // Say so rather than guessing. A confidently wrong command costs more than an honest shrug.
+  return { kind: 'unknown', command: null };
+}
+
+// POST /api/admin/trigger-update — run docker compose pull && up -d where this instance is
+// actually docker-managed, otherwise hand back the command that suits how it IS installed.
 router.post('/trigger-update', requirePlatformAdmin, async (req, res) => {
   const { exec } = require('child_process');
-  const composeFile = require('../config').composeFilePath;
-  const cmd = `docker compose -f ${composeFile} pull && docker compose -f ${composeFile} up -d`;
+  const install = detectInstall();
+  const cmd = install.command;
 
-  if (!require('../config').dockerUpdateEnabled) {
+  if (install.kind !== 'docker' || !require('../config').dockerUpdateEnabled) {
     return res.json({
       docker_enabled: false,
-      instructions: cmd,
+      install: install.kind,
+      instructions: cmd
+        || 'This instance was not installed in a way the server recognises, so there is no safe command to suggest. See docs/operations.md for the upgrade steps.',
     });
   }
 
@@ -570,3 +604,5 @@ router.get('/limiter-rejections', requirePlatformAdmin, (req, res) => {
 });
 
 module.exports = router;
+module.exports.detectInstall = detectInstall;   // exported for admin-update-command.test.js
+
