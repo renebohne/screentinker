@@ -81,8 +81,18 @@ class BundleCacheTest {
         cache.fetch(base, "c1", 7L)
         server?.close()          // the WAN is now down, which is the whole scenario
         assertEquals(HTML, cache.cachedHtml("c1", 7L))
-        // ...and a fetch attempt fails cleanly rather than throwing into the player.
-        assertNull(cache.fetch(base, "c1", 8L))
+
+        /*
+         * ...and a fetch attempt fails cleanly rather than throwing into the player.
+         *
+         * ⚠️ AIMED AT A PORT NOTHING CAN RECLAIM, not at the one we just closed. serve() takes an
+         * ephemeral port, and once it is released anything else on the machine may bind it: on a
+         * busy CI runner this assert saw a live socket on the recycled port, the fetch succeeded,
+         * and the job went red with no code change (observed once on 5f13c40, green on re-run).
+         * Port 9 is discard/unassigned and privileged, so nothing can be listening on it, which is
+         * the condition the test actually means by "the server is gone".
+         */
+        assertNull(cache.fetch("http://127.0.0.1:9", "c1", 8L))
     }
 
     @Test fun `a different revision is a MISS, not a stale hit`() {
