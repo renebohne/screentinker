@@ -46,7 +46,6 @@ const { render, renderLayout, isLayoutImageOnly, isBrowserAvailable, looksLikeIm
 const { postprocess }       = require('../lib/embedded-postprocess');
 const pairLockout           = require('../lib/pair-lockout');
 const { sixDigitCode }      = require('../lib/numeric-code');
-const { buildSnapshotItems } = require('./playlists');
 const ScheduleEval          = require('../lib/schedule-eval');
 const { effectiveDeviceTz } = require('../lib/device-timezone');
 
@@ -177,14 +176,68 @@ function dynamicRevFor(item, nowSec) {
  * @returns {{ item, content, itemIndex, expiresIn, total } | null}
  *   null when no playlist or no items.
  */
+function resolveDeviceTimezone(device) {
+  const devTz = effectiveDeviceTz(device);
+  if (devTz) return devTz;
+  if (device?.workspace_id) {
+    try {
+      const ws = db.prepare('SELECT timezone FROM workspaces WHERE id = ?').get(device.workspace_id);
+      if (ws?.timezone) return ws.timezone;
+    } catch (_) {}
+  }
+  return 'UTC';
+}
+
+function getPublishedPlaylistItems(playlistId) {
+  if (!playlistId) return [];
+  const playlist = db.prepare('SELECT published_snapshot FROM playlists WHERE id = ?').get(playlistId);
+  if (!playlist?.published_snapshot) return [];
+  let items = [];
+  try {
+    items = JSON.parse(playlist.published_snapshot);
+    if (!Array.isArray(items)) return [];
+  } catch (_) {
+    return [];
+  }
+  for (const a of items) {
+    if (a.widget_id) {
+      try {
+        const w = db.prepare('SELECT updated_at FROM widgets WHERE id = ?').get(a.widget_id);
+        if (w) a.widget_rev = w.updated_at ?? a.widget_rev ?? 0;
+      } catch (_) {}
+    }
+    if (a.content_id) {
+      try {
+        const c = db.prepare('SELECT COALESCE(NULLIF(updated_at, 0), created_at) AS rev, filepath, mime_type, file_size FROM content WHERE id = ?').get(a.content_id);
+        if (c) {
+          a.content_rev = c.rev ?? a.content_rev ?? 0;
+          if (c.filepath) a.filepath = c.filepath;
+          if (c.mime_type) a.mime_type = c.mime_type;
+          if (c.file_size != null) a.file_size = c.file_size;
+        }
+      } catch (_) {}
+    }
+  }
+  return items;
+}
+
+/*
+ * Resolve the current playlist item for a device, advancing the cursor if the
+ * current item's duration has elapsed.
+ *
+ * @param {string} deviceId
+ * @param {string|null} forceIndex  Optional ?item= override (for testing).
+ * @returns {{ item, content, itemIndex, expiresIn, total } | null}
+ *   null when no playlist or no items.
+ */
 function resolveCurrentItem(deviceId, forceIndex) {
   const { playlist_id } = resolveDeviceContext(deviceId);
   if (!playlist_id) return null;
 
-  const device = db.prepare('SELECT id, timezone, reported_timezone FROM devices WHERE id = ?').get(deviceId);
-  const tz = effectiveDeviceTz(device);
+  const device = db.prepare('SELECT id, workspace_id, timezone, reported_timezone FROM devices WHERE id = ?').get(deviceId);
+  const tz = resolveDeviceTimezone(device);
 
-  const allItems = buildSnapshotItems(playlist_id);
+  const allItems = getPublishedPlaylistItems(playlist_id);
   const items = allItems.filter((it) => ScheduleEval.isItemActiveNow(it.schedules, Date.now(), tz));
   if (!items.length) return null;
 
@@ -263,9 +316,9 @@ function resolveLayoutItems(deviceId, forceIndex, { advance = true } = {}) {
 
   let allItems = [];
   if (playlist_id) {
-    const device = db.prepare('SELECT id, timezone, reported_timezone FROM devices WHERE id = ?').get(deviceId);
-    const tz = effectiveDeviceTz(device);
-    allItems = buildSnapshotItems(playlist_id).filter((it) => ScheduleEval.isItemActiveNow(it.schedules, Date.now(), tz));
+    const device = db.prepare('SELECT id, workspace_id, timezone, reported_timezone FROM devices WHERE id = ?').get(deviceId);
+    const tz = resolveDeviceTimezone(device);
+    allItems = getPublishedPlaylistItems(playlist_id).filter((it) => ScheduleEval.isItemActiveNow(it.schedules, Date.now(), tz));
   }
 
   // If the device has no items in its assigned playlist, return null so caller returns 404
@@ -352,7 +405,7 @@ function resolveLayoutItems(deviceId, forceIndex, { advance = true } = {}) {
     expiresList.push(expiresIn);
 
     const dRev = dynamicRevFor(item, now);
-    dynamicRevParts.push(`z_${zone.id}_${item.id}_${dRev}`);
+    dynamicRevParts.push(`z_${zone.id}_${item.content_id || item.widget_id || item.id || 'item'}_${dRev}`);
 
     zoneEntries.push({ zone, item, content: item });
   }
@@ -591,6 +644,14 @@ router.get('/render-layout', resolveAuth, async (req, res) => {
 });
 
 async function handleRenderStandard(req, res, device, profile, opts = {}) {
+  const ac = opts.signal ? null : new AbortController();
+  if (ac) {
+    res.on('close', () => {
+      if (!res.writableEnded) ac.abort();
+    });
+  }
+  const signal = opts.signal || ac.signal;
+
   const forceIndex = req.query.item !== undefined ? req.query.item : null;
   const resolved = resolveCurrentItem(device.id, forceIndex);
   if (!resolved) {
@@ -608,7 +669,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
 
   const key = cacheKey(
     device.id,
-    item.id,
+    item.content_id || item.widget_id || item.id || 'item',
     dynamicRev,
     profile
   );
@@ -649,7 +710,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
 
   for (let attempt = 0; attempt < total; attempt++) {
     try {
-      renderResult = await render(renderItem, renderContent, profile, { signal: req.signal });
+      renderResult = await render(renderItem, renderContent, profile, { signal });
       if (!renderResult.unsupported) break;
     } catch (e) {
       console.warn(`[embedded] item ${renderIndex} render error: ${e.message}`);
@@ -690,6 +751,14 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
 }
 
 async function handleRenderLayout(req, res, device, profile, opts = {}) {
+  const ac = opts.signal ? null : new AbortController();
+  if (ac) {
+    res.on('close', () => {
+      if (!res.writableEnded) ac.abort();
+    });
+  }
+  const signal = opts.signal || ac.signal;
+
   const isExplicit = opts.explicitMode || req.query.mode === 'layout' || req.baseUrl?.endsWith('render-layout') || req.path?.includes('render-layout');
   const forceIndex = req.query.item !== undefined ? req.query.item : null;
 
@@ -698,7 +767,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     if (isExplicit) {
       return res.status(404).json({ error: 'Device has no multi-zone layout assigned or no active items.' });
     }
-    return handleRenderStandard(req, res, device, profile, { isFallback: true });
+    return handleRenderStandard(req, res, device, profile, { ...opts, isFallback: true, signal });
   }
 
   const isImageOnly = isLayoutImageOnly(resolved.zoneEntries);
@@ -709,7 +778,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
         detail: 'Browser unavailable for multi-zone rendering with widgets or web pages',
       });
     }
-    return handleRenderStandard(req, res, device, profile, { isFallback: true });
+    return handleRenderStandard(req, res, device, profile, { ...opts, isFallback: true, signal });
   }
 
   // Persist pending cursor advances now that the layout is confirmed for rendering
@@ -761,7 +830,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   // ── Render ──────────────────────────────────────────────────────────────────
   let renderResult;
   try {
-    renderResult = await renderLayout(layout, zoneEntries, profile, { signal: req.signal });
+    renderResult = await renderLayout(layout, zoneEntries, profile, { signal, device });
   } catch (e) {
     console.error(`[embedded] multi-zone layout render error: ${e.message}`);
     if (isExplicit) {
@@ -770,7 +839,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
         detail: 'An unexpected error occurred while rendering the layout.',
       });
     }
-    return handleRenderStandard(req, res, device, profile, { isFallback: true });
+    return handleRenderStandard(req, res, device, profile, { ...opts, isFallback: true, signal });
   }
 
   if (!renderResult || renderResult.unsupported) {
@@ -781,7 +850,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
       });
     }
     // Auto mode fallback to standard single-item rendering
-    return handleRenderStandard(req, res, device, profile, { isFallback: true });
+    return handleRenderStandard(req, res, device, profile, { ...opts, isFallback: true, signal });
   }
 
   // ── Post-process ─────────────────────────────────────────────────────────────

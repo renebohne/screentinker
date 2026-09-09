@@ -109,17 +109,11 @@ function attachSlideAudio(it) {
 function buildSnapshotItems(playlistId) {
   const items = db.prepare(`
     SELECT pi.id AS _iid, pi.content_id, pi.widget_id, pi.child_playlist_id, pi.zone_id, pi.sort_order, pi.duration_sec, pi.muted,
-           COALESCE(c.filename, w.name) as filename, c.mime_type, c.filepath, c.file_size, c.thumbnail_path,
-           c.updated_at AS content_updated_at,
+           COALESCE(c.filename, w.name) as filename, c.mime_type, c.filepath, c.file_size,
            c.duration_sec as content_duration, c.remote_url, c.unstable_connection,
            c.captions_enabled, c.captions_lang, c.subtitle_url, c.subtitle_lang,
-           w.name as widget_name, w.widget_type, w.config as widget_config,
-           w.workspace_id AS widget_workspace_id,
-           w.updated_at AS widget_updated_at,
-           w.updated_at as widget_rev,
-           pl.workspace_id
+           w.name as widget_name, w.widget_type, w.config as widget_config, w.updated_at as widget_rev
     FROM playlist_items pi
-    LEFT JOIN playlists pl ON pi.playlist_id = pl.id
     LEFT JOIN content c ON pi.content_id = c.id
     LEFT JOIN widgets w ON pi.widget_id = w.id
     LEFT JOIN playlists cp ON pi.child_playlist_id = cp.id
@@ -132,18 +126,18 @@ function buildSnapshotItems(playlistId) {
         pi.content_id IS NULL
         OR (COALESCE(c.is_active, 1) = 1 AND (c.expires_at IS NULL OR c.expires_at > strftime('%s','now')))
       )
-    ORDER BY pi.sort_order ASC, pi.id ASC
+    ORDER BY pi.sort_order ASC
   `).all(playlistId);
   // #74/#75: attach per-item schedule blocks (the player honours these in its own
   // local time via the shared evaluator). An item with zero blocks gets no
-  // `schedules` field -> always on. Additive: old players ignore the field.
+  // `schedules` field -> always on. Additive: old players ignore the field. _iid is
+  // only used here to fetch blocks and is then dropped (snapshot stays id-free).
   // widget_rev is widgets.updated_at, and a data-source change bumps that for the widgets bound
   // to the changed slug (lib/data-sources/service.js bumpDependentWidgets); no workspace-wide
   // MAX(data_sources.updated_at) here, which re-revved unrelated widgets on any rename.
   for (const it of items) {
     const blocks = schedulesForItem(it._iid);
     if (blocks.length) it.schedules = blocks;
-    it.id = it._iid;
     delete it._iid;
     attachSlideAudio(it);
   }
@@ -230,19 +224,15 @@ function derivePreviewLayout(assignments) {
 
 // Map an item's schedule rows into the evaluator's block shape.
 function schedulesForItem(itemId) {
-  try {
-    return db.prepare(
-      'SELECT active_days, start_time, end_time, start_date, end_date FROM playlist_item_schedules WHERE playlist_item_id = ? ORDER BY sort_order ASC, created_at ASC'
-    ).all(itemId).map(r => ({
-      days: String(r.active_days || '').split(',').filter(s => s !== '').map(Number),
-      start: r.start_time,
-      end: r.end_time,
-      start_date: r.start_date || null,
-      end_date: r.end_date || null,
-    }));
-  } catch {
-    return [];
-  }
+  return db.prepare(
+    'SELECT active_days, start_time, end_time, start_date, end_date FROM playlist_item_schedules WHERE playlist_item_id = ? ORDER BY sort_order ASC, created_at ASC'
+  ).all(itemId).map(r => ({
+    days: String(r.active_days || '').split(',').filter(s => s !== '').map(Number),
+    start: r.start_time,
+    end: r.end_time,
+    start_date: r.start_date || null,
+    end_date: r.end_date || null,
+  }));
 }
 
 // Mark playlist as draft (called after item mutations from the playlist detail UI)

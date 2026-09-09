@@ -15,9 +15,19 @@
 
 const fs = require('fs');
 const path = require('path');
-const { Jimp } = require('jimp');
+const { Jimp, cssColorToHex } = require('jimp');
 const config = require('../config');
 const { assertSafeUrl, SsrfError } = require('./ssrf-guard');
+
+const VALID_FIT_MODES = new Set(['cover', 'contain', 'fill']);
+function safeFitMode(m) {
+  return (typeof m === 'string' && VALID_FIT_MODES.has(m.toLowerCase())) ? m.toLowerCase() : 'contain';
+}
+function safeHexColor(c, fallback = '#000000') {
+  if (!c || typeof c !== 'string') return fallback;
+  const s = c.trim();
+  return /^#[0-9a-fA-F]{3,8}$/.test(s) ? s : fallback;
+}
 
 /*
  * ⚠️ ASK config, DO NOT RE-DERIVE THIS.
@@ -58,75 +68,38 @@ const EXT_MIME = {
 };
 
 function looksLikeImage(urlOrPath, contentType) {
-  if (contentType) {
-    const base = contentType.split(';')[0].trim().toLowerCase();
-    if (IMAGE_MIMES.has(base)) return true;
+  if (contentType && IMAGE_MIMES.has(contentType.toLowerCase().split(';')[0].trim())) {
+    return true;
   }
-  if (typeof urlOrPath !== 'string' || !urlOrPath) return false;
-  try {
-    let pathname = urlOrPath;
-    if (urlOrPath.includes('://')) {
-      pathname = new URL(urlOrPath).pathname;
-    }
-    const ext = path.extname(pathname).toLowerCase();
-    return !!EXT_MIME[ext];
-  } catch {
-    return false;
-  }
+  const ext = path.extname(String(urlOrPath || '').split('?')[0]).toLowerCase();
+  return Boolean(EXT_MIME[ext]);
 }
 
-// ─── Optional Chrome / Chromium Path Detection ───────────────────────────────
-function findChromePath() {
-  const candidates = [
-    process.env.CHROME_PATH,
-    process.env.CHROME_BIN,
-    process.env.PUPPETEER_EXECUTABLE_PATH,
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
-    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-    '/snap/bin/chromium',
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-  ].filter(Boolean);
+// ─── Browser Lifecycle ────────────────────────────────────────────────────────
 
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) return candidate;
-    } catch (_) {}
-  }
+let browserInstance = null;
+let browserPromise = null;
+
+function getPuppeteer() {
+  try { return require('puppeteer-core'); } catch (_) {}
+  try { return require('puppeteer'); } catch (_) {}
   return null;
 }
 
-let browserInstance = null;
-// The launch in flight, so three devices polling a cold server share ONE Chromium instead of
-// starting three and keeping the last (the other two lived on, unreferenced, until exit).
-let browserLaunching = null;
-let browserAvailableCached = null;
-let lastBrowserProbe = 0;
-
 function isBrowserAvailable() {
-  const now = Date.now();
-  if (browserAvailableCached !== null && (now - lastBrowserProbe < 30000)) {
-    return browserAvailableCached;
+  const p = getPuppeteer();
+  if (!p) return false;
+  if (process.env.CHROME_PATH) {
+    try {
+      return fs.existsSync(process.env.CHROME_PATH);
+    } catch (_) {
+      return false;
+    }
   }
-  const puppeteer = getPuppeteer();
-  const chromePath = findChromePath();
-  browserAvailableCached = Boolean(puppeteer && chromePath);
-  lastBrowserProbe = now;
-  return browserAvailableCached;
-}
-
-function getPuppeteer() {
   try {
-    return require('puppeteer-core');
+    return Boolean(p.executablePath && p.executablePath());
   } catch (_) {
-    return null;
+    return false;
   }
 }
 
@@ -134,58 +107,57 @@ async function getBrowser() {
   if (browserInstance && browserInstance.connected) {
     return browserInstance;
   }
-  if (browserLaunching) {
-    return browserLaunching;
-  }
+  if (browserPromise) return browserPromise;
 
-  const puppeteer = getPuppeteer();
-  if (!puppeteer) {
-    const err = new Error('puppeteer-core is not installed. Browser rendering is unavailable.');
-    err.code = 'BROWSER_UNAVAILABLE';
-    throw err;
-  }
-
-  const chromePath = findChromePath();
-  if (!chromePath) {
-    const err = new Error('Chrome/Chromium executable not found. Set CHROME_PATH environment variable.');
-    err.code = 'BROWSER_NOT_FOUND';
-    throw err;
-  }
-
-  browserLaunching = puppeteer.launch({
-    executablePath: chromePath,
-    headless: true,
-    args: [
+  browserPromise = (async () => {
+    const puppeteer = getPuppeteer();
+    if (!puppeteer || !isBrowserAvailable()) {
+      const err = new Error('Headless browser is not available. Install puppeteer-core and set CHROME_PATH.');
+      err.code = 'BROWSER_UNAVAILABLE';
+      throw err;
+    }
+    const launchArgs = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
-      '--disable-extensions',
-      '--hide-scrollbars',
-    ],
-  }).then((b) => {
-    browserInstance = b;
-    b.on('disconnected', () => {
-      if (browserInstance === b) browserInstance = null;
+      '--disable-software-rasterizer',
+      '--mute-audio',
+    ];
+    if (process.env.CHROME_PATH) {
+      browserInstance = await puppeteer.launch({
+        executablePath: process.env.CHROME_PATH,
+        headless: 'new',
+        args: launchArgs,
+      });
+    } else {
+      browserInstance = await puppeteer.launch({
+        headless: 'new',
+        args: launchArgs,
+      });
+    }
+    browserInstance.on('disconnected', () => {
+      browserInstance = null;
+      browserPromise = null;
     });
-    return b;
-  }).finally(() => {
-    browserLaunching = null;
-  });
+    return browserInstance;
+  })();
 
-  return browserLaunching;
+  try {
+    return await browserPromise;
+  } finally {
+    browserPromise = null;
+  }
 }
 
 async function closeBrowser() {
   if (browserInstance) {
-    try {
-      await browserInstance.close();
-    } catch (_) {}
+    try { await browserInstance.close(); } catch (_) {}
     browserInstance = null;
+    browserPromise = null;
   }
 }
 
-// Clean lifecycle hooks to prevent hanging processes
 process.on('exit', () => {
   if (browserInstance) {
     try { browserInstance.process()?.kill(); } catch (_) {}
@@ -211,17 +183,11 @@ function safeLocalImagePath(filepath) {
 
 function parseColorToRgba(hexOrInt, fallback = 0x000000FF) {
   if (typeof hexOrInt === 'number' && Number.isFinite(hexOrInt)) return hexOrInt >>> 0;
-  if (typeof hexOrInt === 'string') {
-    let s = hexOrInt.trim().replace(/^#/, '');
-    if (s.length === 3) {
-      s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2] + 'FF';
-    } else if (s.length === 6) {
-      s = s + 'FF';
-    }
-    if (s.length === 8) {
-      const parsed = parseInt(s, 16);
-      if (!Number.isNaN(parsed)) return parsed >>> 0;
-    }
+  if (typeof hexOrInt === 'string' && hexOrInt.trim()) {
+    try {
+      const parsed = cssColorToHex(hexOrInt.trim());
+      if (typeof parsed === 'number' && Number.isFinite(parsed)) return parsed >>> 0;
+    } catch (_) {}
   }
   return fallback;
 }
@@ -238,16 +204,6 @@ function withTimeout(promise, ms = 15000, timeoutErrorMsg = 'Render timed out') 
   return Promise.race([promise, timeoutPromise]).finally(() => {
     clearTimeout(timer);
   });
-}
-
-async function renderLocalImage(content, profile) {
-  const fileToLoad = (content.filepath && looksLikeImage(content.filepath, content.mime_type))
-    ? content.filepath
-    : (content.thumbnail_path || content.filepath);
-  const safe = safeLocalImagePath(fileToLoad);
-  const img = await Jimp.fromBuffer(fs.readFileSync(safe));
-  img.cover({ w: profile.width, h: profile.height });
-  return img.getBuffer('image/png');
 }
 
 const MAX_CONCURRENT_PAGES = 3;
@@ -344,8 +300,20 @@ async function renderWidgetOrHtml(html, profile, widgetType = '', options = {}) 
   await acquirePageSlot(options.signal);
   let browser = null;
   let page = null;
+  const onAbort = () => {
+    if (page) {
+      try { page.close(); } catch (_) {}
+    }
+  };
+  if (options.signal) {
+    options.signal.addEventListener('abort', onAbort, { once: true });
+  }
+
   try {
     return await withTimeout((async () => {
+      const deadline = Date.now() + 15000;
+      const remainingMs = () => Math.max(500, deadline - Date.now());
+
       browser = await getBrowser();
       page = await browser.newPage();
       await page.setViewport({ width: profile.width, height: profile.height });
@@ -364,11 +332,11 @@ async function renderWidgetOrHtml(html, profile, widgetType = '', options = {}) 
       // For layout compositions, wait for domcontentloaded so slow/hung zones don't abort whole layout.
       // Single-widget / slide / webpage items wait for 'load'.
       const waitUntil = widgetType === 'layout' ? 'domcontentloaded' : 'load';
-      await page.setContent(finalHtml, { waitUntil, timeout: 8000 });
+      await page.setContent(finalHtml, { waitUntil, timeout: Math.min(8000, remainingMs()) });
 
       // Wait for any async network fetches to settle if present
       if (widgetType === 'weather' || widgetType === 'rss' || widgetType === 'layout') {
-        await page.waitForNetworkIdle({ idleTime: 200, timeout: 2500 }).catch(() => {});
+        await page.waitForNetworkIdle({ idleTime: 200, timeout: Math.min(2500, remainingMs()) }).catch(() => {});
       }
 
       // Template-agnostic settlement: fonts, animations, images, and videos (including inside srcdoc iframes)
@@ -380,10 +348,6 @@ async function renderWidgetOrHtml(html, profile, widgetType = '', options = {}) 
         const iframes = Array.from(document.querySelectorAll('iframe'));
         await Promise.all(iframes.map(iframe => {
           return new Promise((resolve) => {
-            // Listeners and the timer FIRST. Reading contentDocument on a cross-origin zone throws
-            // SecurityError, and a catch that resolved there let a remote dashboard be captured
-            // blank at ~3s while it was still painting. A remote zone now waits for its load
-            // event or the bounded timer, whichever comes first.
             setTimeout(resolve, isLayout ? 3000 : 5000);
             iframe.addEventListener('load', resolve, { once: true });
             iframe.addEventListener('error', resolve, { once: true });
@@ -440,6 +404,9 @@ async function renderWidgetOrHtml(html, profile, widgetType = '', options = {}) 
       return Buffer.from(snap);
     })(), 15000, 'Page rendering exceeded 15s deadline');
   } finally {
+    if (options.signal) {
+      try { options.signal.removeEventListener('abort', onAbort); } catch (_) {}
+    }
     if (page) {
       try { await page.close(); } catch (_) {}
     }
@@ -470,19 +437,35 @@ async function renderRemotePage(url, profile, options = {}) {
     throw Object.assign(new Error(`Invalid remote URL: ${e.message}`), { code: 'FETCH_ERROR' });
   }
   await acquirePageSlot(options.signal);
+  let browser = null;
   let page = null;
+  const onAbort = () => {
+    if (page) {
+      try { page.close(); } catch (_) {}
+    }
+  };
+  if (options.signal) {
+    options.signal.addEventListener('abort', onAbort, { once: true });
+  }
+
   try {
     return await withTimeout((async () => {
-      const browser = await getBrowser();
+      const deadline = Date.now() + 15000;
+      const remainingMs = () => Math.max(500, deadline - Date.now());
+
+      browser = await getBrowser();
       page = await browser.newPage();
       await page.setViewport({ width: profile.width, height: profile.height });
-      await page.goto(url, { waitUntil: 'load', timeout: 10000 });
+      await page.goto(url, { waitUntil: 'load', timeout: Math.min(10000, remainingMs()) });
       // Dashboards and boards usually paint from a fetch after load; give that a bounded chance.
-      await page.waitForNetworkIdle({ idleTime: 200, timeout: 2500 }).catch(() => {});
+      await page.waitForNetworkIdle({ idleTime: 200, timeout: Math.min(2500, remainingMs()) }).catch(() => {});
       const snap = await page.screenshot({ type: 'png' });
       return Buffer.from(snap);
     })(), 15000, 'Remote page rendering exceeded 15s deadline');
   } finally {
+    if (options.signal) {
+      try { options.signal.removeEventListener('abort', onAbort); } catch (_) {}
+    }
     if (page) {
       try { await page.close(); } catch (_) {}
     }
@@ -622,7 +605,7 @@ function isLayoutImageOnly(zoneEntries) {
   return true;
 }
 
-async function renderLayoutNative(layout, zoneEntries, screenProfile) {
+async function renderLayoutNative(layout, zoneEntries, screenProfile, options = {}) {
   const profile = {
     width: safeDimension(screenProfile?.width, 800),
     height: safeDimension(screenProfile?.height, 480),
@@ -634,7 +617,8 @@ async function renderLayoutNative(layout, zoneEntries, screenProfile) {
     return za - zb;
   });
 
-  const layoutBg = parseColorToRgba(layout?.background_color, 0x000000FF);
+  const bgColorHex = safeHexColor(options?.device?.background_color || options?.backgroundColor, '#000000');
+  const layoutBg = parseColorToRgba(bgColorHex, 0x000000FF);
   const canvas = new Jimp({ width: profile.width, height: profile.height, color: layoutBg });
 
   for (const entry of sorted) {
@@ -651,26 +635,25 @@ async function renderLayoutNative(layout, zoneEntries, screenProfile) {
     const pixelW = Math.max(1, Math.round((w / 100) * profile.width));
     const pixelH = Math.max(1, Math.round((h / 100) * profile.height));
 
-    try {
-      if (zone.background_color) {
-        const zoneBg = parseColorToRgba(zone.background_color, null);
+    if (zone.background_color) {
+      const hex = safeHexColor(zone.background_color, null);
+      if (hex) {
+        const zoneBg = parseColorToRgba(hex, null);
         if (zoneBg !== null) {
           const bgImg = new Jimp({ width: pixelW, height: pixelH, color: zoneBg });
           canvas.composite(bgImg, pixelX, pixelY);
         }
       }
+    }
 
-      let img = null;
-      if (content.remote_url) {
-        let res;
-        try {
-          res = await fetch(content.remote_url, {
-            signal: AbortSignal.timeout(10000),
-            headers: { 'User-Agent': 'ScreenTinker-EmbeddedRenderer/1.0' },
-          });
-        } catch (e) {
-          throw Object.assign(new Error(`Failed to fetch remote content: ${e.message}`), { code: 'FETCH_ERROR' });
-        }
+    let img = null;
+    if (content.remote_url) {
+      let res;
+      try {
+        res = await fetch(content.remote_url, {
+          signal: AbortSignal.timeout(10000),
+          headers: { 'User-Agent': 'ScreenTinker-EmbeddedRenderer/1.0' },
+        });
         if (!res.ok) {
           throw Object.assign(new Error(`Remote content returned HTTP ${res.status}`), { code: 'FETCH_ERROR' });
         }
@@ -678,29 +661,39 @@ async function renderLayoutNative(layout, zoneEntries, screenProfile) {
         if (!looksLikeImage(content.remote_url, contentType)) {
           throw Object.assign(new Error('Remote content is not an image'), { code: 'FETCH_ERROR' });
         }
-        const buf = Buffer.from(await res.arrayBuffer());
-        img = await Jimp.fromBuffer(buf);
-      } else {
-        const fileToLoad = (content.filepath && looksLikeImage(content.filepath, content.mime_type))
-          ? content.filepath
-          : (content.thumbnail_path || content.filepath);
-        if (fileToLoad) {
+      } catch (fetchErr) {
+        console.warn(`[embedded] native layout remote fetch error for zone ${zone.id || 'unknown'}: ${fetchErr.message}`);
+        continue;
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      img = await Jimp.fromBuffer(buf);
+    } else {
+      const fileToLoad = (content.filepath && looksLikeImage(content.filepath, content.mime_type))
+        ? content.filepath
+        : (content.thumbnail_path || content.filepath);
+      if (fileToLoad) {
+        let buf;
+        try {
           const safe = safeLocalImagePath(fileToLoad);
-          img = await Jimp.fromBuffer(fs.readFileSync(safe));
+          buf = fs.readFileSync(safe);
+        } catch (fileErr) {
+          console.warn(`[embedded] native layout file read error for zone ${zone.id || 'unknown'}: ${fileErr.message}`);
+          continue;
         }
+        img = await Jimp.fromBuffer(buf);
       }
+    }
 
-      if (img) {
-        const fitMode = zone.fit_mode || 'contain';
-        if (fitMode === 'cover') {
-          img.cover({ w: pixelW, h: pixelH });
-        } else {
-          img.contain({ w: pixelW, h: pixelH });
-        }
-        canvas.composite(img, pixelX, pixelY);
+    if (img) {
+      const fitMode = safeFitMode(zone.fit_mode);
+      if (fitMode === 'cover') {
+        img.cover({ w: pixelW, h: pixelH });
+      } else if (fitMode === 'fill') {
+        img.resize({ w: pixelW, h: pixelH });
+      } else {
+        img.contain({ w: pixelW, h: pixelH });
       }
-    } catch (zoneErr) {
-      console.warn(`[embedded] native layout zone error for zone ${zone.id || 'unknown'}: ${zoneErr.message}`);
+      canvas.composite(img, pixelX, pixelY);
     }
   }
 
@@ -720,7 +713,7 @@ async function renderLayout(layout, zoneEntries, screenProfile, options = {}) {
 
   if (isLayoutImageOnly(zoneEntries)) {
     try {
-      return await renderLayoutNative(layout, zoneEntries, profile);
+      return await renderLayoutNative(layout, zoneEntries, profile, options);
     } catch (e) {
       console.warn(`[embedded] native image layout render failed, falling back to browser: ${e.message}`);
     }
@@ -740,8 +733,9 @@ async function renderLayout(layout, zoneEntries, screenProfile, options = {}) {
     const w = Number.isFinite(Number(zone.width_percent)) ? Math.max(0, Math.min(100, Number(zone.width_percent))) : 100;
     const h = Number.isFinite(Number(zone.height_percent)) ? Math.max(0, Math.min(100, Number(zone.height_percent))) : 100;
     const zIndex = Number.isFinite(Number(zone.z_index)) ? Math.floor(Number(zone.z_index)) : 0;
-    const fitMode = zone.fit_mode || 'contain';
-    const zoneBg = zone.background_color ? `background-color: ${escapeHtmlAttr(zone.background_color)};` : '';
+    const fitMode = safeFitMode(zone.fit_mode);
+    const safeZoneBg = safeHexColor(zone.background_color, null);
+    const zoneBg = safeZoneBg ? `background-color: ${safeZoneBg};` : '';
 
     let innerHtml = '<div style="width:100%;height:100%;background:transparent;"></div>';
 
@@ -807,6 +801,7 @@ async function renderLayout(layout, zoneEntries, screenProfile, options = {}) {
   }
 
   const baseUrl = localBaseUrl();
+  const compositeBg = safeHexColor(options?.device?.background_color || options?.backgroundColor, '#000000');
   const compositeHtml = `<!DOCTYPE html>
 <html>
 <head>
@@ -816,7 +811,7 @@ async function renderLayout(layout, zoneEntries, screenProfile, options = {}) {
   html, body {
     margin: 0; padding: 0;
     width: ${profile.width}px; height: ${profile.height}px;
-    background: ${escapeHtmlAttr(layout?.background_color || '#000000')}; overflow: hidden; position: relative;
+    background: ${compositeBg}; overflow: hidden; position: relative;
     box-sizing: border-box;
   }
   *, *:before, *:after { box-sizing: inherit; }
