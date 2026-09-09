@@ -6,9 +6,71 @@ import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
+/**
+ * Which of the two preference stores actually holds this display's identity.
+ *
+ * Pure on purpose, so the rule can be tested on the JVM without an Android context.
+ * See ServerConfigStoreChoiceTest.
+ */
+internal object StoreChoice {
+    data class Snapshot(
+        val serverUrl: String,
+        val deviceId: String,
+        val deviceToken: String,
+        val isPaired: Boolean,
+    )
+
+    /** How much of a paired identity this store holds. -1 means the store would not open at all. */
+    fun score(s: Snapshot?): Int {
+        if (s == null) return -1
+        var n = 0
+        if (s.serverUrl.isNotEmpty()) n++
+        if (s.deviceId.isNotEmpty()) n++
+        if (s.deviceToken.isNotEmpty()) n++
+        if (s.isPaired) n++
+        return n
+    }
+
+    /**
+     * True to use the encrypted store. Ties go to it, so a fresh install and every healthy
+     * device stay encrypted; only a store that demonstrably holds MORE of the identity wins.
+     */
+    fun useSecure(secure: Snapshot?, plain: Snapshot?): Boolean = score(secure) >= score(plain)
+}
+
 class ServerConfig(context: Context) {
 
-    private val prefs: SharedPreferences = try {
+    /*
+     * ⚠️ TWO STORES, AND THE ONE WE USE IS CHOSEN BY WHAT IS IN IT. #312.
+     *
+     * This used to be a try/catch: build EncryptedSharedPreferences, and on any exception fall
+     * back to plain ones. That picks a store by WHICH ONE OPENS, which is not the same question as
+     * which one holds the pairing.
+     *
+     * On RK3566 / OP-TEE hardware the Keystore is unreliable for a while after a cold boot (the
+     * reporter also saw keymaster@4.0-service.optee segfault during boot, unrelated to us). So the
+     * encrypted store failed at first install and every real value went to the plain store, and
+     * then on any later boot where the Keystore happened to come up in time the app opened the
+     * EMPTY encrypted store instead. server_url came back "", the service logged "No server URL
+     * configured", and the reconnect backstop had nothing to dial, so it never ran and the panel
+     * never came back online. A force-stop and restart fixed it because it re-rolled the dice.
+     *
+     * It was silent, it looked like a networking bug, and it left a paired display looking
+     * factory-fresh. Any device that ever fell back to plain storage was one successful-Keystore
+     * boot away from it.
+     *
+     * So: open both, and use whichever actually holds the identity. Ties go to the encrypted one.
+     *
+     * ⚠️ NOT MIGRATED on purpose. Copying the plain store into the encrypted one would put this
+     * hardware straight back into the failure the next time the Keystore is slow, and copying the
+     * other way would write a device token in cleartext on every healthy device. The residual case
+     * this cannot fix is a device whose data is ONLY in the encrypted store on a boot where that
+     * store will not open: there is nothing readable to select. That is unchanged from before.
+     */
+    private val plainPrefs: SharedPreferences =
+        context.getSharedPreferences("remote_display", Context.MODE_PRIVATE)
+
+    private val securePrefs: SharedPreferences? = try {
         val masterKey = MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
@@ -20,9 +82,38 @@ class ServerConfig(context: Context) {
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
     } catch (e: Exception) {
-        // Fallback to regular prefs if encryption not available
-        Log.w("ServerConfig", "EncryptedSharedPreferences unavailable, using regular: ${e.message}")
-        context.getSharedPreferences("remote_display", Context.MODE_PRIVATE)
+        Log.w("ServerConfig", "EncryptedSharedPreferences unavailable: ${e.message}")
+        null
+    }
+
+    // A read can throw on this hardware too, not just the create, so treat that as "no store".
+    private fun snapshotOf(p: SharedPreferences?): StoreChoice.Snapshot? = try {
+        p?.let {
+            StoreChoice.Snapshot(
+                it.getString("server_url", "") ?: "",
+                it.getString("device_id", "") ?: "",
+                it.getString("device_token", "") ?: "",
+                it.getBoolean("is_paired", false),
+            )
+        }
+    } catch (e: Exception) {
+        Log.w("ServerConfig", "store unreadable, ignoring it: ${e.message}")
+        null
+    }
+
+    private val prefs: SharedPreferences =
+        if (StoreChoice.useSecure(snapshotOf(securePrefs), snapshotOf(plainPrefs)) && securePrefs != null) {
+            securePrefs
+        } else {
+            plainPrefs
+        }
+
+    /** Diagnostics only. It reports the choice; it must never be what MAKES the choice. */
+    val isUsingFallbackStorage: Boolean get() = prefs !== securePrefs
+
+    init {
+        Log.i("ServerConfig", "using ${if (isUsingFallbackStorage) "plain" else "encrypted"} store " +
+            "(secure=${StoreChoice.score(snapshotOf(securePrefs))} plain=${StoreChoice.score(snapshotOf(plainPrefs))})")
     }
 
     var serverUrl: String
@@ -90,17 +181,26 @@ class ServerConfig(context: Context) {
         prefs.edit().putBoolean("is_paired", paired).apply()
     }
 
-    fun clearDeviceCredentials() {
-        prefs.edit()
-            .remove("device_id")
-            .remove("device_token")
-            .remove("is_paired")
-            .apply()
+    /*
+     * ⚠️ BOTH STORES, not just the selected one. #312.
+     *
+     * Unpairing only the store in use leaves the other one holding a complete old identity, and
+     * because the selection above is by content that stale copy can WIN on the next boot. The
+     * display would silently come back as whatever it used to be.
+     */
+    private fun editBoth(mutate: (SharedPreferences.Editor) -> Unit) {
+        for (store in listOfNotNull(securePrefs, plainPrefs)) {
+            try { store.edit().also(mutate).apply() } catch (e: Exception) {
+                Log.w("ServerConfig", "could not write a store: ${e.message}")
+            }
+        }
     }
 
-    fun clear() {
-        prefs.edit().clear().apply()
+    fun clearDeviceCredentials() = editBoth {
+        it.remove("device_id").remove("device_token").remove("is_paired")
     }
+
+    fun clear() = editBoth { it.clear() }
 
     // Playlist cache for offline cold-start
     var cachedPlaylist: String
