@@ -232,12 +232,18 @@ function resourceName(db, type, id) {
 }
 
 function queue(db, workspaceId, { status = 'open', userId = null } = {}) {
-  const where = status === 'open' ? "s.status IN ('submitted','changes_requested','approved')" : status === 'all' ? '1=1' : 's.status = @status';
+  // Positional parameters, built alongside the clauses: node:sqlite refuses a named parameter the
+  // statement does not mention, and better-sqlite3 silently allows it, so the fallback driver in
+  // CI was the only place this query broke.
+  const clauses = ['s.workspace_id = ?'], params = [workspaceId];
+  if (status === 'open') clauses.push("s.status IN ('submitted','changes_requested','approved')");
+  else if (status !== 'all') { clauses.push('s.status = ?'); params.push(status); }
+  if (userId) { clauses.push('s.submitted_by = ?'); params.push(userId); }
   const rows = db.prepare(`SELECT s.*, su.email AS submitter_email, su.name AS submitter_name, ru.email AS reviewer_email, ru.name AS reviewer_name, r.rev_no
                              FROM submissions s LEFT JOIN users su ON su.id = s.submitted_by LEFT JOIN users ru ON ru.id = s.reviewer_id
                              LEFT JOIN revisions r ON r.id = s.revision_id
-                            WHERE s.workspace_id = @ws AND ${where} ${userId ? 'AND s.submitted_by = @uid' : ''}
-                            ORDER BY s.submitted_at DESC LIMIT 200`).all({ ws: workspaceId, status, uid: userId });
+                            WHERE ${clauses.join(' AND ')}
+                            ORDER BY s.submitted_at DESC LIMIT 200`).all(...params);
   return rows.map((s) => {
     const devices = affectedDevices(db, s.resource_type, s.resource_id);
     const lastPub = revisions.lastPublished(db, s.resource_type, s.resource_id);
