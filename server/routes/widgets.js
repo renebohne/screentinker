@@ -8,8 +8,8 @@ const { devicesPlayingWidget } = require('../lib/devices-playing');
 const slideRender = require('../lib/slide-render');
 const appConfig = require('../config');
 const { PLATFORM_ROLES, ELEVATED_ROLES } = require('../middleware/auth');
-// Phase 2.2d: workspace-aware access. Same pattern as devices.js / content.js.
 const { accessContext } = require('../lib/tenancy');
+const { isRealTimezone } = require('../lib/device-timezone');
 
 // For preview only: inline /api/content/:id/file and /thumbnail URLs as data URIs,
 // scoped to the caller's current workspace. Lets the srcdoc preview iframe show
@@ -67,15 +67,6 @@ function escapeHtml(str) {
  * stored with a bad value (a blank clock is worse than a wrong one); new values are rejected at
  * save time by validateTimezone below, so nobody silently gets UTC again.
  */
-function isRealTimezone(tz) {
-  if (typeof tz !== 'string' || !tz) return false;
-  // Reject anything that could break out of the single-quoted string it is inlined into, before
-  // handing it to Intl — this value is interpolated into generated widget JS.
-  if (/['"\\\r\n]/.test(tz)) return false;
-  try { new Intl.DateTimeFormat(undefined, { timeZone: tz }); return true; }
-  catch { return false; }
-}
-
 function safeTimezone(tz) {
   if (!tz) return 'UTC';
   return isRealTimezone(tz) ? tz : 'UTC';

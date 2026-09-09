@@ -10,9 +10,25 @@
 
 const dns = require('dns').promises;
 const net = require('net');
+const http = require('http');
+const https = require('https');
 
 class SsrfError extends Error {
-  constructor(reason) { super('blocked: ' + reason); this.name = 'SsrfError'; this.reason = reason; }
+  constructor(reason) {
+    super('blocked: ' + reason);
+    this.name = 'SsrfError';
+    this.code = 'ssrf';
+    this.reason = reason;
+  }
+}
+
+class GuardedRequestError extends Error {
+  constructor(message, code, statusCode = null) {
+    super(message);
+    this.name = 'GuardedRequestError';
+    this.code = code;
+    if (statusCode) this.statusCode = statusCode;
+  }
 }
 
 // ---- IPv4 ----
@@ -101,26 +117,53 @@ function isBlockedIp(ip) {
 
 // Parse + scheme-check + DNS-resolve + vet EVERY resolved address. Returns { url, addresses } where
 // `addresses` are the vetted IPs to pin the socket to. Throws SsrfError on anything unsafe.
-async function assertSafeUrl(urlString) {
+// Parse + scheme-check + credentials check + literal IP vet (sync).
+// Returns { url, host, normalized, isLiteralIp, addresses? }.
+// Throws SsrfError on anything unsafe.
+function parseSafeUrl(urlString) {
+  const normalized = String(urlString || '').trim().replace(/^webcal:\/\//i, 'https://');
   let url;
-  try { url = new URL(String(urlString)); } catch (e) { throw new SsrfError('bad-url'); }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new SsrfError('bad-scheme');
-  if (url.username || url.password) throw new SsrfError('userinfo'); // http://internal@evil.com tricks
+  try {
+    url = new URL(normalized);
+  } catch (e) {
+    throw new SsrfError('bad-url');
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new SsrfError('bad-scheme');
+  }
+  if (url.username || url.password) {
+    throw new SsrfError('userinfo'); // http://internal@evil.com tricks
+  }
 
   const host = url.hostname.replace(/^\[|\]$/g, '');
-  // A literal IP in the URL still gets vetted (no DNS, but same range checks).
   if (net.isIP(host)) {
     if (isBlockedIp(host)) throw new SsrfError('blocked-ip:' + host);
-    return { url, addresses: [host] };
+    return { url, host, normalized, isLiteralIp: true, addresses: [host] };
   }
+  return { url, host, normalized, isLiteralIp: false };
+}
+
+// Parse + scheme-check + DNS-resolve + vet EVERY resolved address. Returns { url, addresses } where
+// `addresses` are the vetted IPs to pin the socket to. Throws SsrfError on anything unsafe.
+async function assertSafeUrl(urlString) {
+  const parsed = parseSafeUrl(urlString);
+  if (parsed.isLiteralIp) {
+    return { url: parsed.url, addresses: parsed.addresses };
+  }
+
   let resolved;
-  try { resolved = await dns.lookup(host, { all: true, verbatim: true }); }
-  catch (e) { throw new SsrfError('dns-fail'); }
-  if (!resolved.length) throw new SsrfError('no-address');
+  try {
+    resolved = await dns.lookup(parsed.host, { all: true, verbatim: true });
+  } catch (e) {
+    throw new SsrfError('dns-fail');
+  }
+  if (!resolved || !resolved.length) {
+    throw new SsrfError('no-address');
+  }
   for (const a of resolved) {
     if (isBlockedIp(a.address)) throw new SsrfError('blocked-ip:' + a.address);
   }
-  return { url, addresses: resolved.map((a) => a.address) };
+  return { url: parsed.url, addresses: resolved.map((a) => a.address) };
 }
 
 function pinnedLookup(vettedAddresses) {
@@ -153,4 +196,152 @@ function pinnedLookup(vettedAddresses) {
   };
 }
 
-module.exports = { assertSafeUrl, isBlockedIp, isBlockedV4, isBlockedV6, pinnedLookup, SsrfError };
+/**
+ * Execute an HTTP/HTTPS request with complete SSRF protections:
+ * - Scheme enforcement (http/https only)
+ * - DNS resolution & private/reserved IP filtering on all resolved addresses
+ * - Socket address pinning (defeating DNS rebinding)
+ * - SNI / TLS validation against original hostname
+ * - Per-hop SSRF validation across redirects
+ * - Bounded timeouts (overall deadline and socket idle timer) and optional response size caps
+ *
+ * @param {string} urlString Target URL
+ * @param {object} [options] Request options
+ * @param {string} [options.method='GET'] HTTP method
+ * @param {object} [options.headers={}] HTTP headers
+ * @param {number} [options.maxRedirects=4] Maximum redirect hops to follow
+ * @param {number} [options.timeoutMs=10000] Overall request deadline timeout in milliseconds
+ * @param {number} [options.idleTimeoutMs] Socket idle timeout in milliseconds (survives into body stream)
+ * @param {number} [options.maxBytes] Maximum response body size in bytes
+ * @param {object} [options.validators] ETag / Last-Modified conditional headers { etag, lastModified }
+ * @param {'stream'|'text'|'buffer'} [options.responseType='stream'] Response format
+ * @returns {Promise<{res?: import('http').IncomingMessage, text?: string, buffer?: Buffer, notModified?: boolean, statusCode: number, headers: object}>}
+ */
+function guardedRequest(urlString, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const headers = { ...(options.headers || {}) };
+  const maxRedirects = Number.isInteger(options.maxRedirects) ? options.maxRedirects : 4;
+  const timeoutMs = options.timeoutMs || 10000;
+  const idleTimeoutMs = options.idleTimeoutMs || null;
+  const maxBytes = options.maxBytes || null;
+  const validators = options.validators || null;
+  const responseType = options.responseType || 'stream';
+
+  if (validators) {
+    if (validators.etag) headers['if-none-match'] = validators.etag;
+    if (validators.lastModified) headers['if-modified-since'] = validators.lastModified;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+
+  const follow = (targetUrl, redirectsLeft) => new Promise((resolve, reject) => {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      return reject(new GuardedRequestError('Request timed out', 'timeout'));
+    }
+
+    assertSafeUrl(targetUrl).then(({ url, addresses }) => {
+      const mod = url.protocol === 'https:' ? https : http;
+      let deadlineTimer = null;
+
+      const clearDeadlineTimer = () => {
+        if (deadlineTimer) {
+          clearTimeout(deadlineTimer);
+          deadlineTimer = null;
+        }
+      };
+
+      const req = mod.request(url, {
+        method,
+        lookup: pinnedLookup(addresses),
+        servername: url.hostname,
+        headers,
+      }, (res) => {
+        const sc = res.statusCode;
+
+        if (sc === 304) {
+          res.resume();
+          clearDeadlineTimer();
+          return resolve({ notModified: true, statusCode: 304, headers: res.headers });
+        }
+
+        if (sc >= 300 && sc < 400 && res.headers.location) {
+          res.resume();
+          clearDeadlineTimer();
+          if (redirectsLeft <= 0) {
+            return reject(new GuardedRequestError('Too many redirects', 'too-many-redirects'));
+          }
+          let next;
+          try { next = new URL(res.headers.location, url).toString(); }
+          catch (_) { return reject(new GuardedRequestError('Invalid redirect location', 'bad-redirect')); }
+          return follow(next, redirectsLeft - 1).then(resolve, reject);
+        }
+
+        if (sc !== 200) {
+          res.resume();
+          clearDeadlineTimer();
+          return reject(new GuardedRequestError(`Request failed with status ${sc}`, 'upstream-status', sc));
+        }
+
+        if (responseType === 'stream') {
+          clearDeadlineTimer();
+          return resolve({ res, statusCode: sc, headers: res.headers });
+        }
+
+        const chunks = [];
+        let total = 0;
+
+        res.on('data', (chunk) => {
+          total += chunk.length;
+          if (maxBytes !== null && total > maxBytes) {
+            clearDeadlineTimer();
+            res.destroy(new GuardedRequestError('Response exceeds size limit', 'size-limit'));
+            return;
+          }
+          chunks.push(chunk);
+        });
+
+        res.on('end', () => {
+          clearDeadlineTimer();
+          const buf = Buffer.concat(chunks);
+          if (responseType === 'text') {
+            resolve({ text: buf.toString('utf8'), statusCode: sc, headers: res.headers });
+          } else {
+            resolve({ buffer: buf, statusCode: sc, headers: res.headers });
+          }
+        });
+
+        res.on('error', (err) => {
+          clearDeadlineTimer();
+          reject(err);
+        });
+      });
+
+      // Socket idle timeout (remains active through stream body consumption)
+      if (idleTimeoutMs) {
+        req.setTimeout(idleTimeoutMs, () => {
+          req.destroy(new GuardedRequestError('Socket idle timeout', 'timeout'));
+        });
+      }
+
+      // Overall request deadline timeout
+      const timeRemaining = Math.max(100, deadline - Date.now());
+      deadlineTimer = setTimeout(() => {
+        req.destroy(new GuardedRequestError('Request timed out', 'timeout'));
+      }, timeRemaining);
+      deadlineTimer.unref?.();
+
+      req.on('error', (err) => {
+        clearDeadlineTimer();
+        reject(err);
+      });
+
+      req.end();
+    }, reject);
+  });
+
+  return follow(urlString, maxRedirects);
+}
+
+module.exports = { parseSafeUrl, assertSafeUrl, isBlockedIp, isBlockedV4, isBlockedV6, pinnedLookup, SsrfError, GuardedRequestError, guardedRequest };
+

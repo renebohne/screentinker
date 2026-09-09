@@ -11,6 +11,8 @@ const { db } = require('../db/database');
 const { syncDataSource, withFetchSlot, bumpDependentWidgets } = require('../lib/data-sources/service');
 const { resolveIcalData } = require('../lib/data-sources/ical-resolver');
 const { requireWorkspaceWrite, canWrite } = require('../lib/permissions');
+const { parseSafeUrl } = require('../lib/ssrf-guard');
+const { isRealTimezone } = require('../lib/device-timezone');
 
 const SUPPORTED_TYPES = new Set(['ical']);
 
@@ -43,6 +45,37 @@ function sanitizeConfigForRole(cfg, req) {
   if (safe.raw_data) safe.raw_data = '[redacted]';
   if (safe.raw_ics) safe.raw_ics = '[redacted]';
   return safe;
+}
+
+function validateDataSourceConfig(type, config) {
+  if (!config || typeof config !== 'object') return null;
+
+  if (config.timezone) {
+    const tzStr = String(config.timezone).trim();
+    if (!isRealTimezone(tzStr)) {
+      return `Invalid IANA timezone: "${config.timezone}"`;
+    }
+  }
+
+  const hasInline = Boolean(config.ics_data || config.raw_data || config.raw_ics);
+  if (config.url && !hasInline) {
+    try {
+      parseSafeUrl(config.url);
+    } catch (err) {
+      if (err.reason === 'userinfo') {
+        return 'Calendar URLs with basic-auth credentials (username/password) are not allowed';
+      }
+      if (err.reason === 'bad-scheme') {
+        return 'URL must use HTTP, HTTPS, or webcal protocol';
+      }
+      if (err.reason && err.reason.startsWith('blocked-ip')) {
+        return 'The calendar address is not allowed';
+      }
+      return 'Invalid URL format';
+    }
+  }
+
+  return null;
 }
 
 // ─── GET /api/data-sources (List all in current workspace) ─────────────────────
@@ -111,6 +144,11 @@ router.post('/test', requireWorkspaceWrite, async (req, res, next) => {
     return res.status(400).json({ error: 'Config must be an object' });
   }
 
+  const valErr = validateDataSourceConfig(type, parsedConfig);
+  if (valErr) {
+    return res.status(400).json({ error: valErr });
+  }
+
   try {
     let previewData = null;
     if (type === 'ical') {
@@ -136,6 +174,9 @@ router.post('/test', requireWorkspaceWrite, async (req, res, next) => {
 // ─── POST /api/data-sources (Create new data source) ───────────────────────────
 router.post('/', requireWorkspaceWrite, (req, res) => {
   const wsId = req.workspaceId;
+  if (!wsId) {
+    return res.status(400).json({ error: 'Workspace ID is required' });
+  }
   const { name, type, config, slug: customSlug } = req.body || {};
 
   if (!name || !type || !config) {
@@ -153,6 +194,11 @@ router.post('/', requireWorkspaceWrite, (req, res) => {
   }
   if (!parsedConfig || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) {
     return res.status(400).json({ error: 'Config must be an object' });
+  }
+
+  const valErr = validateDataSourceConfig(type, parsedConfig);
+  if (valErr) {
+    return res.status(400).json({ error: valErr });
   }
 
   const cleanName = String(name).trim();
@@ -222,6 +268,10 @@ router.put('/:id', requireWorkspaceWrite, (req, res) => {
     if (!parsedConfig || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) {
       return res.status(400).json({ error: 'Config must be an object' });
     }
+    const valErr = validateDataSourceConfig(existing.type, parsedConfig);
+    if (valErr) {
+      return res.status(400).json({ error: valErr });
+    }
     configJson = JSON.stringify(parsedConfig);
   } else {
     try { parsedConfig = JSON.parse(configJson); } catch (_) {}
@@ -235,11 +285,14 @@ router.put('/:id', requireWorkspaceWrite, (req, res) => {
     WHERE id = ? AND workspace_id = ?
   `).run(cleanName, cleanSlug, configJson, nowSec, req.params.id, wsId);
 
-  // Trigger refresh with new config in background
-  const updatedRow = db.prepare('SELECT * FROM data_sources WHERE id = ?').get(req.params.id);
-  syncDataSource(updatedRow, true).catch(err => {
-    console.warn(`[data-sources] background update sync failed for ${req.params.id}:`, err.message);
-  });
+  // Trigger refresh with new config in background ONLY if config actually changed
+  const configChanged = config !== undefined && configJson !== existing.config;
+  if (configChanged) {
+    const updatedRow = db.prepare('SELECT * FROM data_sources WHERE id = ?').get(req.params.id);
+    syncDataSource(updatedRow, true).catch(err => {
+      console.warn(`[data-sources] background update sync failed for ${req.params.id}:`, err.message);
+    });
+  }
 
   let existingData = null;
   try { existingData = JSON.parse(existing.cached_data || 'null'); } catch (_) {}

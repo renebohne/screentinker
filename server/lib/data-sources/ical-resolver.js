@@ -8,9 +8,7 @@
  */
 
 const ical = require('node-ical');
-const http = require('http');
-const https = require('https');
-const { assertSafeUrl, pinnedLookup, SsrfError } = require('../ssrf-guard');
+const { SsrfError, GuardedRequestError, guardedRequest } = require('../ssrf-guard');
 
 const FETCH_TIMEOUT_MS = 10000;
 const MAX_REDIRECTS = 4;
@@ -19,98 +17,35 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024; // refuse calendar feeds larger than 2 M
 /**
  * Fetch a calendar feed over HTTPS/HTTP with the project's SSRF guard applied.
  *
- * node-ical's built-in `fromURL` performs an unguarded fetch that follows redirects and
- * accepts any scheme, making it an open fetch primitive reachable by workspace editors.
- * Instead we fetch the bytes ourselves, reusing the hardened pipeline from the media
- * proxy: vet the URL (scheme + DNS + private-IP ranges), pin the socket to a vetted
- * address (defeating DNS rebinding), re-vet every redirect hop, and enforce a timeout.
- * The response body is then parsed locally with ical.sync.parseICS().
- *
  * @param {string} urlString - http(s) or webcal:// URL
  * @returns {Promise<string>} The raw calendar text
  */
-function fetchCalendar(urlString) {
+async function fetchCalendar(urlString) {
   const raw = String(urlString || '').trim().replace(/^webcal:\/\//i, 'https://');
-  const deadline = Date.now() + FETCH_TIMEOUT_MS;
-
-  const follow = (target, redirectsLeft) => new Promise((resolve, reject) => {
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) {
-      return reject(new Error('Calendar feed timed out'));
+  try {
+    const res = await guardedRequest(raw, {
+      maxRedirects: MAX_REDIRECTS,
+      timeoutMs: FETCH_TIMEOUT_MS,
+      maxBytes: MAX_BODY_BYTES,
+      responseType: 'text',
+      headers: {
+        'User-Agent': 'ScreenTinker-DataSource/2.0',
+        'Accept': 'text/calendar, application/json, text/plain',
+      },
+    });
+    if (res.notModified || !res.text) {
+      throw new GuardedRequestError('Calendar feed responded 304', 'upstream-status', 304);
     }
-
-    assertSafeUrl(target).then(({ url, addresses }) => {
-      const mod = url.protocol === 'https:' ? https : http;
-      let timer = null;
-      const clearReqTimer = () => {
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
-      };
-
-      const req = mod.request(url, {
-        method: 'GET',
-        lookup: pinnedLookup(addresses),
-        servername: url.hostname,
-        headers: {
-          'User-Agent': 'ScreenTinker-DataSource/2.0',
-          'Accept': 'text/calendar, application/json, text/plain',
-        },
-      }, (res) => {
-        const sc = res.statusCode;
-        if (sc >= 300 && sc < 400 && res.headers.location) {
-          res.resume();
-          clearReqTimer();
-          if (redirectsLeft <= 0) {
-            return reject(new Error('Too many redirects fetching calendar feed'));
-          }
-          let next;
-          try { next = new URL(res.headers.location, url).toString(); }
-          catch (_) { return reject(new Error('Invalid redirect from calendar feed')); }
-          return follow(next, redirectsLeft - 1).then(resolve, reject);
-        }
-        if (sc !== 200) {
-          res.resume();
-          clearReqTimer();
-          return reject(new Error(`Calendar feed responded ${sc}`));
-        }
-        const chunks = [];
-        let total = 0;
-        res.on('data', (c) => {
-          total += c.length;
-          if (total > MAX_BODY_BYTES) {
-            clearReqTimer();
-            res.destroy(new Error('Calendar feed exceeds size limit'));
-            return;
-          }
-          chunks.push(c);
-        });
-        res.on('end', () => {
-          clearReqTimer();
-          resolve(Buffer.concat(chunks).toString('utf8'));
-        });
-        res.on('error', (err) => {
-          clearReqTimer();
-          reject(err);
-        });
-      });
-
-      const timeRemaining = Math.max(100, deadline - Date.now());
-      timer = setTimeout(() => {
-        req.destroy(new Error('Calendar feed timed out'));
-      }, timeRemaining);
-      timer.unref?.();
-
-      req.on('error', (err) => {
-        clearReqTimer();
-        reject(err);
-      });
-      req.end();
-    }, reject);
-  });
-
-  return follow(raw, MAX_REDIRECTS);
+    return res.text;
+  } catch (err) {
+    if (err instanceof SsrfError) throw err;
+    if (err.code === 'timeout') throw new GuardedRequestError('Calendar feed timed out', 'timeout');
+    if (err.code === 'too-many-redirects') throw new GuardedRequestError('Too many redirects fetching calendar feed', 'too-many-redirects');
+    if (err.code === 'bad-redirect') throw new GuardedRequestError('Invalid redirect from calendar feed', 'bad-redirect');
+    if (err.code === 'size-limit') throw new GuardedRequestError('Calendar feed exceeds size limit', 'size-limit');
+    if (err.code === 'upstream-status') throw new GuardedRequestError(`Calendar feed responded ${err.statusCode}`, 'upstream-status', err.statusCode);
+    throw err;
+  }
 }
 
 /**
@@ -163,12 +98,54 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
   }
 
   const now = new Date(nowRef);
-  const startWindow = new Date(now);
-  startWindow.setHours(0, 0, 0, 0); // Start of today
+  const tzOpts = timezone ? { timeZone: timezone } : {};
+  const dateKey = (d) => d.toLocaleDateString('en-CA', tzOpts); // YYYY-MM-DD in target zone
+  const todayKey = dateKey(now);
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowKey = dateKey(tomorrow);
 
-  const endWindow = new Date(startWindow);
+  // Helper to format a calendar-day key honoring node-ical contract (d.dateOnly means local Y-M-D)
+  const formatLocalDayKey = (d) => {
+    if (!d || !(d instanceof Date) || isNaN(d.getTime())) return '';
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+
+  const formatDayLabel = (key) => {
+    if (key === todayKey) return locale === 'de' ? 'Heute' : 'Today';
+    if (key === tomorrowKey) return locale === 'de' ? 'Morgen' : 'Tomorrow';
+    const [y, m, d] = key.split('-').map(Number);
+    const noonUtc = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+    return noonUtc.toLocaleDateString(locale === 'de' ? 'de-DE' : 'en-US', {
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+      timeZone: 'UTC',
+    });
+  };
+
+  const formatTime = (d) => d.toLocaleTimeString(locale === 'de' ? 'de-DE' : 'en-US', { hour: '2-digit', minute: '2-digit', hour12: locale !== 'de', ...tzOpts });
+
+  const formatDate = (ev) => {
+    if (ev.isAllDay) return formatDayLabel(ev.dayKey);
+    const key = dateKey(ev.start);
+    if (key === todayKey) return locale === 'de' ? 'Heute' : 'Today';
+    if (key === tomorrowKey) return locale === 'de' ? 'Morgen' : 'Tomorrow';
+    return ev.start.toLocaleDateString(locale === 'de' ? 'de-DE' : 'en-US', {
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+      ...tzOpts,
+    });
+  };
+
+  const endWindow = new Date(now);
   endWindow.setDate(endWindow.getDate() + lookaheadDays);
   endWindow.setHours(23, 59, 59, 999);
+  const endWindowDayKey = dateKey(endWindow);
 
   const flatEvents = [];
 
@@ -185,13 +162,13 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
     if (excludeText && summaryLower.includes(excludeText.toLowerCase())) continue;
 
     // Check if event is all-day (datetype === 'date' or midnight-to-midnight whole days)
-    const isAllDay = ev.datetype === 'date' || (
+    const isAllDay = Boolean(ev.datetype === 'date' || ev.start?.dateOnly || (
       ev.start instanceof Date && ev.end instanceof Date &&
       ev.start.getHours() === 0 && ev.start.getMinutes() === 0 && ev.start.getSeconds() === 0 &&
       ev.end.getHours() === 0 && ev.end.getMinutes() === 0 && ev.end.getSeconds() === 0 &&
       (ev.end - ev.start) >= 86400000 &&
       (ev.end - ev.start) % 86400000 === 0
-    );
+    ));
     if (eventType === 'timed' && isAllDay) continue;
     if (eventType === 'allday' && !isAllDay) continue;
 
@@ -209,6 +186,7 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
         if (!isNaN(d.getTime())) {
           exdateKeys.add(d.toISOString().slice(0, 10));
           exdateKeys.add(d.getTime());
+          if (isAllDay) exdateKeys.add(formatLocalDayKey(d));
         }
       }
     }
@@ -217,33 +195,18 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
     if (ev.rrule) {
       try {
         const maxRruleExpansion = Math.max(50, maxEvents * 5);
-        const durationMs = ev.end ? (new Date(ev.end).getTime() - new Date(ev.start).getTime()) : 3600000;
+        const durationMs = ev.end ? (new Date(ev.end).getTime() - new Date(ev.start).getTime()) : (isAllDay ? 86400000 : 3600000);
 
-        /*
-         * ⚠️ THE WINDOW STARTS BEFORE NOW BY ONE OCCURRENCE, NOT AT MIDNIGHT. A series occurrence
-         * that began before the server's local midnight and is still running was not in
-         * [startOfToday, end], so a daily 16:30-18:30 meeting read as FREE at 17:30 on a UTC host
-         * serving a Pacific room. Only the `occEnd < now` filter below decides what is over.
-         *
-         * ⚠️ AND IT IS NARROWED BY FREQUENCY, BECAUSE THE ITERATOR ARGUMENT WAS NEVER CALLED.
-         * node-ical's rrule wrapper takes between(after, before, inclusive) and ignores a fourth
-         * argument, so the "bounded iterator" the first version passed ran zero times; a
-         * FREQ=MINUTELY series then hit the library's 10,000-iteration throw and the whole series
-         * was dropped, silently, as FREE. The library expands a two-day MINUTELY window in a few
-         * milliseconds; it is the fourteen-day default that overflowed. So the window is capped
-         * per frequency to stay under that limit, the result is sliced to what the sign can show,
-         * and a throw narrows to one day around now before giving up.
-         */
         const FREQ_NAMES = { 4: 'HOURLY', 5: 'MINUTELY', 6: 'SECONDLY' };
         const rawFreq = ev.rrule.options?.freq ?? ev.rrule.origOptions?.freq;
         const freq = String(FREQ_NAMES[rawFreq] || rawFreq || '').toUpperCase();
         const SPAN_MS = { HOURLY: 60 * 86400000, MINUTELY: 2 * 86400000, SECONDLY: 2 * 3600000 };
-        // A high-frequency series gets a short window anchored on NOW (a two-hour SECONDLY
-        // window that starts at midnight does not contain 08:00); everything else keeps the
-        // day window, extended back by one occurrence so a running one is included.
+
+        const startOfToday = new Date(now);
+        startOfToday.setHours(0, 0, 0, 0);
         const seriesStart = SPAN_MS[freq]
           ? new Date(now.getTime() - durationMs)
-          : new Date(Math.min(startWindow.getTime(), now.getTime() - durationMs));
+          : new Date(Math.min(startOfToday.getTime(), now.getTime() - durationMs));
         const seriesEnd = SPAN_MS[freq]
           ? new Date(Math.min(endWindow.getTime(), seriesStart.getTime() + SPAN_MS[freq]))
           : endWindow;
@@ -254,24 +217,25 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
           const narrowEnd = new Date(Math.min(seriesEnd.getTime(), now.getTime() + 86400000));
           dates = ev.rrule.between(seriesStart, narrowEnd, true) || [];
         }
-        // Drop what is already over BEFORE bounding the list: the bound keeps the EARLIEST
-        // occurrences, and for a minutely series from midnight those are all in the past, which
-        // left the live one outside the cut and the room reading FREE at 08:00.
-        // An occurrence with a RECURRENCE-ID override is kept regardless: the override may move
-        // it later than its series slot, and only the loop below knows the moved time.
+
         const hasOverride = (d) => {
           if (!ev.recurrences) return false;
           const dt = new Date(d);
           return Boolean(ev.recurrences[dt.toISOString().slice(0, 10)] || ev.recurrences[dt.toISOString()]);
         };
-        dates = dates.filter((d) => isAllDay || hasOverride(d) || (new Date(d).getTime() + durationMs) >= now.getTime());
+        dates = dates.filter((d) => isAllDay
+          ? (formatLocalDayKey(new Date(d.getTime() + durationMs)) > todayKey)
+          : (hasOverride(d) || (new Date(d).getTime() + durationMs) >= now.getTime()));
         if (dates.length > maxRruleExpansion) dates = dates.slice(0, maxRruleExpansion);
 
         for (const date of dates) {
           let occStart = new Date(date);
           let occEnd = new Date(occStart.getTime() + durationMs);
           const dateKeyIso = occStart.toISOString().slice(0, 10);
-          if (exdateKeys.has(dateKeyIso) || exdateKeys.has(occStart.getTime())) continue;
+          const dayKey = isAllDay ? formatLocalDayKey(occStart) : dateKey(occStart);
+          const endDayKey = isAllDay ? formatLocalDayKey(occEnd) : dateKey(occEnd);
+
+          if (exdateKeys.has(dateKeyIso) || exdateKeys.has(occStart.getTime()) || (isAllDay && exdateKeys.has(dayKey))) continue;
 
           let occSummary = summary;
           let occLocation = location;
@@ -286,14 +250,16 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
             else if (rec.start) occEnd = new Date(occStart.getTime() + durationMs);
           }
 
-          // Skip if occurrence has already ended before now
-          if (occEnd < now && !isAllDay) continue;
+          const occIsPast = isAllDay ? (endDayKey <= todayKey) : (occEnd < now);
+          if (occIsPast) continue;
 
           flatEvents.push({
             summary: occSummary,
             start: occStart,
             end: occEnd,
             isAllDay,
+            dayKey,
+            endDayKey,
             organizer,
             location: occLocation,
             description: occDescription,
@@ -304,15 +270,21 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
       }
     } else if (ev.start) {
       const evStart = new Date(ev.start);
-      const evEnd = ev.end ? new Date(ev.end) : new Date(evStart.getTime() + 3600000);
+      const evEnd = ev.end ? new Date(ev.end) : new Date(evStart.getTime() + (isAllDay ? 86400000 : 3600000));
+      const dayKey = isAllDay ? formatLocalDayKey(evStart) : dateKey(evStart);
+      const endDayKey = isAllDay ? formatLocalDayKey(evEnd) : dateKey(evEnd);
 
-      // Include if within window and hasn't already ended
-      if (evEnd >= now && evStart <= endWindow) {
+      const isPast = isAllDay ? (endDayKey <= todayKey) : (evEnd < now);
+      const isWithinWindow = isAllDay ? (dayKey <= endWindowDayKey) : (evStart <= endWindow);
+
+      if (!isPast && isWithinWindow) {
         flatEvents.push({
           summary,
           start: evStart,
           end: evEnd,
           isAllDay,
+          dayKey,
+          endDayKey,
           organizer,
           location,
           description,
@@ -327,60 +299,11 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
   // Truncate to max events
   const selectedEvents = flatEvents.slice(0, maxEvents);
 
-  // Determine current active event (DTSTART <= now < DTEND)
+  // Determine current active event (timed event with DTSTART <= now < DTEND)
   const currentEvent = flatEvents.find(e => !e.isAllDay && e.start <= now && e.end > now) || null;
 
-  // Determine next upcoming event (DTSTART > now)
-  const nextEvent = flatEvents.find(e => e.start > now) || null;
-
-  // Format date and time helpers (honour the configured IANA timezone, falling back to
-  // the server's local zone so times are never silently shifted for a different venue).
-  const tzOpts = timezone ? { timeZone: timezone } : {};
-  const dateKey = (d) => d.toLocaleDateString('en-CA', tzOpts); // YYYY-MM-DD in target zone
-  const todayKey = dateKey(now);
-  const tomorrow = new Date(now);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowKey = dateKey(tomorrow);
-
-  const formatAllDayKey = (d) => {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-  };
-
-  const formatAllDayDate = (d) => {
-    const key = formatAllDayKey(d);
-    if (key === todayKey) return locale === 'de' ? 'Heute' : 'Today';
-    if (key === tomorrowKey) return locale === 'de' ? 'Morgen' : 'Tomorrow';
-
-    // Format calendar date using midday UTC representation to avoid timezone shifts across day boundaries
-    const y = d.getFullYear();
-    const m = d.getMonth();
-    const day = d.getDate();
-    const noonUtc = new Date(Date.UTC(y, m, day, 12, 0, 0));
-    return noonUtc.toLocaleDateString(locale === 'de' ? 'de-DE' : 'en-US', {
-      weekday: 'short',
-      day: 'numeric',
-      month: 'short',
-      timeZone: 'UTC',
-    });
-  };
-
-  const formatTime = (d) => d.toLocaleTimeString(locale === 'de' ? 'de-DE' : 'en-US', { hour: '2-digit', minute: '2-digit', hour12: locale !== 'de', ...tzOpts });
-  const formatDate = (d, isAllDay = false) => {
-    if (isAllDay) return formatAllDayDate(d);
-    const key = dateKey(d);
-    if (key === todayKey) return locale === 'de' ? 'Heute' : 'Today';
-    if (key === tomorrowKey) return locale === 'de' ? 'Morgen' : 'Tomorrow';
-
-    return d.toLocaleDateString(locale === 'de' ? 'de-DE' : 'en-US', {
-      weekday: 'short',
-      day: 'numeric',
-      month: 'short',
-      ...tzOpts,
-    });
-  };
+  // Determine next upcoming event (DTSTART > now for timed, dayKey > todayKey for all-day)
+  const nextEvent = flatEvents.find(e => e.isAllDay ? e.dayKey > todayKey : e.start > now) || null;
 
   const isBusy = !!currentEvent;
   const statusDe = isBusy ? 'BELEGT' : 'FREI';
@@ -393,9 +316,10 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
       ? `Belegt bis ${formatTime(currentEvent.end)}`
       : `Busy until ${formatTime(currentEvent.end)}`;
   } else if (nextEvent) {
-    const nextEventKey = nextEvent.isAllDay ? formatAllDayKey(nextEvent.start) : dateKey(nextEvent.start);
-    const nextIsToday = nextEventKey === todayKey;
-    if (nextIsToday) {
+    const nextIsToday = nextEvent.isAllDay
+      ? (nextEvent.dayKey <= todayKey && nextEvent.endDayKey > todayKey)
+      : (dateKey(nextEvent.start) === todayKey);
+    if (nextIsToday && !nextEvent.isAllDay) {
       statusDetail = locale === 'de'
         ? `Frei bis ${formatTime(nextEvent.start)}`
         : `Free until ${formatTime(nextEvent.start)}`;
@@ -426,21 +350,21 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
     next_title: nextEvent ? nextEvent.summary : '',
     next_summary: nextEvent ? nextEvent.summary : '',
     next_event_summary: nextEvent ? nextEvent.summary : '',
-    next_time: nextEvent ? (nextEvent.isAllDay ? formatDate(nextEvent.start, true) : `${formatDate(nextEvent.start)}, ${formatTime(nextEvent.start)}`) : '',
-    next_event_time: nextEvent ? (nextEvent.isAllDay ? formatDate(nextEvent.start, true) : `${formatDate(nextEvent.start)}, ${formatTime(nextEvent.start)}`) : '',
-    next_date: nextEvent ? formatDate(nextEvent.start, nextEvent.isAllDay) : '',
+    next_time: nextEvent ? (nextEvent.isAllDay ? formatDate(nextEvent) : `${formatDate(nextEvent)}, ${formatTime(nextEvent.start)}`) : '',
+    next_event_time: nextEvent ? (nextEvent.isAllDay ? formatDate(nextEvent) : `${formatDate(nextEvent)}, ${formatTime(nextEvent.start)}`) : '',
+    next_date: nextEvent ? formatDate(nextEvent) : '',
     next_organizer: nextEvent ? nextEvent.organizer : '',
 
     total_upcoming_count: selectedEvents.length,
     event_count: selectedEvents.length,
-    events_today_count: flatEvents.filter(e => (e.isAllDay ? formatAllDayKey(e.start) : dateKey(e.start)) === todayKey).length,
+    events_today_count: flatEvents.filter(e => e.isAllDay ? (e.dayKey <= todayKey && e.endDayKey > todayKey) : (dateKey(e.start) === todayKey)).length,
   };
 
   // Populate indexed items (event_0_title, event_1_title, ...)
   selectedEvents.forEach((ev, idx) => {
     payload[`event_${idx}_title`] = ev.summary;
     payload[`event_${idx}_summary`] = ev.summary;
-    payload[`event_${idx}_date`] = ev.isAllDay ? formatDate(ev.start, true) : `${formatDate(ev.start)}, ${formatTime(ev.start)}`;
+    payload[`event_${idx}_date`] = ev.isAllDay ? formatDate(ev) : `${formatDate(ev)}, ${formatTime(ev.start)}`;
     payload[`event_${idx}_time`] = ev.isAllDay ? (locale === 'de' ? 'Ganztägig' : 'All day') : `${formatTime(ev.start)} – ${formatTime(ev.end)}`;
     payload[`event_${idx}_location`] = ev.location || '';
     payload[`event_${idx}_organizer`] = ev.organizer || '';
@@ -448,7 +372,7 @@ async function resolveIcalData(config = {}, nowRef = new Date()) {
 
   // Multi-line formatted agenda text
   payload.agenda_text = selectedEvents
-    .map(ev => `${ev.isAllDay ? formatDate(ev.start, true) : formatTime(ev.start)}: ${ev.summary}`)
+    .map(ev => `${ev.isAllDay ? formatDate(ev) : formatTime(ev.start)}: ${ev.summary}`)
     .join('\n');
 
   return payload;
