@@ -63,13 +63,34 @@ fi
 # whenever the .wgt is (re-)signed, because the size changes.
 WGT_BYTES=$(wc -c < "$OUT" | tr -d ' ')
 WGT_SIZE=$(( (WGT_BYTES + 1023) / 1024 ))
+# ⚠️ <ver> IS AN INTEGER, NOT THE SEMVER (#342). Same class of silent failure as the size above.
+# An SSSP panel compares this numerically and installs only a STRICTLY HIGHER value than the one
+# already on it. Writing "2.0.8" either fails the comparison or parses as 2, which can be LOWER
+# than an integer the panel already has, so the package is refused with nothing naming the reason.
+# Reported from the field on OM55B / SSSP v6 after #329, having been patched by hand to keep panels
+# updating.
+#
+# Derived from the version rather than counted, so it needs no state, is identical in CI and on a
+# workstation, and reads back: 2.0.8 -> 20008, 1.9.40 -> 10940. Monotonic as long as minor and
+# patch stay below 100, which is asserted rather than assumed.
+SSSP_MAJOR="${VER%%.*}"; SSSP_REST="${VER#*.}"
+SSSP_MINOR="${SSSP_REST%%.*}"; SSSP_PATCH="${SSSP_REST#*.}"
+case "$SSSP_MAJOR$SSSP_MINOR$SSSP_PATCH" in
+  ''|*[!0-9]*) echo "FATAL: cannot derive an integer <ver> from '$VER'" >&2; exit 1 ;;
+esac
+if [ "$SSSP_MINOR" -gt 99 ] || [ "$SSSP_PATCH" -gt 99 ]; then
+  echo "FATAL: version $VER breaks the <ver> encoding (minor/patch must stay under 100)" >&2
+  exit 1
+fi
+SSSP_VER=$(( SSSP_MAJOR * 10000 + SSSP_MINOR * 100 + SSSP_PATCH ))
+
 cat > sssp_config.xml <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <widget>
-	<ver>${VER:-1.0.0}</ver>
+	<ver>${SSSP_VER}</ver>
 	<size>${WGT_SIZE}</size>
 	<widgetname>ScreenTinker</widgetname>
 	<webtype>tizen</webtype>
 </widget>
 EOF
-echo "Wrote sssp_config.xml (ver ${VER:-1.0.0}, size ${WGT_SIZE} KB from ${WGT_BYTES} bytes)."
+echo "Wrote sssp_config.xml (ver ${SSSP_VER} from ${VER}, size ${WGT_SIZE} KB from ${WGT_BYTES} bytes)."

@@ -73,3 +73,53 @@ test('#329: build-wgt.sh writes kilobytes too, not just the server', () => {
   assert.match(sh, /<size>\$\{WGT_SIZE\}<\/size>/, '<size> reads the converted value');
   assert.doesNotMatch(sh, /<size>\$\{WGT_BYTES\}<\/size>/, 'and never the raw byte count');
 });
+
+/*
+ * #342 — <ver> is an INTEGER, and a panel installs only a strictly higher one.
+ *
+ * The size fix in #329 landed in this same file and left the neighbouring field wrong: <ver> was
+ * stamped with the semver string. An SSSP panel compares numerically, so "2.0.8" either fails the
+ * comparison or parses as 2, which can be LOWER than an integer the panel already carries. The
+ * package is then refused with nothing naming the version, exactly like the size unit bug. The
+ * reporter had been hand-patching the file on every build to keep panels updating.
+ */
+const { ssspVer } = wgtCache;
+
+test('the encoding is monotonic across releases, which is the whole requirement', () => {
+  const order = ['1.8.0', '1.9.24', '1.9.40', '2.0.0', '2.0.7', '2.0.8', '2.1.0', '3.0.0'];
+  const nums = order.map(ssspVer);
+  for (const n of nums) assert.equal(Number.isInteger(n), true, 'every <ver> must be an integer');
+  for (let i = 1; i < nums.length; i++) {
+    assert.ok(nums[i] > nums[i - 1], `${order[i]} (${nums[i]}) must exceed ${order[i - 1]} (${nums[i - 1]})`);
+  }
+});
+
+test('it clears the values already installed in the field', () => {
+  // The reporter was hand-incrementing small integers; 9 was their last diagnostic build.
+  assert.ok(ssspVer('2.0.8') > 10, 'must beat a hand-maintained counter');
+  // And the broken string form parsed as its major, which is what a panel saw before.
+  assert.ok(ssspVer('2.0.8') > parseInt('2.0.8', 10), 'must beat what the semver string parsed to');
+});
+
+test('a version it cannot encode is refused rather than guessed at', () => {
+  assert.equal(ssspVer('2.0.100'), null, 'patch >= 100 breaks the encoding, so say so');
+  assert.equal(ssspVer('2.100.0'), null);
+  assert.equal(ssspVer('nonsense'), null);
+  assert.equal(ssspVer(''), null);
+  assert.equal(ssspVer(undefined), null);
+});
+
+test('the manifest carries the integer, never the semver', () => {
+  const xml = wgtCache.ssspConfigXml({ exists: true, size: 128000, version: ssspVer('2.0.8') });
+  assert.match(xml, /<ver>20008<\/ver>/);
+  assert.doesNotMatch(xml, /<ver>[^<]*\.[^<]*<\/ver>/, 'a dotted version here is the bug');
+});
+
+test('build-wgt.sh derives the SAME integer as the server, or the two paths disagree', () => {
+  // Same discipline as the size arithmetic above: assert the shell source, since a panel served by
+  // a hosted manifest and one installed from a built folder must not see different numbers.
+  const sh = fs.readFileSync(path.join(__dirname, '..', '..', 'tizen', 'build-wgt.sh'), 'utf8');
+  assert.match(sh, /SSSP_MAJOR \* 10000 \+ SSSP_MINOR \* 100 \+ SSSP_PATCH/,
+    'build-wgt.sh must use the same major*10000 + minor*100 + patch encoding');
+  assert.match(sh, /<ver>\$\{SSSP_VER\}<\/ver>/, 'and must write that integer, not $VER');
+});
