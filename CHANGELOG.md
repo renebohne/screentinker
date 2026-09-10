@@ -28,14 +28,16 @@ every history response. Documented in `docs/approvals-and-history.md`.
 **Data sources.** A workspace can register an external source and bind widget and slide fields to
 it with `{{ds:name.field}}`. iCal is the first integration, aimed at room booking panels: a sign
 knows whether the room is busy, what is on next and when it frees up. Fetches go through the SSRF
-guard with pinned DNS, a body cap, redirect limits and a per-workspace concurrency bound.
+guard with pinned DNS, a body cap, redirect limits and a per-workspace concurrency bound. Contributed by @renebohne in #332 and #340.
 
 **LG webOS player.** An installed shell around the web player, so a webOS signage panel is a first
 class display alongside Android, Tizen, BrightSign and the browser.
 
 **Embedded renderer: multi-zone layouts.** The e-paper and microcontroller path can now render a
 full layout, not just a single item, compositing zones natively with Jimp where every zone is an
-image and falling back to a browser render otherwise.
+image and falling back to a browser render otherwise. Contributed by @renebohne in #331 and #339.
+
+@renebohne authored 22 of the 40 commits in this release.
 
 ### Fixed
 
