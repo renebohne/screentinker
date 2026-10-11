@@ -306,11 +306,39 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
     });
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('x-st-supports-partial'), '1');
+  });
 
-    try { fs.unlinkSync(pngPath); } catch (_) {}
+  test('parseProfile swaps axes for portrait on landscape model and vice versa', () => {
+    const portraitE1001 = parseProfile('seeed-reterminal-e1001', { orientation: 'portrait' });
+    assert.equal(portraitE1001.width, 480);
+    assert.equal(portraitE1001.height, 800);
+    assert.equal(portraitE1001.orientation, 'portrait');
+
+    const landscapeE1004 = parseProfile('seeed-reterminal-e1004', { orientation: 'landscape' });
+    assert.equal(landscapeE1004.width, 1600);
+    assert.equal(landscapeE1004.height, 1200);
+    assert.equal(landscapeE1004.orientation, 'landscape');
+
+    const flippedE1001 = parseProfile('seeed-reterminal-e1001', { orientation: 'landscape-flipped' });
+    assert.equal(flippedE1001.rotation, 180);
+  });
+
+  test('GET /render emits rotation and orientation headers and swaps axes on orientation=portrait', async () => {
+    const res = await fetch(`${baseUrl}/render?device_id=dev-e1001&orientation=portrait&rotation=90`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('x-st-orientation'), 'portrait');
+    assert.equal(res.headers.get('x-st-rotation'), '90');
+    assert.equal(res.headers.get('x-st-screen-width'), '480');
+    assert.equal(res.headers.get('x-st-screen-height'), '800');
   });
 
   test('teardown server', async () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const { contentDir } = require('../config');
+    try { fs.unlinkSync(path.join(contentDir, 'test-e1001.png')); } catch (_) {}
     if (server) await new Promise((resolve) => server.close(resolve));
   });
 });

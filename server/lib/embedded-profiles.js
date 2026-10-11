@@ -116,45 +116,91 @@ const DEFAULTS = {
   outputFormat: 'x-epd-packed',
 };
 
+const { ROTATION_DEG } = require('./orientation-style');
+const VALID_ORIENTATIONS = new Set(['landscape', 'portrait', 'landscape-flipped', 'portrait-flipped']);
+
 /**
  * Return a validated, fully-populated profile object.
  * Unknown/invalid fields fall back to DEFAULTS rather than throwing — a corrupt stored
  * profile should produce a degraded image, not a 500.
  *
  * @param {string|object|null} raw  JSON string from devices.screen_profile, or plain object.
+ * @param {object|string} [overrides] Optional overrides (e.g. { orientation, rotation }).
  * @returns {object|null}  Validated profile, or null if raw is empty/unparseable/missing dims.
  */
-function parseProfile(raw) {
+function parseProfile(raw, overrides = {}) {
   if (!raw) return null;
-  if (typeof raw === 'string' && PRESETS[raw]) {
-    return { ...PRESETS[raw] };
-  }
+  const opts = typeof overrides === 'string' ? { orientation: overrides } : (overrides || {});
+
   let obj;
-  try {
-    obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
-  } catch {
-    if (typeof raw === 'string' && PRESETS[raw]) return { ...PRESETS[raw] };
-    return null;
+  if (typeof raw === 'string') {
+    if (PRESETS[raw] && !opts.orientation && opts.rotation === undefined) {
+      return { ...PRESETS[raw] };
+    }
+    if (PRESETS[raw]) {
+      obj = { ...PRESETS[raw] };
+    } else {
+      try {
+        obj = JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    }
+  } else {
+    obj = raw;
   }
-  if (typeof obj === 'string' && PRESETS[obj]) return { ...PRESETS[obj] };
+  if (typeof obj === 'string' && PRESETS[obj]) {
+    if (!opts.orientation && opts.rotation === undefined) return { ...PRESETS[obj] };
+    obj = { ...PRESETS[obj] };
+  }
   if (typeof obj !== 'object' || obj === null) return null;
 
   if (obj.preset && PRESETS[obj.preset]) {
     obj = { ...PRESETS[obj.preset], ...obj };
   }
 
-  const width  = Number.isInteger(obj.width)  && obj.width  > 0 && obj.width  <= 10000 ? obj.width  : null;
-  const height = Number.isInteger(obj.height) && obj.height > 0 && obj.height <= 10000 ? obj.height : null;
+  let width  = Number.isInteger(obj.width)  && obj.width  > 0 && obj.width  <= 10000 ? obj.width  : null;
+  let height = Number.isInteger(obj.height) && obj.height > 0 && obj.height <= 10000 ? obj.height : null;
   if (!width || !height) return null;
+
+  // Handle orientation: if portrait on landscape preset (or vice versa), swap width and height
+  const orientation = VALID_ORIENTATIONS.has(opts.orientation)
+    ? opts.orientation
+    : (VALID_ORIENTATIONS.has(obj.orientation) ? obj.orientation : null);
+
+  if (orientation) {
+    const isPortrait = orientation === 'portrait' || orientation === 'portrait-flipped';
+    const isLandscape = orientation === 'landscape' || orientation === 'landscape-flipped';
+
+    if (isPortrait && width > height) {
+      const tmp = width; width = height; height = tmp;
+    } else if (isLandscape && width < height) {
+      const tmp = width; width = height; height = tmp;
+    }
+  }
+
+  // Handle rotation
+  let rotation = DEFAULTS.rotation;
+  if (VALID_ROTATIONS.has(opts.rotation)) {
+    rotation = opts.rotation;
+  } else if (orientation && (orientation === 'landscape-flipped' || orientation === 'portrait-flipped')) {
+    rotation = 180;
+  } else if (VALID_ROTATIONS.has(obj.rotation)) {
+    rotation = obj.rotation;
+  }
 
   const result = {
     width,
     height,
-    rotation:     VALID_ROTATIONS.has(obj.rotation)           ? obj.rotation     : DEFAULTS.rotation,
+    rotation,
     colorDepth:   VALID_COLOR_DEPTHS.has(obj.colorDepth)      ? obj.colorDepth   : DEFAULTS.colorDepth,
     dither:       VALID_DITHERS.has(obj.dither)               ? obj.dither       : DEFAULTS.dither,
     outputFormat: VALID_OUTPUT_FORMATS.has(obj.outputFormat)  ? obj.outputFormat : DEFAULTS.outputFormat,
   };
+
+  if (orientation) {
+    result.orientation = orientation;
+  }
 
   if (typeof obj.supportsPartialRefresh === 'boolean') {
     result.supportsPartialRefresh = obj.supportsPartialRefresh;

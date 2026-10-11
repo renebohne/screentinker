@@ -747,7 +747,9 @@ router.get('/info', resolveAuth, (req, res) => {
   if (!device) return;
 
   touchDeviceHeartbeat(device, req);
-  const profile = parseProfile(device.screen_profile);
+  const overrideOrientation = req.query.orientation || device.orientation;
+  const overrideRotation = req.query.rotation !== undefined ? parseInt(req.query.rotation, 10) : (req.query.rotate !== undefined ? parseInt(req.query.rotate, 10) : undefined);
+  const profile = parseProfile(device.screen_profile, { orientation: overrideOrientation, rotation: overrideRotation });
   const power = evaluateDevicePower(device);
   // /info is metadata (MCU negotiation / debugging / monitors). It must NOT advance the panel's
   // cursor, or a poll that lands after the current item's dwell would make the real render skip an item.
@@ -795,7 +797,9 @@ router.get('/render', resolveAuth, async (req, res) => {
 
   touchDeviceHeartbeat(device, req);
 
-  const profile = parseProfile(device.screen_profile);
+  const overrideOrientation = req.query.orientation || device.orientation;
+  const overrideRotation = req.query.rotation !== undefined ? parseInt(req.query.rotation, 10) : (req.query.rotate !== undefined ? parseInt(req.query.rotate, 10) : undefined);
+  const profile = parseProfile(device.screen_profile, { orientation: overrideOrientation, rotation: overrideRotation });
   if (!profile) {
     return res.status(400).json({
       error: 'Embedded rendering not configured for this device.',
@@ -852,7 +856,9 @@ router.get('/render-layout', resolveAuth, async (req, res) => {
 
   touchDeviceHeartbeat(device, req);
 
-  const profile = parseProfile(device.screen_profile);
+  const overrideOrientation = req.query.orientation || device.orientation;
+  const overrideRotation = req.query.rotation !== undefined ? parseInt(req.query.rotation, 10) : (req.query.rotate !== undefined ? parseInt(req.query.rotate, 10) : undefined);
+  const profile = parseProfile(device.screen_profile, { orientation: overrideOrientation, rotation: overrideRotation });
   if (!profile) {
     return res.status(400).json({
       error: 'Embedded rendering not configured for this device.',
@@ -959,6 +965,10 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     'X-ST-Item-Index': String(itemIndex),
     'X-ST-Total-Items': String(total),
     'X-ST-Power-State': power.state,
+    'X-ST-Screen-Width': String(profile.width),
+    'X-ST-Screen-Height': String(profile.height),
+    'X-ST-Rotation': String(profile.rotation || 0),
+    'X-ST-Orientation': profile.orientation || device.orientation || 'landscape',
   };
   if (profile.supportsPartialRefresh !== undefined) {
     headers['X-ST-Supports-Partial'] = profile.supportsPartialRefresh ? '1' : '0';
@@ -1128,6 +1138,10 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     'X-ST-Item-Index': '0',
     'X-ST-Total-Zones': String(zoneEntries.length),
     'X-ST-Power-State': power.state,
+    'X-ST-Screen-Width': String(profile.width),
+    'X-ST-Screen-Height': String(profile.height),
+    'X-ST-Rotation': String(profile.rotation || 0),
+    'X-ST-Orientation': profile.orientation || device.orientation || 'landscape',
   };
   if (profile.supportsPartialRefresh !== undefined) {
     headers['X-ST-Supports-Partial'] = profile.supportsPartialRefresh ? '1' : '0';
