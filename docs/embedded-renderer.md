@@ -129,7 +129,9 @@ Fetches the pre-rendered image for the current playlist item.
 - **`X-ST-Device-Battery`** *(header, optional)*: Battery level as an integer percentage (`0`–`100`). Automatically stored in `device_telemetry` and displayed on the device health card.
 - **`X-ST-Device-RSSI`** *(header, optional)*: Wi-Fi signal strength in dBm (e.g. `-65`). Stored in `device_telemetry`.
 - **`X-ST-Firmware-Version`** *(header, optional)*: Firmware / client version string (e.g. `1.2.0`). Updates `devices.app_version`.
-- **`format`** *(query, optional)*: Override output format (`x-epd-packed`, `png`, `jpeg`, `bmp`, `raw`).
+- **`orientation`** *(query, optional)*: Override screen orientation (`landscape`, `portrait`, `landscape-flipped`, `portrait-flipped`). Swaps resolution axes and aligns row stride automatically.
+- **`rotation`** *(query, optional)*: Explicit rotation angle in degrees (`0`, `90`, `180`, `270`).
+- **`format`** *(query, optional)*: Override output format (`x-epd-packed`, `x-epd-spectra6`, `x-epd-gray16`, `png`, `jpeg`, `bmp`, `raw`).
 - **`dither`** *(query, optional)*: Override dithering algorithm (`floyd-steinberg`, `atkinson`, `none`).
 - **`mode`** *(query, optional)*: `layout` (forces multi-zone layout rendering), `single` (forces single-item rendering). When omitted, automatically renders in multi-zone layout mode if the device has an assigned multi-zone layout (`zones.length > 1`), or single-item mode otherwise.
 - **`item`** *(query, optional)*: Force a specific playlist item index (0-based integer) for step testing or previewing.
@@ -137,11 +139,16 @@ Fetches the pre-rendered image for the current playlist item.
 
 #### Responses
 - **`200 OK`**: Binary image body formatted per the device's `screen_profile`.
-  - Content-Type: `application/octet-stream` (for `x-epd-packed` or `raw`), `image/png`, `image/jpeg`, or `image/bmp`.
+  - Content-Type: `application/octet-stream` (for `x-epd-packed`, `x-epd-spectra6`, `x-epd-gray16`, or `raw`), `image/png`, `image/jpeg`, or `image/bmp`.
   - Response Headers:
     - `ETag`: `"sha256-hash..."`
-    - `X-ST-Expires-In`: Seconds until the current item ends, or seconds until morning 'on' window if display power schedule is off (sleep timer for MCU).
+    - `X-ST-Expires-In`: Seconds until the current item ends, or seconds until morning 'on' window if display power schedule is off (sleep timer for MCU). Clamped to at least `profile.minRefreshInterval`.
     - `X-ST-Power-State`: `'on'` or `'scheduled_off'` according to the device's weekly Display Power Schedule.
+    - `X-ST-Screen-Width`: Active pixel width of the rendered buffer (e.g. `800` or `480`).
+    - `X-ST-Screen-Height`: Active pixel height of the rendered buffer (e.g. `480` or `800`).
+    - `X-ST-Orientation`: Active orientation (`landscape`, `portrait`, `landscape-flipped`, `portrait-flipped`).
+    - `X-ST-Rotation`: Active rotation angle (`0`, `90`, `180`, `270`).
+    - `X-ST-Supports-Partial`: `'1'` if device supports fast partial refresh; `'0'` if full refresh is required.
     - `X-ST-Item-Index`: Current playlist item index (0-based) in single mode or `'0'` in layout mode.
     - `X-ST-Total-Items`: Total active items in playlist (in single-item mode).
     - `X-ST-Total-Zones`: Total zones in the layout (in multi-zone layout mode).
@@ -266,32 +273,41 @@ A device's screen configuration is stored in the `devices.screen_profile` JSON c
 |---|---|---|---|
 | `width` | `number` | Positive integer (e.g. `800`) | Logical pixel width |
 | `height` | `number` | Positive integer (e.g. `480`) | Logical pixel height |
-| `rotation` | `number` | `0`, `90`, `180`, `270` | Rotation applied after resize |
-| `colorDepth` | `string` | `1bit`, `4bit-gray`, `16bit-rgb565`, `24bit-rgb888` | Color quantization |
-| `dither` | `string` | `floyd-steinberg`, `atkinson`, `none` | Dithering algorithm for 1-bit |
-| `outputFormat` | `string` | `x-epd-packed`, `bmp`, `raw`, `png`, `jpeg` | Serialization format |
+| `orientation` | `string` | `landscape`, `portrait`, `landscape-flipped`, `portrait-flipped` | Screen orientation |
+| `rotation` | `number` | `0`, `90`, `180`, `270` | Mounting rotation in degrees |
+| `colorDepth` | `string` | `1bit`, `4bit-gray`, `gray16`, `spectra6`, `16bit-rgb565`, `24bit-rgb888` | Color quantization mode |
+| `dither` | `string` | `floyd-steinberg`, `atkinson`, `none` | Dithering algorithm |
+| `outputFormat` | `string` | `x-epd-packed`, `x-epd-spectra6`, `x-epd-gray16`, `bmp`, `raw`, `png`, `jpeg` | Serialization format |
+| `supportsPartialRefresh` | `boolean` | `true`, `false` | Whether display hardware supports partial refresh |
+| `minRefreshInterval` | `number` | Positive integer (seconds) | Minimum polling / refresh interval |
 
 ### Output Format Details
 
 - **`x-epd-packed`**: 1-bit MSB-first packed bitstream without row-padding. For an 800×480 screen, this produces exactly `(800 * 480) / 8 = 48,000 bytes`. This can be written directly to SSD1677, SSD1608, or UC8151 controller RAM over SPI.
+- **`x-epd-spectra6`**: 4bpp packed buffer (2 pixels per byte, MSN first) quantized to the 6-color Spectra palette (Black, White, Yellow, Red, Blue, Green) via Euclidean distance and Floyd-Steinberg error diffusion in RGB space.
+- **`x-epd-gray16`**: 4bpp packed buffer (2 pixels per byte, MSN first) quantized to 16 grayscale levels (0-15) with Floyd-Steinberg error diffusion.
 - **`bmp`**: Standard 1-bit Windows BMP (Bitmap DIB v3) with 2-color palette (Black / White).
 - **`png` & `jpeg`**: Rendered raster images with dithering applied (ideal for browser previewing and debugging).
 - **`16bit-rgb565`**: 2 bytes per pixel (Little-Endian R5G6B5) for SPI TFT displays (ILI9341, ST7789).
 
 ---
 
-## 4. Hardware Presets
+## 5. Hardware Presets
 
-| Preset Key | Width | Height | Depth | Notes |
-|---|---|---|---|---|
-| `seeed-reterminal-sticky` | 800 | 480 | `1bit` | Seeed Studio reTerminal Sticky (SSD1677) |
-| `waveshare-7.5in-v2` | 800 | 480 | `1bit` | Waveshare 7.5" e-Paper |
-| `waveshare-4.2in-v2` | 400 | 300 | `1bit` | Waveshare 4.2" e-Paper |
-| `waveshare-2.9in-v2` | 296 | 128 | `1bit` | Waveshare 2.9" e-Paper |
-| `waveshare-1.54in-v2` | 200 | 200 | `1bit` | Waveshare 1.54" e-Paper |
-| `waveshare-5.65in-acep` | 600 | 448 | `24bit-rgb888` | 7-color ACeP e-Paper |
-| `generic-320x240-rgb565` | 320 | 240 | `16bit-rgb565` | Standard 2.4"/2.8" SPI TFT |
-| `generic-128x64-1bit` | 128 | 64 | `1bit` | SSD1306 0.96" OLED |
+| Preset Key | Width | Height | Depth | Format | Partial Refresh | Notes |
+|---|---|---|---|---|---|---|
+| `seeed-reterminal-sticky` | 800 | 480 | `1bit` | `x-epd-packed` | Yes (350ms) | Seeed Studio reTerminal Sticky (SSD1677, touch) |
+| `seeed-reterminal-e1001` | 800 | 480 | `1bit` | `x-epd-packed` | Yes (350ms) | Seeed Studio reTerminal E1001 (7.5" Mono) |
+| `seeed-reterminal-e1002` | 800 | 480 | `spectra6` | `x-epd-spectra6` | No (min 30s) | Seeed Studio reTerminal E1002 (7.3" 6-Color Spectra 6) |
+| `seeed-reterminal-e1003` | 1872 | 1404 | `gray16` | `x-epd-gray16` | Yes (180ms) | Seeed Studio reTerminal E1003 (10.3" Gray16, touch) |
+| `seeed-reterminal-e1004` | 1200 | 1600 | `spectra6` | `x-epd-spectra6` | No (min 60s) | Seeed Studio reTerminal E1004 (13.3" 6-Color Spectra 6) |
+| `waveshare-7.5in-v2` | 800 | 480 | `1bit` | `x-epd-packed` | - | Waveshare 7.5" e-Paper |
+| `waveshare-4.2in-v2` | 400 | 300 | `1bit` | `x-epd-packed` | - | Waveshare 4.2" e-Paper |
+| `waveshare-2.9in-v2` | 296 | 128 | `1bit` | `x-epd-packed` | - | Waveshare 2.9" e-Paper |
+| `waveshare-1.54in-v2` | 200 | 200 | `1bit` | `x-epd-packed` | - | Waveshare 1.54" e-Paper |
+| `waveshare-5.65in-acep` | 600 | 448 | `24bit-rgb888` | `png` | - | 7-color ACeP e-Paper |
+| `generic-320x240-rgb565` | 320 | 240 | `16bit-rgb565` | `raw` | - | Standard 2.4"/2.8" SPI TFT |
+| `generic-128x64-1bit` | 128 | 64 | `1bit` | `raw` | - | SSD1306 0.96" OLED |
 
 ---
 
