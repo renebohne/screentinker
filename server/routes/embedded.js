@@ -646,8 +646,9 @@ router.post('/pair/register', (req, res) => {
   const id = crypto.randomUUID();
   const newToken = crypto.randomBytes(32).toString('hex');
   const claimSecret = crypto.randomBytes(32).toString('hex');
-  const width = parseInt(screen_width) || 800;
-  const height = parseInt(screen_height) || 480;
+  const parsed = parseProfile(screen_profile || 'seeed-reterminal-sticky');
+  const width = parseInt(screen_width) || parsed?.width || 800;
+  const height = parseInt(screen_height) || parsed?.height || 480;
   const profile = typeof screen_profile === 'object' ? JSON.stringify(screen_profile) : (screen_profile || 'seeed-reterminal-sticky');
 
   let code;
@@ -805,7 +806,7 @@ router.get('/render', resolveAuth, async (req, res) => {
   // Allow optional query overrides (e.g. ?format=jpeg or ?format=png or ?dither=atkinson for previewing)
   if (req.query.format) {
     const fmt = String(req.query.format).toLowerCase();
-    if (fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed') {
+    if (fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed' || fmt === 'x-epd-spectra6' || fmt === 'x-epd-gray16') {
       profile.outputFormat = fmt;
     }
   }
@@ -861,7 +862,7 @@ router.get('/render-layout', resolveAuth, async (req, res) => {
 
   if (req.query.format) {
     const fmt = String(req.query.format).toLowerCase();
-    if (fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed') {
+    if (fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed' || fmt === 'x-epd-spectra6' || fmt === 'x-epd-gray16') {
       profile.outputFormat = fmt;
     }
   }
@@ -931,6 +932,9 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     const secondsUntilOff = Math.max(1, power.nextEdge.minutes_until * 60);
     expiresIn = Math.min(expiresIn, secondsUntilOff);
   }
+  if (profile.minRefreshInterval && typeof profile.minRefreshInterval === 'number') {
+    expiresIn = Math.max(expiresIn, profile.minRefreshInterval);
+  }
 
   console.log(`[embedded] Device '${device.name}' (${device.id}) requested frame [item=${itemIndex + 1}/${total}] from ${clientIp}`);
 
@@ -956,6 +960,9 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     'X-ST-Total-Items': String(total),
     'X-ST-Power-State': power.state,
   };
+  if (profile.supportsPartialRefresh !== undefined) {
+    headers['X-ST-Supports-Partial'] = profile.supportsPartialRefresh ? '1' : '0';
+  }
   if (opts.pendingCmd) {
     headers['X-ST-Command'] = opts.pendingCmd;
   }
@@ -1097,6 +1104,9 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     const secondsUntilOff = Math.max(1, power.nextEdge.minutes_until * 60);
     expiresIn = Math.min(expiresIn, secondsUntilOff);
   }
+  if (profile.minRefreshInterval && typeof profile.minRefreshInterval === 'number') {
+    expiresIn = Math.max(expiresIn, profile.minRefreshInterval);
+  }
 
   console.log(`[embedded] Device '${device.name}' (${device.id}) requested multi-zone frame [layout=${layout.name || layout.id}] from ${clientIp}`);
 
@@ -1119,6 +1129,9 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     'X-ST-Total-Zones': String(zoneEntries.length),
     'X-ST-Power-State': power.state,
   };
+  if (profile.supportsPartialRefresh !== undefined) {
+    headers['X-ST-Supports-Partial'] = profile.supportsPartialRefresh ? '1' : '0';
+  }
   if (opts.pendingCmd) {
     headers['X-ST-Command'] = opts.pendingCmd;
   }
@@ -1184,11 +1197,15 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
 
 function detectContentType(profile) {
   switch (profile.outputFormat) {
-    case 'png': return 'image/png';
+    case 'png':            return 'image/png';
     case 'jpeg':
-    case 'jpg': return 'image/jpeg';
-    case 'bmp': return 'image/bmp';
-    default:    return 'application/octet-stream';
+    case 'jpg':            return 'image/jpeg';
+    case 'bmp':            return 'image/bmp';
+    case 'x-epd-packed':
+    case 'x-epd-spectra6':
+    case 'x-epd-gray16':
+    case 'raw':
+    default:               return 'application/octet-stream';
   }
 }
 

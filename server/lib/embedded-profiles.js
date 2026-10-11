@@ -24,11 +24,43 @@
  */
 
 const PRESETS = {
-  // ── E-Paper B/W ──────────────────────────────────────────────────────────────
+  // ── Seeed Studio reTerminal Series ──────────────────────────────────────────
   'seeed-reterminal-sticky': {
     width: 800, height: 480, rotation: 0,
     colorDepth: '1bit', dither: 'floyd-steinberg', outputFormat: 'x-epd-packed',
+    supportsPartialRefresh: true, minRefreshInterval: 5,
+    fullRefreshDurationMs: 1800, partialRefreshDurationMs: 350,
+    touchSupported: true, touchController: 'FT6336U',
   },
+  'seeed-reterminal-e1001': {
+    width: 800, height: 480, rotation: 0,
+    colorDepth: '1bit', dither: 'floyd-steinberg', outputFormat: 'x-epd-packed',
+    supportsPartialRefresh: true, minRefreshInterval: 5,
+    fullRefreshDurationMs: 3000, partialRefreshDurationMs: 350,
+    touchSupported: false,
+  },
+  'seeed-reterminal-e1002': {
+    width: 800, height: 480, rotation: 0,
+    colorDepth: 'spectra6', dither: 'floyd-steinberg', outputFormat: 'x-epd-spectra6',
+    supportsPartialRefresh: false, minRefreshInterval: 30,
+    fullRefreshDurationMs: 14000, partialRefreshDurationMs: 0,
+    touchSupported: false,
+  },
+  'seeed-reterminal-e1003': {
+    width: 1872, height: 1404, rotation: 0,
+    colorDepth: 'gray16', dither: 'floyd-steinberg', outputFormat: 'x-epd-gray16',
+    supportsPartialRefresh: true, minRefreshInterval: 2,
+    fullRefreshDurationMs: 1200, partialRefreshDurationMs: 180,
+    touchSupported: true, touchController: 'GT911',
+  },
+  'seeed-reterminal-e1004': {
+    width: 1200, height: 1600, rotation: 0,
+    colorDepth: 'spectra6', dither: 'floyd-steinberg', outputFormat: 'x-epd-spectra6',
+    supportsPartialRefresh: false, minRefreshInterval: 60,
+    fullRefreshDurationMs: 22000, partialRefreshDurationMs: 0,
+    touchSupported: false,
+  },
+  // ── Waveshare E-Paper B/W ────────────────────────────────────────────────────
   'waveshare-7.5in-v2': {
     width: 800, height: 480, rotation: 0,
     colorDepth: '1bit', dither: 'floyd-steinberg', outputFormat: 'x-epd-packed',
@@ -72,9 +104,9 @@ const PRESETS = {
   },
 };
 
-const VALID_COLOR_DEPTHS   = new Set(['1bit', '4bit-gray', '16bit-rgb565', '24bit-rgb888']);
+const VALID_COLOR_DEPTHS   = new Set(['1bit', '4bit-gray', 'gray16', 'spectra6', '16bit-rgb565', '24bit-rgb888']);
 const VALID_DITHERS        = new Set(['none', 'floyd-steinberg', 'atkinson']);
-const VALID_OUTPUT_FORMATS = new Set(['png', 'bmp', 'raw', 'x-epd-packed', 'jpeg', 'jpg']);
+const VALID_OUTPUT_FORMATS = new Set(['png', 'bmp', 'raw', 'x-epd-packed', 'x-epd-spectra6', 'x-epd-gray16', 'jpeg', 'jpg']);
 const VALID_ROTATIONS      = new Set([0, 90, 180, 270]);
 
 const DEFAULTS = {
@@ -115,7 +147,7 @@ function parseProfile(raw) {
   const height = Number.isInteger(obj.height) && obj.height > 0 && obj.height <= 10000 ? obj.height : null;
   if (!width || !height) return null;
 
-  return {
+  const result = {
     width,
     height,
     rotation:     VALID_ROTATIONS.has(obj.rotation)           ? obj.rotation     : DEFAULTS.rotation,
@@ -123,6 +155,27 @@ function parseProfile(raw) {
     dither:       VALID_DITHERS.has(obj.dither)               ? obj.dither       : DEFAULTS.dither,
     outputFormat: VALID_OUTPUT_FORMATS.has(obj.outputFormat)  ? obj.outputFormat : DEFAULTS.outputFormat,
   };
+
+  if (typeof obj.supportsPartialRefresh === 'boolean') {
+    result.supportsPartialRefresh = obj.supportsPartialRefresh;
+  }
+  if (typeof obj.minRefreshInterval === 'number' && obj.minRefreshInterval >= 0) {
+    result.minRefreshInterval = obj.minRefreshInterval;
+  }
+  if (typeof obj.fullRefreshDurationMs === 'number') {
+    result.fullRefreshDurationMs = obj.fullRefreshDurationMs;
+  }
+  if (typeof obj.partialRefreshDurationMs === 'number') {
+    result.partialRefreshDurationMs = obj.partialRefreshDurationMs;
+  }
+  if (typeof obj.touchSupported === 'boolean') {
+    result.touchSupported = obj.touchSupported;
+  }
+  if (obj.touchController !== undefined) {
+    result.touchController = obj.touchController;
+  }
+
+  return result;
 }
 
 /** Return a preset by key, or null if unknown. */

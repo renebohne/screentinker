@@ -142,6 +142,160 @@ function to4BitGray(rgba) {
   return out;
 }
 
+// ─── Spectra 6 Packing (6-Color E-Paper) ──────────────────────────────────────
+
+const SPECTRA6_PALETTE = [
+  { r: 20,  g: 20,  b: 20  }, // 0: Black
+  { r: 251, g: 251, b: 251 }, // 1: White
+  { r: 245, g: 222, b: 0   }, // 2: Yellow
+  { r: 215, g: 25,  b: 32  }, // 3: Red
+  { r: 0,   g: 91,  b: 172 }, // 4: Blue
+  { r: 0,   g: 135, b: 61  }, // 5: Green
+];
+
+function findNearestSpectra6(r, g, b) {
+  let bestIdx = 0;
+  let minDiff = Infinity;
+  for (let i = 0; i < SPECTRA6_PALETTE.length; i++) {
+    const p = SPECTRA6_PALETTE[i];
+    const dr = r - p.r;
+    const dg = g - p.g;
+    const db = b - p.b;
+    const diff = dr * dr + dg * dg + db * db;
+    if (diff < minDiff) {
+      minDiff = diff;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+function packSpectra6(rgba, w, h, dither = 'floyd-steinberg') {
+  const pixels = w * h;
+  const out = Buffer.alloc(Math.ceil(pixels / 2), 0);
+
+  if (dither === 'floyd-steinberg') {
+    const rErr = new Float32Array(pixels);
+    const gErr = new Float32Array(pixels);
+    const bErr = new Float32Array(pixels);
+    for (let i = 0; i < pixels; i++) {
+      rErr[i] = rgba[i * 4];
+      gErr[i] = rgba[i * 4 + 1];
+      bErr[i] = rgba[i * 4 + 2];
+    }
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const idx = y * w + x;
+        const r = Math.min(255, Math.max(0, rErr[idx]));
+        const g = Math.min(255, Math.max(0, gErr[idx]));
+        const b = Math.min(255, Math.max(0, bErr[idx]));
+
+        const colorIdx = findNearestSpectra6(r, g, b);
+        const palette = SPECTRA6_PALETTE[colorIdx];
+
+        const er = r - palette.r;
+        const eg = g - palette.g;
+        const eb = b - palette.b;
+
+        if (idx % 2 === 0) {
+          out[idx >> 1] = (colorIdx & 0x0F) << 4;
+        } else {
+          out[idx >> 1] |= (colorIdx & 0x0F);
+        }
+
+        if (x + 1 < w) {
+          const next = idx + 1;
+          rErr[next] += er * 7 / 16;
+          gErr[next] += eg * 7 / 16;
+          bErr[next] += eb * 7 / 16;
+        }
+        if (y + 1 < h) {
+          if (x - 1 >= 0) {
+            const bl = idx + w - 1;
+            rErr[bl] += er * 3 / 16;
+            gErr[bl] += eg * 3 / 16;
+            bErr[bl] += eb * 3 / 16;
+          }
+          const b = idx + w;
+          rErr[b] += er * 5 / 16;
+          gErr[b] += eg * 5 / 16;
+          bErr[b] += eb * 5 / 16;
+          if (x + 1 < w) {
+            const br = idx + w + 1;
+            rErr[br] += er * 1 / 16;
+            gErr[br] += eg * 1 / 16;
+            bErr[br] += eb * 1 / 16;
+          }
+        }
+      }
+    }
+  } else {
+    for (let i = 0; i < pixels; i++) {
+      const r = rgba[i * 4];
+      const g = rgba[i * 4 + 1];
+      const b = rgba[i * 4 + 2];
+      const colorIdx = findNearestSpectra6(r, g, b);
+      if (i % 2 === 0) {
+        out[i >> 1] = (colorIdx & 0x0F) << 4;
+      } else {
+        out[i >> 1] |= (colorIdx & 0x0F);
+      }
+    }
+  }
+
+  return out;
+}
+
+// ─── Gray16 Packing (16-Level Grayscale) ───────────────────────────────────────
+
+function packGray16(rgba, w, h, dither = 'floyd-steinberg') {
+  const pixels = w * h;
+  const out = Buffer.alloc(Math.ceil(pixels / 2), 0);
+
+  if (dither === 'floyd-steinberg') {
+    const err = new Float32Array(pixels);
+    for (let i = 0; i < pixels; i++) {
+      const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
+      err[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255 * 15;
+    }
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const idx = y * w + x;
+        const oldVal = err[idx];
+        const quantized = Math.min(15, Math.max(0, Math.round(oldVal)));
+        const e = oldVal - quantized;
+
+        if (idx % 2 === 0) {
+          out[idx >> 1] = (quantized & 0x0F) << 4;
+        } else {
+          out[idx >> 1] |= (quantized & 0x0F);
+        }
+
+        if (x + 1 < w)           err[idx + 1]     += e * 7 / 16;
+        if (y + 1 < h) {
+          if (x - 1 >= 0)         err[idx + w - 1] += e * 3 / 16;
+                                  err[idx + w]     += e * 5 / 16;
+          if (x + 1 < w)          err[idx + w + 1] += e * 1 / 16;
+        }
+      }
+    }
+  } else {
+    for (let i = 0; i < pixels; i++) {
+      const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
+      const lum = Math.min(15, Math.max(0, Math.round((0.299 * r + 0.587 * g + 0.114 * b) / 255 * 15)));
+      if (i % 2 === 0) {
+        out[i >> 1] = (lum & 0x0F) << 4;
+      } else {
+        out[i >> 1] |= (lum & 0x0F);
+      }
+    }
+  }
+
+  return out;
+}
+
 // ─── BMP encoding for 1-bit ────────────────────────────────────────────────────
 
 /*
@@ -231,6 +385,16 @@ async function postprocess(pngBuffer, profile) {
   // ── 4-bit grayscale ──────────────────────────────────────────────────────────
   if (colorDepth === '4bit-gray') {
     return { buffer: to4BitGray(rgba), contentType: 'application/octet-stream' };
+  }
+
+  // ── Spectra 6 (6-Color E-Paper) ──────────────────────────────────────────────
+  if (colorDepth === 'spectra6') {
+    return { buffer: packSpectra6(rgba, w, h2, dither), contentType: 'application/octet-stream' };
+  }
+
+  // ── Gray16 (16-Level Grayscale) ──────────────────────────────────────────────
+  if (colorDepth === 'gray16') {
+    return { buffer: packGray16(rgba, w, h2, dither), contentType: 'application/octet-stream' };
   }
 
   // ── 1-bit ────────────────────────────────────────────────────────────────────
