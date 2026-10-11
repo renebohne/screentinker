@@ -364,37 +364,41 @@ async function postprocess(pngBuffer, profile) {
   // Cover resize: crop to fill target box without letterboxing
   img.cover({ w: width, h: height });
 
-  // Rotation applied AFTER resize so the target box is always width×height
-  if (rotation) img.rotate(rotation);
-
-  // ── 24-bit pass-through ──────────────────────────────────────────────────────
-  if (colorDepth === '24bit-rgb888') {
-    const buf = await img.getBuffer('image/png');
-    return { buffer: buf, contentType: 'image/png' };
-  }
+  // Only 180-degree flip is applied post-resize so that the output width and height
+  // match profile.width and profile.height (and don't swap dimensions and row stride).
+  // 90 and 270 degree orientations are handled by rendering directly to the target canvas
+  // dimensions (profile.width x profile.height).
+  const postRotation = (rotation === 180 || rotation === 270 || profile.orientation === 'landscape-flipped' || profile.orientation === 'portrait-flipped') ? 180 : 0;
+  if (postRotation) img.rotate(postRotation);
 
   const rgba = img.bitmap.data;
   const w    = img.bitmap.width;
   const h2   = img.bitmap.height;
 
+  // ── 24-bit pass-through ──────────────────────────────────────────────────────
+  if (colorDepth === '24bit-rgb888') {
+    const buf = await img.getBuffer('image/png');
+    return { buffer: buf, contentType: 'image/png', width: w, height: h2 };
+  }
+
   // ── 16-bit RGB565 ────────────────────────────────────────────────────────────
   if (colorDepth === '16bit-rgb565') {
-    return { buffer: toRGB565(rgba), contentType: 'application/octet-stream' };
+    return { buffer: toRGB565(rgba), contentType: 'application/octet-stream', width: w, height: h2 };
   }
 
   // ── 4-bit grayscale ──────────────────────────────────────────────────────────
   if (colorDepth === '4bit-gray') {
-    return { buffer: to4BitGray(rgba), contentType: 'application/octet-stream' };
+    return { buffer: to4BitGray(rgba), contentType: 'application/octet-stream', width: w, height: h2 };
   }
 
   // ── Spectra 6 (6-Color E-Paper) ──────────────────────────────────────────────
   if (colorDepth === 'spectra6') {
-    return { buffer: packSpectra6(rgba, w, h2, dither), contentType: 'application/octet-stream' };
+    return { buffer: packSpectra6(rgba, w, h2, dither), contentType: 'application/octet-stream', width: w, height: h2 };
   }
 
   // ── Gray16 (16-Level Grayscale) ──────────────────────────────────────────────
   if (colorDepth === 'gray16') {
-    return { buffer: packGray16(rgba, w, h2, dither), contentType: 'application/octet-stream' };
+    return { buffer: packGray16(rgba, w, h2, dither), contentType: 'application/octet-stream', width: w, height: h2 };
   }
 
   // ── 1-bit ────────────────────────────────────────────────────────────────────
@@ -416,7 +420,7 @@ async function postprocess(pngBuffer, profile) {
   }
 
   if (outputFormat === 'bmp') {
-    return { buffer: packBMP1bit(packed, w, h2), contentType: 'image/bmp' };
+    return { buffer: packBMP1bit(packed, w, h2), contentType: 'image/bmp', width: w, height: h2 };
   }
 
   if (outputFormat === 'jpeg' || outputFormat === 'jpg') {
@@ -428,7 +432,7 @@ async function postprocess(pngBuffer, profile) {
       mono.setPixelColor(isWhite ? 0xFFFFFFFF : 0x000000FF, x, y);
     }
     const buf = await mono.getBuffer('image/jpeg');
-    return { buffer: buf, contentType: 'image/jpeg' };
+    return { buffer: buf, contentType: 'image/jpeg', width: w, height: h2 };
   }
 
   if (outputFormat === 'png') {
@@ -442,11 +446,11 @@ async function postprocess(pngBuffer, profile) {
       mono.setPixelColor(isWhite ? 0xFFFFFFFF : 0x000000FF, x, y);
     }
     const buf = await mono.getBuffer('image/png');
-    return { buffer: buf, contentType: 'image/png' };
+    return { buffer: buf, contentType: 'image/png', width: w, height: h2 };
   }
 
   // raw / x-epd-packed — packed bits with no header (natural SSD1677 feed)
-  return { buffer: Buffer.from(packed), contentType: 'application/octet-stream' };
+  return { buffer: Buffer.from(packed), contentType: 'application/octet-stream', width: w, height: h2 };
 }
 
 module.exports = { postprocess };

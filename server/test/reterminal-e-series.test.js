@@ -111,6 +111,40 @@ describe('Spectra 6 & Gray16 Postprocessing Pipeline', () => {
     const midNibble = (processed.buffer[0] >> 4) & 0x0F;
     assert.ok(midNibble >= 6 && midNibble <= 9, `Expected mid-gray nibble, got ${midNibble}`);
   });
+
+  test('portrait 90-degree postprocess preserves 480x800 dimensions and 60-byte stride (no skew/noise)', async () => {
+    // Create a 480x800 image with a white horizontal line at y=10
+    const img = new Jimp({ width: 480, height: 800, color: 0x000000FF });
+    for (let x = 0; x < 480; x++) {
+      img.setPixelColor(0xFFFFFFFF, x, 10);
+    }
+    const pngBuf = await img.getBuffer('image/png');
+
+    const profile = {
+      width: 480,
+      height: 800,
+      rotation: 90,
+      orientation: 'portrait',
+      colorDepth: '1bit',
+      dither: 'none',
+      outputFormat: 'x-epd-packed',
+    };
+    const processed = await postprocess(pngBuf, profile);
+    assert.equal(processed.width, 480);
+    assert.equal(processed.height, 800);
+    assert.equal(processed.buffer.length, 48000); // 480 * 800 / 8
+
+    // Row 10 in 1-bit packed format starts at 10 * (480 / 8) = 600 bytes
+    const row10Start = 10 * 60;
+    for (let b = 0; b < 60; b++) {
+      assert.equal(processed.buffer[row10Start + b], 0xFF, `Byte ${b} in row 10 should be 0xFF`);
+    }
+    // Row 11 should be black (0x00)
+    const row11Start = 11 * 60;
+    for (let b = 0; b < 60; b++) {
+      assert.equal(processed.buffer[row11Start + b], 0x00, `Byte ${b} in row 11 should be 0x00`);
+    }
+  });
 });
 
 describe('reTerminal E-Series Registration & Route Handling', () => {
@@ -332,6 +366,21 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
     assert.equal(res.headers.get('x-st-rotation'), '90');
     assert.equal(res.headers.get('x-st-screen-width'), '480');
     assert.equal(res.headers.get('x-st-screen-height'), '800');
+  });
+
+  test('GET /render produces matching dimensions and headers for all rotation angles', async () => {
+    for (const angle of [0, 90, 180, 270]) {
+      const res = await fetch(`${baseUrl}/render?device_id=dev-e1001&rotation=${angle}`, {
+        headers: { 'Authorization': 'Bearer tok-e1001' },
+      });
+      assert.equal(res.status, 200);
+      const expW = (angle === 90 || angle === 270) ? '480' : '800';
+      const expH = (angle === 90 || angle === 270) ? '800' : '480';
+      assert.equal(res.headers.get('x-st-screen-width'), expW);
+      assert.equal(res.headers.get('x-st-screen-height'), expH);
+      const buf = Buffer.from(await res.arrayBuffer());
+      assert.equal(buf.length, 48000);
+    }
   });
 
   test('teardown server', async () => {

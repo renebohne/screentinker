@@ -740,6 +740,18 @@ router.get('/pair/status', (req, res) => {
   });
 });
 
+function resolveOrientationRotation(req, device) {
+  let orientation = req.query.orientation || device.orientation;
+  const rotation = req.query.rotation !== undefined ? parseInt(req.query.rotation, 10) : (req.query.rotate !== undefined ? parseInt(req.query.rotate, 10) : undefined);
+  if (!orientation && rotation !== undefined) {
+    if (rotation === 90) orientation = 'portrait';
+    else if (rotation === 180) orientation = 'landscape-flipped';
+    else if (rotation === 270) orientation = 'portrait-flipped';
+    else if (rotation === 0) orientation = 'landscape';
+  }
+  return { orientation, rotation };
+}
+
 // ─── GET /api/embedded/info ─────────────────────────────────────────────────────
 
 router.get('/info', resolveAuth, (req, res) => {
@@ -747,8 +759,7 @@ router.get('/info', resolveAuth, (req, res) => {
   if (!device) return;
 
   touchDeviceHeartbeat(device, req);
-  const overrideOrientation = req.query.orientation || device.orientation;
-  const overrideRotation = req.query.rotation !== undefined ? parseInt(req.query.rotation, 10) : (req.query.rotate !== undefined ? parseInt(req.query.rotate, 10) : undefined);
+  const { orientation: overrideOrientation, rotation: overrideRotation } = resolveOrientationRotation(req, device);
   const profile = parseProfile(device.screen_profile, { orientation: overrideOrientation, rotation: overrideRotation });
   const power = evaluateDevicePower(device);
   // /info is metadata (MCU negotiation / debugging / monitors). It must NOT advance the panel's
@@ -797,8 +808,7 @@ router.get('/render', resolveAuth, async (req, res) => {
 
   touchDeviceHeartbeat(device, req);
 
-  const overrideOrientation = req.query.orientation || device.orientation;
-  const overrideRotation = req.query.rotation !== undefined ? parseInt(req.query.rotation, 10) : (req.query.rotate !== undefined ? parseInt(req.query.rotate, 10) : undefined);
+  const { orientation: overrideOrientation, rotation: overrideRotation } = resolveOrientationRotation(req, device);
   const profile = parseProfile(device.screen_profile, { orientation: overrideOrientation, rotation: overrideRotation });
   if (!profile) {
     return res.status(400).json({
@@ -856,8 +866,7 @@ router.get('/render-layout', resolveAuth, async (req, res) => {
 
   touchDeviceHeartbeat(device, req);
 
-  const overrideOrientation = req.query.orientation || device.orientation;
-  const overrideRotation = req.query.rotation !== undefined ? parseInt(req.query.rotation, 10) : (req.query.rotate !== undefined ? parseInt(req.query.rotate, 10) : undefined);
+  const { orientation: overrideOrientation, rotation: overrideRotation } = resolveOrientationRotation(req, device);
   const profile = parseProfile(device.screen_profile, { orientation: overrideOrientation, rotation: overrideRotation });
   if (!profile) {
     return res.status(400).json({
@@ -1039,7 +1048,14 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     try { cacheSet(key, processed.buffer); } catch { /* best-effort */ }
   }
 
-  res.set({ ...headers, 'Content-Type': processed.contentType });
+  const outWidth = processed.width || profile.width;
+  const outHeight = processed.height || profile.height;
+  res.set({
+    ...headers,
+    'X-ST-Screen-Width': String(outWidth),
+    'X-ST-Screen-Height': String(outHeight),
+    'Content-Type': processed.contentType,
+  });
   res.status(200).send(processed.buffer);
 }
 
@@ -1203,7 +1219,14 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     try { cacheSet(key, processed.buffer); } catch { /* best-effort */ }
   }
 
-  res.set({ ...headers, 'Content-Type': processed.contentType });
+  const outWidth = processed.width || profile.width;
+  const outHeight = processed.height || profile.height;
+  res.set({
+    ...headers,
+    'X-ST-Screen-Width': String(outWidth),
+    'X-ST-Screen-Height': String(outHeight),
+    'Content-Type': processed.contentType,
+  });
   res.status(200).send(processed.buffer);
 }
 
