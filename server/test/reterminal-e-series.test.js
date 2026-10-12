@@ -238,6 +238,16 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
       CREATE TABLE IF NOT EXISTS device_group_members (
         group_id TEXT, device_id TEXT, workspace_id TEXT, PRIMARY KEY(group_id, device_id)
       );
+      CREATE TABLE IF NOT EXISTS device_diagnostic_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        device_id TEXT,
+        log_json TEXT,
+        log_count INTEGER DEFAULT 0,
+        battery INTEGER,
+        wifi_rssi INTEGER,
+        version TEXT,
+        uploaded_at INTEGER
+      );
     `);
 
     require.cache[require.resolve('../db/database')] = {
@@ -438,6 +448,64 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
     latest = db.prepare('SELECT * FROM device_telemetry WHERE device_id = ? ORDER BY id DESC LIMIT 1').get('dev-e1001');
     assert.equal(latest.temperature_c, -5.2);
     assert.equal(latest.humidity, 0.0);
+  });
+
+  test('upload_logs command priority in getPendingCommand and X-ST-Command header delivery', async () => {
+    const commandQueue = require('../lib/command-queue');
+    commandQueue.queueCommand('dev-e1001', 'upload_logs', {});
+
+    const res = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('x-st-command'), 'upload_logs', 'Should pop and deliver upload_logs in X-ST-Command header');
+  });
+
+  test('POST /api/embedded/logs ingests diagnostic buffer and GET /logs retrieves it', async () => {
+    const res = await fetch(`${baseUrl}/logs?device_id=dev-e1001`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer tok-e1001',
+        'X-ST-Device-Battery': '85',
+        'X-ST-Device-RSSI': '-60',
+        'X-ST-Firmware-Version': '1.3.0',
+      },
+      body: JSON.stringify({
+        device_id: 'dev-e1001',
+        version: '1.3.0',
+        battery: 85,
+        rssi: -60,
+        log_count: 2,
+        logs: [
+          { uptime_ms: 1200, level: 'INFO', tag: 'Boot', msg: 'ScreenTinker MCU v1.3.0 booting' },
+          { uptime_ms: 2500, level: 'INFO', tag: 'WiFi', msg: 'Connected to AP' },
+        ],
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.status, 'ok');
+    assert.equal(body.count, 2);
+    assert.ok(body.id > 0);
+
+    const saved = db.prepare('SELECT * FROM device_diagnostic_logs WHERE device_id = ?').get('dev-e1001');
+    assert.ok(saved, 'Log row should be saved in database');
+    assert.equal(saved.log_count, 2);
+    assert.equal(saved.battery, 85);
+    assert.equal(saved.wifi_rssi, -60);
+    assert.equal(saved.version, '1.3.0');
+
+    // Test GET /logs
+    const getRes = await fetch(`${baseUrl}/logs?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(getRes.status, 200);
+    const getBody = await getRes.json();
+    assert.ok(Array.isArray(getBody.logs));
+    assert.equal(getBody.logs.length, 1);
+    assert.equal(getBody.logs[0].log_count, 2);
+    assert.equal(getBody.logs[0].battery, 85);
   });
 
   test('teardown server', async () => {

@@ -65,6 +65,8 @@ const ALLOWED_COMMANDS = Object.freeze([
    * ⚠️ DELIBERATELY NOT A MESH COMMAND. See MESH_COMMANDS below.
    */
   'http_request',
+  // Diagnostic log upload for embedded and fielded devices (#3 / mcu#9)
+  'upload_logs',
 ]);
 
 /*

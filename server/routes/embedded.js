@@ -57,6 +57,8 @@ function getPendingCommand(deviceId) {
   if (!deviceId) return null;
   const cmds = popPendingCommands(deviceId);
   if (!cmds || cmds.length === 0) return null;
+  const uploadLogs = cmds.find(c => c.type === 'upload_logs');
+  if (uploadLogs) return 'upload_logs';
   const reboot = cmds.find(c => c.type === 'reboot');
   if (reboot) return 'reboot';
   return cmds[0].type;
@@ -106,9 +108,9 @@ function resolveAuth(req, res, next) {
 function resolveDevice(req, res) {
   if (req.device) return req.device;
 
-  const deviceId = req.query.device_id;
+  const deviceId = req.query.device_id || req.headers['x-st-device-id'] || (req.body && req.body.device_id);
   if (!deviceId) {
-    res.status(400).json({ error: 'device_id query parameter required' });
+    res.status(400).json({ error: 'device_id parameter required' });
     return null;
   }
 
@@ -1247,6 +1249,122 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   });
   res.status(200).send(processed.buffer);
 }
+
+// ─── POST /api/embedded/logs ──────────────────────────────────────────────────
+/*
+ * Ingest buffered diagnostic logs uploaded from an embedded device (#3 / mcu#9).
+ * Accepts JSON object ({ logs: [...], log_count, battery, rssi, version }),
+ * JSON array of logs, or plain text log lines.
+ * Emits dashboard:embedded-logs to dashboard subscribers in the device's workspace room.
+ */
+router.post('/logs', resolveAuth, (req, res) => {
+  const device = resolveDevice(req, res);
+  if (!device) return;
+
+  touchDeviceHeartbeat(device, req);
+
+  let rawLogs = req.body;
+  let logCount = 0;
+  let battery = null;
+  let wifiRssi = null;
+  let version = null;
+
+  if (typeof rawLogs === 'string') {
+    try {
+      rawLogs = JSON.parse(rawLogs);
+    } catch (_) {
+      const lines = rawLogs.split('\n').filter(Boolean);
+      rawLogs = {
+        logs: lines.map(line => ({ msg: line, level: 'INFO' })),
+        log_count: lines.length
+      };
+    }
+  }
+
+  if (Array.isArray(rawLogs)) {
+    rawLogs = { logs: rawLogs, log_count: rawLogs.length };
+  }
+
+  if (rawLogs && typeof rawLogs === 'object') {
+    battery = (rawLogs.battery !== undefined && rawLogs.battery !== null) ? Number(rawLogs.battery) : null;
+    wifiRssi = (rawLogs.rssi !== undefined && rawLogs.rssi !== null) ? Number(rawLogs.rssi) : null;
+    version = (rawLogs.version !== undefined && rawLogs.version !== null) ? String(rawLogs.version) : null;
+    if (Array.isArray(rawLogs.logs)) {
+      logCount = rawLogs.logs.length;
+    } else if (Number.isInteger(rawLogs.log_count)) {
+      logCount = rawLogs.log_count;
+    }
+  }
+
+  if (battery === null && req.headers['x-st-device-battery']) {
+    battery = parseInt(req.headers['x-st-device-battery'], 10);
+  }
+  if (wifiRssi === null && req.headers['x-st-device-rssi']) {
+    wifiRssi = parseInt(req.headers['x-st-device-rssi'], 10);
+  }
+  if (!version && req.headers['x-st-firmware-version']) {
+    version = String(req.headers['x-st-firmware-version']);
+  }
+
+  const logJson = typeof rawLogs === 'object' ? JSON.stringify(rawLogs) : String(rawLogs || '');
+
+  const stmt = db.prepare(`
+    INSERT INTO device_diagnostic_logs (device_id, log_json, log_count, battery, wifi_rssi, version, uploaded_at)
+    VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now'))
+  `);
+  const info = stmt.run(device.id, logJson, logCount, battery, wifiRssi, version);
+  const logId = info.lastInsertRowid;
+
+  try {
+    db.prepare(`
+      DELETE FROM device_diagnostic_logs
+      WHERE device_id = ? AND id NOT IN (
+        SELECT id FROM device_diagnostic_logs
+        WHERE device_id = ?
+        ORDER BY uploaded_at DESC, id DESC
+        LIMIT 20
+      )
+    `).run(device.id, device.id);
+  } catch (_) {}
+
+  // Broadcast WebSocket event to dashboard room
+  try {
+    const io = req.app.get('io');
+    const dashboardNs = io ? io.of('/dashboard') : null;
+    if (dashboardNs) {
+      const { deviceRoom, emitToWorkspace } = require('../lib/socket-rooms');
+      emitToWorkspace(dashboardNs, deviceRoom(device.id), 'dashboard:embedded-logs', {
+        device_id: device.id,
+        id: logId,
+        log_count: logCount,
+        battery,
+        wifi_rssi: wifiRssi,
+        version,
+        logs: rawLogs.logs || rawLogs,
+        uploaded_at: Math.floor(Date.now() / 1000)
+      });
+    }
+  } catch (err) {
+    console.warn(`[embedded-logs] Failed to emit socket event: ${err.message}`);
+  }
+
+  res.status(200).json({ status: 'ok', id: logId, count: logCount });
+});
+
+// ─── GET /api/embedded/logs ───────────────────────────────────────────────────
+router.get('/logs', resolveAuth, (req, res) => {
+  const device = resolveDevice(req, res);
+  if (!device) return;
+
+  const logs = db.prepare(`
+    SELECT * FROM device_diagnostic_logs
+    WHERE device_id = ?
+    ORDER BY uploaded_at DESC, id DESC
+    LIMIT 20
+  `).all(device.id);
+
+  res.json({ logs });
+});
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 

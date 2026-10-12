@@ -269,6 +269,57 @@ function setDebugFrozen(frozen) {
   updateDebugTools();
 }
 
+let embeddedLogsHandler = null;
+
+function formatEmbeddedLogs(entry) {
+  if (!entry) return { meta: '', text: 'No diagnostic logs uploaded yet.' };
+
+  let raw = entry.log_json || entry;
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch (_) {}
+  }
+
+  const logs = Array.isArray(raw?.logs) ? raw.logs : (Array.isArray(raw) ? raw : null);
+  const count = entry.log_count ?? raw?.log_count ?? logs?.length ?? 0;
+  const bat = entry.battery ?? raw?.battery;
+  const rssi = entry.wifi_rssi ?? raw?.rssi;
+  const ver = entry.version ?? raw?.version;
+  const uploadedAt = entry.uploaded_at ? new Date(entry.uploaded_at * 1000).toLocaleString() : new Date().toLocaleString();
+
+  const metaParts = [`Last upload: ${uploadedAt}`];
+  if (ver) metaParts.push(`Version: ${ver}`);
+  if (bat != null && bat >= 0) metaParts.push(`Battery: ${bat}%`);
+  if (rssi != null && rssi !== 0) metaParts.push(`RSSI: ${rssi} dBm`);
+  metaParts.push(`Entries: ${count}`);
+
+  let text = '';
+  if (logs && logs.length > 0) {
+    text = logs.map(l => {
+      if (typeof l === 'string') return l;
+      const uptime = l.uptime_ms != null ? `[+${(l.uptime_ms / 1000).toFixed(2)}s]` : '';
+      const level = l.level ? `[${l.level}]` : '';
+      const tag = l.tag ? `[${l.tag}]` : '';
+      const msg = l.msg || l.message || JSON.stringify(l);
+      return [uptime, level, tag, msg].filter(Boolean).join(' ');
+    }).join('\n');
+  } else if (typeof raw === 'string') {
+    text = raw;
+  } else {
+    text = 'No entries recorded in buffer.';
+  }
+
+  return { meta: metaParts.join(' · '), text };
+}
+
+function renderEmbeddedLogsData(data) {
+  const metaEl = document.getElementById('embeddedLogsMeta');
+  const panelEl = document.getElementById('embeddedLogsPanel');
+  if (!metaEl || !panelEl) return;
+  const { meta, text } = formatEmbeddedLogs(data);
+  metaEl.textContent = meta;
+  panelEl.textContent = text;
+}
+
 /*
  * Clipboard with a fallback, because a self-hosted dashboard on plain http is NOT a secure context
  * and `navigator.clipboard` is simply absent there — the copy buttons elsewhere in this app quietly
@@ -670,6 +721,13 @@ export function render(container, deviceId) {
   on('screenshot-ready', screenshotHandler);
   on('playback-state', playbackHandler);
   on('device-log', logHandler);
+
+  embeddedLogsHandler = (data) => {
+    if (!currentDevice || data.device_id !== currentDevice.id) return;
+    renderEmbeddedLogsData(data);
+    showToast(`Diagnostic logs received (${data.log_count || 0} entries)`);
+  };
+  on('embedded-logs', embeddedLogsHandler);
 }
 
 async function loadDevice(deviceId, activeTab = null) {
@@ -1293,7 +1351,24 @@ async function loadDevice(deviceId, activeTab = null) {
           </div>
         </div>
 
-        ${!isEmbeddedDevice(device) ? `
+        ${isEmbeddedDevice(device) ? `
+        <div style="margin-top:20px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div>
+              <h4 style="font-size:13px;font-weight:600;margin:0">Diagnostic Logs</h4>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:2px">
+                In-memory circular ring buffer uploaded from device upon request or sync failure.
+              </div>
+            </div>
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-secondary btn-sm" id="requestDiagLogsBtn">Request Diagnostic Logs</button>
+              <button class="btn btn-secondary btn-sm" id="copyDiagLogsBtn">Copy</button>
+            </div>
+          </div>
+          <div id="embeddedLogsMeta" style="font-size:11px;color:var(--text-muted);margin-bottom:6px"></div>
+          <div id="embeddedLogsPanel" style="background:#0b0f1a;border:1px solid var(--border);border-radius:6px;padding:8px;height:220px;overflow-y:auto;font-family:monospace;font-size:11px;line-height:1.45;color:#cbd5e1;white-space:pre-wrap"></div>
+        </div>
+        ` : `
         <div style="margin-top:20px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
             <input type="checkbox" id="debugLogToggle"> ${t('device.debug.toggle')}
@@ -1311,7 +1386,7 @@ async function loadDevice(deviceId, activeTab = null) {
           </div>
           <div id="debugLogPanel" style="display:none;margin-top:8px;background:#0b0f1a;border:1px solid var(--border);border-radius:6px;padding:8px;height:220px;overflow-y:auto;font-family:monospace;font-size:11px;line-height:1.45;color:#cbd5e1"></div>
         </div>
-        ` : ''}
+        `}
 
 
         <!-- #109: PiP overlay tester. Pushes device:pip-show/clear via POST /api/pip
@@ -2574,6 +2649,35 @@ function setupActions(device) {
     showToast(ok ? t('device.debug.copied', { n: panel.childElementCount }) : t('device.debug.copy_failed'), ok ? 'success' : 'error');
   });
 
+  if (isEmbeddedDevice(device)) {
+    const initialLogs = device.diagnostic_logs && device.diagnostic_logs[0];
+    if (initialLogs) {
+      renderEmbeddedLogsData(initialLogs);
+    } else {
+      const panelEl = document.getElementById('embeddedLogsPanel');
+      if (panelEl) panelEl.textContent = 'No diagnostic logs uploaded yet. Click "Request Diagnostic Logs" to queue a fetch for the device\'s next poll.';
+    }
+
+    document.getElementById('requestDiagLogsBtn')?.addEventListener('click', () => {
+      sendCommand(device.id, 'upload_logs', {}, (ack) => {
+        if (ack && ack.delivered === false && ack.reason && ack.reason !== 'offline') {
+          showToast(`Failed: ${ack.reason}`, 'error');
+        } else {
+          showToast('Diagnostic log upload requested. Will be delivered on next device poll.');
+        }
+      });
+    });
+
+    document.getElementById('copyDiagLogsBtn')?.addEventListener('click', async () => {
+      const panelEl = document.getElementById('embeddedLogsPanel');
+      const text = panelEl ? panelEl.textContent : '';
+      if (!text) { showToast('No logs to copy', 'error'); return; }
+      const header = `${device.name || device.id} — Diagnostic Logs — ${new Date().toISOString()}`.trim();
+      const ok = await copyToClipboard(`${header}\n${'-'.repeat(header.length)}\n${text}\n`);
+      showToast(ok ? 'Diagnostic logs copied to clipboard' : 'Failed to copy to clipboard', ok ? 'success' : 'error');
+    });
+  }
+
   wireLocationSearch();
   document.getElementById('saveSettingsTopBtn')?.addEventListener('click', () => {
     document.getElementById('saveNotesBtn')?.click();
@@ -3747,6 +3851,8 @@ export function cleanup() {
   if (screenshotHandler) off('screenshot-ready', screenshotHandler);
   if (playbackHandler) off('playback-state', playbackHandler);
   if (logHandler) off('device-log', logHandler);
+  if (embeddedLogsHandler) off('embedded-logs', embeddedLogsHandler);
+  embeddedLogsHandler = null;
   if (shellHandler) off('shell-result', shellHandler);   // #161 owner-tools listener
   teardownPty(true);   // leaving the page ends the interactive terminal on the device too
   if (screenshotInterval) clearInterval(screenshotInterval);

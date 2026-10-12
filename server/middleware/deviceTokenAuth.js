@@ -32,9 +32,9 @@ function deviceTokenAuth(req, res, next) {
     return res.status(401).json({ error: 'Authorization: Bearer <device_token> required' });
   }
 
-  const deviceId = req.query.device_id;
+  const deviceId = req.query.device_id || req.headers['x-st-device-id'] || (req.body && req.body.device_id);
   if (!deviceId) {
-    return res.status(400).json({ error: 'device_id query parameter required' });
+    return res.status(400).json({ error: 'device_id parameter required' });
   }
 
   const device = db.prepare('SELECT * FROM devices WHERE id = ?').get(deviceId);

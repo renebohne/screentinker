@@ -467,12 +467,16 @@ router.get('/:id', (req, res) => {
   // or ~440 existing displays lose their controls the moment this ships.
   const capabilities = playerCapabilities.capabilitiesFor(device);
 
+  const diagnostic_logs = (device.client_type === 'embedded' || String(device.platform || '').toLowerCase().includes('embedded'))
+    ? db.prepare('SELECT * FROM device_diagnostic_logs WHERE device_id = ? ORDER BY uploaded_at DESC, id DESC LIMIT 10').all(req.params.id)
+    : [];
+
   // Parsed on READ, not on receipt. The raw block stays the stored truth, so adding a field later
   // is a server deploy rather than re-collecting from every panel in the field. Null for a device
   // that never reported one, or whose block is unreadable — the card simply does not render.
   const edid = require('../lib/edid').parseEdid(device.hardware_edid);
 
-  res.json({ ...stripDeviceSecrets(device), tags: parseTags(device.tags), group_ids: groupIdsByDevice([device.id])[device.id] || [], local_weather: require('../lib/local-conditions').readingFor(device), capabilities, edid, telemetry, screenshot, assignments, active_layout_zones, playlist_status, playlist_has_published, uptimeData, statusLog, deviceEvents });
+  res.json({ ...stripDeviceSecrets(device), tags: parseTags(device.tags), group_ids: groupIdsByDevice([device.id])[device.id] || [], local_weather: require('../lib/local-conditions').readingFor(device), capabilities, edid, telemetry, diagnostic_logs, screenshot, assignments, active_layout_zones, playlist_status, playlist_has_published, uptimeData, statusLog, deviceEvents });
 });
 
 /*
@@ -546,6 +550,25 @@ router.get('/:id/preview-payload', (req, res) => {
     if (payload.local_api) payload.local_api = { ...payload.local_api, secret: null };
   }
   res.json(payload);
+});
+
+// Diagnostic logs for embedded / fielded devices (#3 / mcu#9)
+router.get('/:id/diagnostic-logs', (req, res) => {
+  const device = db.prepare('SELECT id, workspace_id FROM devices WHERE id = ?').get(req.params.id);
+  if (!device) return res.status(404).json({ error: 'Device not found' });
+  if (!device.workspace_id) return res.status(403).json({ error: 'Device not assigned to a workspace' });
+  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(device.workspace_id);
+  const ctx = ws && resourceAccess(req, ws);
+  if (!ctx) return res.status(403).json({ error: 'Access denied' });
+
+  const logs = db.prepare(`
+    SELECT * FROM device_diagnostic_logs
+    WHERE device_id = ?
+    ORDER BY uploaded_at DESC, id DESC
+    LIMIT 20
+  `).all(req.params.id);
+
+  res.json({ logs });
 });
 
 // Update device

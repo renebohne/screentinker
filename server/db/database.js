@@ -3759,6 +3759,24 @@ migrationStep('device telemetry humidity', () => {
   try { db.prepare('ALTER TABLE device_telemetry ADD COLUMN humidity REAL').run(); } catch (_) { /* present */ }
 });
 
+migrationStep('device diagnostic logs', () => {
+  // #3 / mcu#9: Diagnostic log buffers uploaded by embedded/fielded devices
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS device_diagnostic_logs (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id       TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+      log_json        TEXT NOT NULL,
+      log_count       INTEGER NOT NULL DEFAULT 0,
+      battery         INTEGER,
+      wifi_rssi       INTEGER,
+      version         TEXT,
+      uploaded_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_device_diagnostic_logs_dev
+      ON device_diagnostic_logs(device_id, uploaded_at DESC);
+  `);
+});
+
 migrationStep('CAP feeds', () => {
   // CAP emergency feeds (lib/cap/feeds.js). Workspace-owned and FK-cascaded, so deleting a
   // workspace takes its feeds, scopes and seen alerts with it.

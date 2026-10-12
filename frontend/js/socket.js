@@ -77,6 +77,11 @@ export function connectSocket() {
     emit('device-log', data);
   });
 
+  // Diagnostic log upload for embedded/fielded devices (#3 / mcu#9)
+  dashboardSocket.on('dashboard:embedded-logs', (data) => {
+    emit('embedded-logs', data);
+  });
+
   // Playback progress (play_start with duration — drives device-card progress bars)
   dashboardSocket.on('dashboard:playback-progress', (data) => {
     emit('playback-progress', data);
