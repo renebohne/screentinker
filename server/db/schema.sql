@@ -94,6 +94,9 @@ CREATE TABLE IF NOT EXISTS device_telemetry (
     wifi_ssid       TEXT,
     wifi_rssi       INTEGER,
     uptime_seconds  INTEGER,
+    power_source    TEXT,
+    temperature_c   REAL,
+    humidity        REAL,
     reported_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 

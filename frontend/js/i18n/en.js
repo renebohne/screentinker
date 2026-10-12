@@ -2398,6 +2398,7 @@ export default {
   'device.info.os_version': 'OS Version',
   'device.info.serial': 'Serial',
   'device.info.temperature': 'Temperature',
+  'device.info.humidity': 'Humidity',
   'device.info.edid': 'Display EDID',
   'device.info.edid_preferred': 'Preferred mode',
   'device.info.edid_made': 'Manufactured',

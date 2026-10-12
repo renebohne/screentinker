@@ -1035,6 +1035,11 @@ async function loadDevice(deviceId, activeTab = null) {
             <div class="info-card-label">${t('device.info.temperature')}</div>
             <div class="info-card-value small" id="telTemp">${latestTelemetry.temperature_c}&deg;C</div>
           </div>` : ''}
+          ${latestTelemetry.humidity != null ? `
+          <div class="info-card">
+            <div class="info-card-label">${t('device.info.humidity')}</div>
+            <div class="info-card-value small" id="telHumidity">${latestTelemetry.humidity}% RH</div>
+          </div>` : ''}
           ${latestTelemetry.attached_display ? `
           <div class="info-card">
             <div class="info-card-label">${t('device.info.attached_display')}</div>
@@ -3671,6 +3676,8 @@ function updateTelemetryDisplay(telemetry) {
   if (telemetry.uptime_seconds) update('telUptime', formatUptime(telemetry.uptime_seconds));
   if (telemetry.ram_free_mb) update('telRam', t('device.info.size_free', { size: formatBytes(telemetry.ram_free_mb) }));
   if (telemetry.cpu_usage != null) update('telCpu', telemetry.cpu_usage.toFixed(1) + '%');
+  if (telemetry.temperature_c != null) update('telTemp', telemetry.temperature_c + '°C');
+  if (telemetry.humidity != null) update('telHumidity', telemetry.humidity + '% RH');
 }
 
 // ----- diag-smoothness widget: show the frame stats it reports from the panel -----

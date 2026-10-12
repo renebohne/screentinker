@@ -179,6 +179,7 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         device_id TEXT, battery_level INTEGER, battery_charging INTEGER,
         wifi_rssi INTEGER, local_ip TEXT, power_source TEXT,
+        temperature_c REAL, humidity REAL,
         reported_at INTEGER
       );
       CREATE TABLE playlists (
@@ -381,6 +382,62 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
       const buf = Buffer.from(await res.arrayBuffer());
       assert.equal(buf.length, 48000);
     }
+  });
+
+  test('embedded request ingests SHT40 temperature and humidity telemetry headers', async () => {
+    const res = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: {
+        'Authorization': 'Bearer tok-e1001',
+        'X-ST-Device-Temperature': '22.4',
+        'X-ST-Device-Humidity': '48.6',
+      },
+    });
+    assert.equal(res.status, 200);
+
+    const latest = db.prepare('SELECT * FROM device_telemetry WHERE device_id = ? ORDER BY id DESC LIMIT 1').get('dev-e1001');
+    assert.ok(latest, 'telemetry row should be inserted');
+    assert.equal(latest.temperature_c, 22.4);
+    assert.equal(latest.humidity, 48.6);
+  });
+
+  test('embedded telemetry rejects invalid or out-of-range sensor readings', async () => {
+    // 1. Extreme temperature (> 85 C) and humidity (> 100%)
+    await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: {
+        'Authorization': 'Bearer tok-e1001',
+        'X-ST-Device-Battery': '80',
+        'X-ST-Device-Temperature': '125.0',
+        'X-ST-Device-Humidity': '115.0',
+      },
+    });
+    let latest = db.prepare('SELECT * FROM device_telemetry WHERE device_id = ? ORDER BY id DESC LIMIT 1').get('dev-e1001');
+    assert.equal(latest.temperature_c, null, '125C must be rejected');
+    assert.equal(latest.humidity, null, '115% RH must be rejected');
+
+    // 2. Below minimum temperature (< -40 C) and negative humidity
+    await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: {
+        'Authorization': 'Bearer tok-e1001',
+        'X-ST-Device-Battery': '80',
+        'X-ST-Device-Temperature': '-55.0',
+        'X-ST-Device-Humidity': '-5.0',
+      },
+    });
+    latest = db.prepare('SELECT * FROM device_telemetry WHERE device_id = ? ORDER BY id DESC LIMIT 1').get('dev-e1001');
+    assert.equal(latest.temperature_c, null, '-55C must be rejected');
+    assert.equal(latest.humidity, null, '-5% RH must be rejected');
+
+    // 3. Valid negative temperature (-5.2 C) and 0% / 100% boundary humidity
+    await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: {
+        'Authorization': 'Bearer tok-e1001',
+        'X-ST-Device-Temperature': '-5.2',
+        'X-ST-Device-Humidity': '0.0',
+      },
+    });
+    latest = db.prepare('SELECT * FROM device_telemetry WHERE device_id = ? ORDER BY id DESC LIMIT 1').get('dev-e1001');
+    assert.equal(latest.temperature_c, -5.2);
+    assert.equal(latest.humidity, 0.0);
   });
 
   test('teardown server', async () => {

@@ -38,6 +38,7 @@ test('the schema carries hardware identity and a temperature column', () => {
   }
   const tel = db.prepare('PRAGMA table_info(device_telemetry)').all().map((c) => c.name);
   assert.ok(tel.includes('temperature_c'), 'device_telemetry.temperature_c missing');
+  assert.ok(tel.includes('humidity'), 'device_telemetry.humidity missing');
 });
 
 test('top-level bs_* fields are persisted — that is how the player reports them today', () => {

@@ -311,6 +311,11 @@ function renderDeviceCard(device) {
             </svg>
             ${formatBytes(device.storage_free_mb)} free
           </div>` : ''}
+          ${(device.temperature_c != null || device.humidity != null) ? `
+          <div class="meta-item" data-card-field="sensors" title="${device.temperature_c != null ? device.temperature_c + '°C' : ''}${device.temperature_c != null && device.humidity != null ? ' · ' : ''}${device.humidity != null ? device.humidity + '% RH' : ''}">
+            <span style="font-size:11px;margin-right:2px">🌡️</span>
+            ${device.temperature_c != null ? `${device.temperature_c}°C` : ''}${device.temperature_c != null && device.humidity != null ? ' · ' : ''}${device.humidity != null ? `${device.humidity}%` : ''}
+          </div>` : ''}
         </div>
       </div>
     </div>

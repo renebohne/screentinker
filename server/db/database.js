@@ -3754,6 +3754,11 @@ migrationStep('device power source', () => {
   try { db.prepare('ALTER TABLE device_telemetry ADD COLUMN power_source TEXT').run(); } catch (_) { /* present */ }
 });
 
+migrationStep('device telemetry humidity', () => {
+  // Sensirion SHT40 relative humidity percentage (0-100%).
+  try { db.prepare('ALTER TABLE device_telemetry ADD COLUMN humidity REAL').run(); } catch (_) { /* present */ }
+});
+
 migrationStep('CAP feeds', () => {
   // CAP emergency feeds (lib/cap/feeds.js). Workspace-owned and FK-cascaded, so deleting a
   // workspace takes its feeds, scopes and seen alerts with it.

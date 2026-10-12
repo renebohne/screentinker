@@ -143,6 +143,8 @@ function touchDeviceHeartbeat(device, req) {
   const fwHeader          = req.headers['x-st-firmware-version'] || req.headers['x-st-app-version'] || req.headers['x-st-version'];
   const powerSourceHeader = req.headers['x-st-power-source'];
   const chargingHeader    = req.headers['x-st-charging'] || req.headers['x-st-battery-charging'];
+  const tempHeader        = req.headers['x-st-device-temperature'] || req.headers['x-st-temperature'];
+  const humidityHeader    = req.headers['x-st-device-humidity']    || req.headers['x-st-humidity'];
 
   let batteryLevel = null;
   if (batteryHeader !== undefined) {
@@ -174,6 +176,22 @@ function touchDeviceHeartbeat(device, req) {
     batteryCharging = (chargingHeader === '1' || chargingHeader === 'true') ? 1 : 0;
   }
 
+  let temperatureC = null;
+  if (tempHeader !== undefined) {
+    const parsed = parseFloat(tempHeader);
+    if (Number.isFinite(parsed) && parsed >= -40 && parsed <= 85) {
+      temperatureC = Math.round(parsed * 10) / 10;
+    }
+  }
+
+  let humidity = null;
+  if (humidityHeader !== undefined) {
+    const parsed = parseFloat(humidityHeader);
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 100) {
+      humidity = Math.round(parsed * 10) / 10;
+    }
+  }
+
   if (powerSource) {
     device.power_source = powerSource;
   }
@@ -194,11 +212,11 @@ function touchDeviceHeartbeat(device, req) {
     // ⚠️ local_ip stays NULL: it means the screen's LAN address (the dashboard prints it as "Local
     // IP"), and all we have here is the address the request came from — the public NAT/proxy one,
     // already kept in devices.ip_address.
-    if (batteryLevel !== null || wifiRssi !== null || powerSource !== null) {
+    if (batteryLevel !== null || wifiRssi !== null || powerSource !== null || temperatureC !== null || humidity !== null) {
       db.prepare(`
-        INSERT INTO device_telemetry (device_id, battery_level, battery_charging, wifi_rssi, local_ip, power_source, reported_at)
-        VALUES (?, ?, ?, ?, NULL, ?, strftime('%s','now'))
-      `).run(device.id, batteryLevel, batteryCharging, wifiRssi, powerSource);
+        INSERT INTO device_telemetry (device_id, battery_level, battery_charging, wifi_rssi, local_ip, power_source, temperature_c, humidity, reported_at)
+        VALUES (?, ?, ?, ?, NULL, ?, ?, ?, strftime('%s','now'))
+      `).run(device.id, batteryLevel, batteryCharging, wifiRssi, powerSource, temperatureC, humidity);
 
       if (typeof pruneTelemetry === 'function') {
         pruneTelemetry(device.id);
