@@ -34,6 +34,9 @@
 const express = require('express');
 const router  = express.Router();
 const crypto  = require('crypto');
+const fs      = require('fs');
+const path    = require('path');
+const config  = require('../config');
 
 const { db, pruneTelemetry }  = require('../db/database');
 const { deviceTokenAuth }   = require('../middleware/deviceTokenAuth');
@@ -53,12 +56,22 @@ const PowerWindow           = require('../lib/power-window');
 const { powerScheduleForDevice } = require('../lib/device-power-schedule');
 const { popPendingCommands }     = require('../lib/command-queue');
 
-function getPendingCommand(deviceId) {
+function getPendingCommand(deviceId, device) {
   if (!deviceId) return null;
   const cmds = popPendingCommands(deviceId);
   if (!cmds || cmds.length === 0) return null;
   const uploadLogs = cmds.find(c => c.type === 'upload_logs');
   if (uploadLogs) return 'upload_logs';
+  const update = cmds.find(c => c.type === 'update');
+  if (update) {
+    let url = (update.payload && (update.payload.url || update.payload.binary_url)) || update.url || '';
+    const sha = (update.payload && update.payload.sha256) || update.sha256 || '';
+    if (!url) {
+      const preset = (device && device.screen_profile) || 'seeed_reterminal_sticky';
+      url = `/api/embedded/firmware/${preset}/latest.bin`;
+    }
+    return sha ? `update ${url} ${sha}` : `update ${url}`;
+  }
   const reboot = cmds.find(c => c.type === 'reboot');
   if (reboot) return 'reboot';
   return cmds[0].type;
@@ -863,7 +876,7 @@ router.get('/render', resolveAuth, async (req, res) => {
   }
 
   const isPreview = req.query.preview === '1';
-  const pendingCmd = !isPreview ? getPendingCommand(device.id) : null;
+  const pendingCmd = !isPreview ? getPendingCommand(device.id, device) : null;
   const renderOpts = { pendingCmd };
 
   // Query mode overrides
@@ -920,7 +933,7 @@ router.get('/render-layout', resolveAuth, async (req, res) => {
   }
 
   const isPreview = req.query.preview === '1';
-  const pendingCmd = !isPreview ? getPendingCommand(device.id) : null;
+  const pendingCmd = !isPreview ? getPendingCommand(device.id, device) : null;
   return handleRenderLayout(req, res, device, profile, { pendingCmd, explicitMode: true });
 });
 
@@ -1377,6 +1390,103 @@ router.get('/logs', resolveAuth, (req, res) => {
   res.json({ logs });
 });
 
+// ─── Firmware Distribution & OTA Management ───────────────────────────────────
+
+function getFirmwareInfo(preset) {
+  const safePreset = String(preset || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!safePreset) return null;
+
+  const candidates = [];
+  if (config.embeddedFirmwareDir) {
+    candidates.push(path.join(config.embeddedFirmwareDir, safePreset));
+    candidates.push(config.embeddedFirmwareDir);
+  }
+  candidates.push(path.join(__dirname, '../data/firmware', safePreset));
+  candidates.push(path.join(__dirname, '../data/firmware'));
+  candidates.push(path.join(__dirname, '../firmware', safePreset));
+  candidates.push(path.join(__dirname, '../firmware'));
+
+  for (const base of candidates) {
+    const binPaths = [
+      path.join(base, 'firmware.bin'),
+      path.join(base, 'latest.bin'),
+      path.join(base, `${safePreset}.bin`),
+      path.join(base, `${safePreset}-firmware.bin`),
+    ];
+
+    for (const binPath of binPaths) {
+      if (fs.existsSync(binPath)) {
+        try {
+          const stat = fs.statSync(binPath);
+          const buf = fs.readFileSync(binPath);
+          const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+
+          let version = '1.3.0';
+          const vJsonPath = path.join(path.dirname(binPath), 'version.json');
+          const vTxtPath = path.join(path.dirname(binPath), 'version.txt');
+          if (fs.existsSync(vJsonPath)) {
+            try {
+              const parsed = JSON.parse(fs.readFileSync(vJsonPath, 'utf8'));
+              if (parsed.version) version = String(parsed.version);
+            } catch (_) {}
+          } else if (fs.existsSync(vTxtPath)) {
+            try {
+              const vStr = fs.readFileSync(vTxtPath, 'utf8').trim();
+              if (vStr) version = vStr;
+            } catch (_) {}
+          }
+
+          return {
+            preset: safePreset,
+            version,
+            size: stat.size,
+            sha256,
+            filePath: binPath,
+            download_url: `/api/embedded/firmware/${safePreset}/latest.bin`
+          };
+        } catch (_) {}
+      }
+    }
+  }
+
+  return null;
+}
+
+// GET /api/embedded/firmware/:preset/version
+router.get('/firmware/:preset/version', (req, res) => {
+  const preset = req.params.preset;
+  const fw = getFirmwareInfo(preset);
+  if (!fw) {
+    return res.status(404).json({ error: `No firmware found for preset '${preset}'` });
+  }
+
+  res.json({
+    preset: fw.preset,
+    version: fw.version,
+    size: fw.size,
+    sha256: fw.sha256,
+    download_url: fw.download_url
+  });
+});
+
+// GET /api/embedded/firmware/:preset/latest.bin
+router.get('/firmware/:preset/latest.bin', (req, res) => {
+  const preset = req.params.preset;
+  const fw = getFirmwareInfo(preset);
+  if (!fw) {
+    return res.status(404).json({ error: `No firmware found for preset '${preset}'` });
+  }
+
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Length', fw.size);
+  res.setHeader('Content-Disposition', `attachment; filename="${fw.preset}-firmware.bin"`);
+  res.setHeader('X-ST-Firmware-Version', fw.version);
+  res.setHeader('X-ST-Firmware-SHA256', fw.sha256);
+
+  const stream = fs.createReadStream(fw.filePath);
+  stream.pipe(res);
+});
+
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
 function detectContentType(profile) {
@@ -1401,5 +1511,7 @@ module.exports.resolvedLayoutId = resolvedLayoutId;
 module.exports.resolveDeviceContext = resolveDeviceContext;
 module.exports.touchDeviceHeartbeat = touchDeviceHeartbeat;
 module.exports.dynamicRevFor = dynamicRevFor;
+module.exports.getPendingCommand = getPendingCommand;
+module.exports.getFirmwareInfo = getFirmwareInfo;
 
 

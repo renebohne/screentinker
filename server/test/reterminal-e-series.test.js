@@ -508,11 +508,84 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
     assert.equal(getBody.logs[0].battery, 85);
   });
 
+  test('firmware distribution routes GET /version and GET /latest.bin', async () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const crypto = require('node:crypto');
+
+    const fwDir = path.join(__dirname, '../data/firmware/seeed_reterminal_sticky');
+    fs.mkdirSync(fwDir, { recursive: true });
+
+    const dummyFw = Buffer.alloc(1024, 0xAA);
+    const expectedSha = crypto.createHash('sha256').update(dummyFw).digest('hex');
+    fs.writeFileSync(path.join(fwDir, 'firmware.bin'), dummyFw);
+    fs.writeFileSync(path.join(fwDir, 'version.json'), JSON.stringify({ version: '1.3.0' }));
+
+    // 1. GET /firmware/:preset/version
+    const vRes = await fetch(`${baseUrl}/firmware/seeed_reterminal_sticky/version`);
+    assert.equal(vRes.status, 200);
+    const vBody = await vRes.json();
+    assert.equal(vBody.preset, 'seeed_reterminal_sticky');
+    assert.equal(vBody.version, '1.3.0');
+    assert.equal(vBody.size, 1024);
+    assert.equal(vBody.sha256, expectedSha);
+    assert.equal(vBody.download_url, '/api/embedded/firmware/seeed_reterminal_sticky/latest.bin');
+
+    // 2. GET /firmware/:preset/latest.bin
+    const binRes = await fetch(`${baseUrl}/firmware/seeed_reterminal_sticky/latest.bin`);
+    assert.equal(binRes.status, 200);
+    assert.equal(binRes.headers.get('content-type'), 'application/octet-stream');
+    assert.equal(binRes.headers.get('content-length'), '1024');
+    assert.equal(binRes.headers.get('x-st-firmware-version'), '1.3.0');
+    assert.equal(binRes.headers.get('x-st-firmware-sha256'), expectedSha);
+    const binBuf = Buffer.from(await binRes.arrayBuffer());
+    assert.equal(binBuf.length, 1024);
+    assert.equal(binBuf[0], 0xAA);
+
+    // 3. Nonexistent preset returns 404
+    const errRes = await fetch(`${baseUrl}/firmware/nonexistent_board_xyz/version`);
+    assert.equal(errRes.status, 404);
+
+    // Clean up
+    fs.rmSync(path.join(__dirname, '../data/firmware'), { recursive: true, force: true });
+  });
+
+  test('update command delivery via X-ST-Command header', async () => {
+    const commandQueue = require('../lib/command-queue');
+
+    // 1. Custom URL and SHA-256
+    commandQueue.queueCommand('dev-e1001', 'update', {
+      url: 'http://custom.example.com/fw.bin',
+      sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    });
+
+    let res = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(
+      res.headers.get('x-st-command'),
+      'update http://custom.example.com/fw.bin 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+    );
+
+    // 2. Default preset URL when no URL specified in payload
+    commandQueue.queueCommand('dev-e1001', 'update', {});
+    res = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(
+      res.headers.get('x-st-command'),
+      'update /api/embedded/firmware/seeed-reterminal-e1001/latest.bin'
+    );
+  });
+
   test('teardown server', async () => {
     const fs = require('node:fs');
     const path = require('node:path');
     const { contentDir } = require('../config');
     try { fs.unlinkSync(path.join(contentDir, 'test-e1001.png')); } catch (_) {}
+    try { fs.rmSync(path.join(__dirname, '../data/firmware'), { recursive: true, force: true }); } catch (_) {}
     if (server) await new Promise((resolve) => server.close(resolve));
   });
 });

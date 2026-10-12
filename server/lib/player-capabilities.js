@@ -575,11 +575,13 @@ function capabilitiesFor(device) {
       return [
         'playback.image',
         'system.reboot',
+        'system.self_update',
         'offline.cache',
       ];
     }
     return [
       'playback.image',
+      'system.self_update',
       'offline.cache',
     ];
   }
