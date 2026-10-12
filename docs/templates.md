@@ -15,6 +15,7 @@ This page is for server administrators. Template authors: see the catalog reposi
 - [Revocation](#revocation)
 - [Air-gapped servers](#air-gapped-servers)
 - [Other catalogs](#other-catalogs)
+- [Data in code templates (`ST.data`)](#data-in-code-templates-stdata)
 - [Settings and environment variables](#settings-and-environment-variables)
 - [Security model, and its limits](#security-model-and-its-limits)
 
@@ -157,6 +158,119 @@ but not removed.
 escapes are accepted). Use it for a private fork of the official catalog, or if the official key is
 ever rotated before you can upgrade. When the key changes, the server drops its cached index and
 resets the serial floor, because the old index was verified under the old key.
+
+## Data in code templates (`ST.data`)
+
+A code template reads each bound data source as `ST.data[param]`: the same flat values a slide
+binds with `{{ds:slug.key}}`, copied into the page when it is rendered. The copy is bounded, because
+all of it travels inside the one HTML document every screen downloads and keeps in memory (and a
+document over 6 MB is replaced by a "too large to render" page):
+
+| Limit | Value |
+| --- | --- |
+| Keys per data source | **3000** (was 300) |
+| Characters per string value | 2000 (longer values are cut) |
+| Bytes per data source, as served | 1 MB |
+| Bytes for all data sources of one template, as served | 2 MB |
+| Key names | at most 64 characters; only string, number, boolean and null values |
+
+**Summary keys are kept first.** When a source has more than fits, per-row keys are what is dropped
+— `row<N>_*` (tables), `item<N>_*` (RSS), `day<N>_*` (weather), `event_<N>_*` (calendars), from the
+last row backwards and never with a hole in the middle. Everything else — `row_count`,
+`column_count`, `columns`, `rows_text`, `sum_/avg_/min_/max_*`, lookup keys, `status`,
+`current_*` / `next_*`, `agenda_text` — is taken before any row. (A table source has its own limits
+before this: 100 rows, 30 columns, 500 characters a cell.)
+
+### Calendar (iCal) keys
+
+| Key | Example | |
+| --- | --- | --- |
+| `status`, `status_detail`, `is_busy` | `BUSY`, `Busy until 10:00 AM`, `true` | room sign, in the source's language |
+| `current_title`, `current_time`, `current_location`, … | `Sprint planning`, `09:00 AM – 10:00 AM` | the meeting in progress |
+| `next_title`, `next_time`, `next_date`, … | `Today, 02:00 PM` | the next one |
+| `event_count`, `events_today_count`, `agenda_text` | | |
+| `event_<N>_title`, `_date`, `_time`, `_location`, `_organizer` | `Tomorrow, 06:00 AM`, `09:00 AM – 10:00 AM` | display text, 0-based |
+| `event_<N>_start_iso`, `event_<N>_end_iso` | `2026-09-04T09:00:00.000Z` | **new** — UTC ISO 8601 |
+| `event_<N>_all_day` | `"true"` / `"false"` | **new** — a string |
+| `current_start_iso`, `current_end_iso`, `current_all_day`, `next_start_iso`, `next_end_iso`, `next_all_day` | | **new** — empty strings when there is no such event |
+
+The `_date`/`_time` strings are display text in the source's language and time zone; they are
+unchanged. The `_iso` keys are for templates that format times themselves:
+`new Date(ST.data.cal.event_0_start_iso)`. For an **all-day** event they are midnight UTC of its
+calendar dates, end **exclusive** as in iCal (a one-day event on 1 May is
+`2026-05-01T00:00:00.000Z` → `2026-05-02T00:00:00.000Z`): use the date part (`.slice(0, 10)`)
+rather than converting it to local time, which would move it a day west of UTC.
+
+A calendar source lists **10 events** by default; `max_events` (set through the API,
+`PUT /api/data-sources/<id>`) raises that to at most **200** (was 50). Each event is nine keys, so
+200 events fit comfortably in the 3000-key limit.
+
+## Translating a template
+
+A template can be translated into the dashboard's languages — German (`de`), Spanish (`es`),
+French (`fr`), Hindi (`hi`), Italian (`it`), Japanese (`ja`), Dutch (`nl`), Portuguese (`pt`) and
+Simplified Chinese (`zh`). English stays in `manifest.json`: it is the source text and the fallback
+for anything not translated.
+
+### What the operator sees: `locales/<lang>.json`
+
+One optional file per language, next to `manifest.json`. Every key is optional:
+
+```json
+{
+  "name": "Raumschild",
+  "description": "Zeigt, wer im Raum ist und was als Nächstes kommt.",
+  "params": {
+    "headline": { "label": "Überschrift", "help": "Eine Zeile.", "default": "Willkommen" },
+    "layout":   { "label": "Anordnung", "options": { "left": "Links", "right": "Rechts" } }
+  }
+}
+```
+
+- `name` ≤ 80, `description` ≤ 500; per param `label` ≤ 80, `help` ≤ 200, `options` maps an option
+  **value** (as in the manifest) to its translated label (≤ 80), and `default` (≤ that param's
+  `max`) is allowed **only on `text`/`textarea` params**.
+- Plain text, the same rules as the English: no HTML meaning, no control or bidi characters (a
+  `textarea` default may have line breaks and tabs, as an operator's value may).
+- **Every key must exist.** A param name or option value the manifest does not have, an unknown
+  key, a language outside the list above, or any other file under `locales/` is an error — the
+  package does not build (`scripts/template-catalog.js build`) and does not install.
+- **The dashboard** shows the name, description, labels, help and option labels in the user's
+  dashboard language when they are translated, English otherwise. When someone **creates** a widget
+  from the template, its text fields start from the translated default; values already saved are
+  never changed, and a `locale` param is left on "the screen's language" rather than set from the
+  dashboard's.
+- ⚠️ **Never put translations in `manifest.json`.** Servers refuse unknown manifest keys, so that
+  would break the template on every older server. An older server accepts the `locales/` files as
+  ordinary package files and ignores them — it just shows English. So a template must work without
+  them: nothing on screen may read them.
+- The public gallery (`/templates`) stays in English: most of its cards come from the signed
+  catalog index, which carries no translations, and the page is cached as one document for every
+  visitor.
+
+### What the screen shows: the `locale` param
+
+The words a viewer reads follow the template's `locale` parameter (type `locale`, label
+"Language", default `''` = the player's own language), not the dashboard's.
+
+- Every template that shows a date, time, countdown, formatted number or fixed word has one.
+- Dates, times, numbers, currency and relative times are formatted with `Intl` in that locale —
+  never hard-coded English month or day names, "AM/PM" or "d h m".
+- Fixed words in an html template ("Open now", "Up next", "Updated", …) come from one strings table
+  with `en` plus the nine languages above, picked by the locale's primary subtag and falling back to
+  `en`. Counts use `Intl.PluralRules` or whole phrases with `{n}`. A param that overrides such a
+  word defaults to `''`, meaning "the built-in word in the screen's language"; a value still wins.
+- Slide templates: give `clock`, `date` **and `countdown`** elements `"locale": "{{param:locale}}"`.
+  A countdown's units follow it (`3d 4h 5m`, `3 Tg. 4 Std. 5 Min.`, `3日 4時間 5分`, …); `''` means
+  the panel's language. A countdown with **no** `locale` key keeps its English units, so slides
+  saved before this change look exactly as they did.
+- Layout must survive German (long words: `overflow-wrap`, `hyphens: auto` with a `lang` attribute)
+  and Japanese, Chinese and Hindi. Set `<html lang>` from the locale in html templates, and
+  `dir="auto"` on operator text.
+- **Fonts**: bundled subsets are Latin-only, so every font stack ends with
+  `"Noto Sans", "Noto Sans CJK JP", "Noto Sans CJK SC", "Noto Sans Devanagari", system-ui, sans-serif`
+  (serif: `"Noto Serif", "Noto Serif CJK JP", serif`) and the player's own fonts cover the rest. Do
+  not bundle CJK fonts — they do not fit the package limits.
 
 ## The public gallery (`/templates`)
 
