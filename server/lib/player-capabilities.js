@@ -581,7 +581,6 @@ function capabilitiesFor(device) {
     }
     return [
       'playback.image',
-      'system.self_update',
       'offline.cache',
     ];
   }
