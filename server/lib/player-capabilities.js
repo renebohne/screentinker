@@ -723,7 +723,6 @@ const COMMAND_CAPABILITY = {
   // Diagnostics: deliberately unrestricted. set_debug turns on the log stream you need precisely
   // when a panel is behaving in a way its capability declaration did not predict.
   set_debug: null,
-  upload_logs: null,
 };
 
 /**

@@ -38,6 +38,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     device_id TEXT, battery_level INTEGER, battery_charging INTEGER,
     wifi_rssi INTEGER, local_ip TEXT, power_source TEXT,
+    temperature_c REAL, humidity REAL,
     reported_at INTEGER
   );
   CREATE TABLE playlists (

@@ -215,10 +215,21 @@ function touchDeviceHeartbeat(device, req) {
     // IP"), and all we have here is the address the request came from — the public NAT/proxy one,
     // already kept in devices.ip_address.
     if (batteryLevel !== null || wifiRssi !== null || powerSource !== null || temperatureC !== null || humidity !== null) {
-      db.prepare(`
-        INSERT INTO device_telemetry (device_id, battery_level, battery_charging, wifi_rssi, local_ip, power_source, temperature_c, humidity, reported_at)
-        VALUES (?, ?, ?, ?, NULL, ?, ?, ?, strftime('%s','now'))
-      `).run(device.id, batteryLevel, batteryCharging, wifiRssi, powerSource, temperatureC, humidity);
+      try {
+        db.prepare(`
+          INSERT INTO device_telemetry (device_id, battery_level, battery_charging, wifi_rssi, local_ip, power_source, temperature_c, humidity, reported_at)
+          VALUES (?, ?, ?, ?, NULL, ?, ?, ?, strftime('%s','now'))
+        `).run(device.id, batteryLevel, batteryCharging, wifiRssi, powerSource, temperatureC, humidity);
+      } catch {
+        try {
+          db.prepare(`
+            INSERT INTO device_telemetry (device_id, battery_level, battery_charging, wifi_rssi, local_ip, power_source, reported_at)
+            VALUES (?, ?, ?, ?, NULL, ?, strftime('%s','now'))
+          `).run(device.id, batteryLevel, batteryCharging, wifiRssi, powerSource);
+        } catch {
+          // ignore
+        }
+      }
 
       if (typeof pruneTelemetry === 'function') {
         pruneTelemetry(device.id);
