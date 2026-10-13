@@ -9,6 +9,7 @@ const { canAdminWorkspace } = require('../lib/permissions');
 const { logActivity, getClientIp } = require('../services/activity');
 const { resolveDevicePlaylist, resolvedLayoutId } = require('../lib/resolve-device-playlist');
 const { PLATFORM_ROLES, ELEVATED_ROLES, isPlatformStaff } = require('../middleware/auth');
+const { dashboardDeviceReadLimiter } = require('../lib/embedded-rate-limits');   // #3 diagnostic logs
 // Phase 2.2a: workspace-aware access. accessContext returns { workspaceRole, actingAs }
 // or null based on the caller's reach into a specific workspace.
 const { resourceAccess } = require('../lib/tenancy');
@@ -279,7 +280,7 @@ router.get('/geocode', async (req, res) => {
 });
 
 // Get single device with telemetry history
-router.get('/:id', (req, res) => {
+router.get('/:id', dashboardDeviceReadLimiter, (req, res) => {
   const device = db.prepare('SELECT d.*, u.email as owner_email, u.name as owner_name FROM devices d LEFT JOIN users u ON d.user_id = u.id WHERE d.id = ?').get(req.params.id);
   if (!device) return res.status(404).json({ error: 'Device not found' });
   // Phase 2.2a: workspace-aware read check. accessContext returns null when
@@ -553,7 +554,7 @@ router.get('/:id/preview-payload', (req, res) => {
 });
 
 // Diagnostic logs for embedded / fielded devices (#3 / mcu#9)
-router.get('/:id/diagnostic-logs', (req, res) => {
+router.get('/:id/diagnostic-logs', dashboardDeviceReadLimiter, (req, res) => {
   const device = db.prepare('SELECT id, workspace_id FROM devices WHERE id = ?').get(req.params.id);
   if (!device) return res.status(404).json({ error: 'Device not found' });
   if (!device.workspace_id) return res.status(403).json({ error: 'Device not assigned to a workspace' });

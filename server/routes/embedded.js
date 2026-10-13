@@ -53,6 +53,7 @@ const ScheduleEval          = require('../lib/schedule-eval');
 const PlayOrder             = require('../lib/play-order');
 const { effectiveDeviceTz } = require('../lib/device-timezone');
 const PowerWindow           = require('../lib/power-window');
+const { firmwareLimiter, deviceLogsLimiter } = require('../lib/embedded-rate-limits');
 const { powerScheduleForDevice } = require('../lib/device-power-schedule');
 const { popPendingCommands }     = require('../lib/command-queue');
 
@@ -1299,7 +1300,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
  * JSON array of logs, or plain text log lines.
  * Emits dashboard:embedded-logs to dashboard subscribers in the device's workspace room.
  */
-router.post('/logs', resolveAuth, (req, res) => {
+router.post('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
   const device = resolveDevice(req, res);
   if (!device) return;
 
@@ -1394,7 +1395,7 @@ router.post('/logs', resolveAuth, (req, res) => {
 });
 
 // ─── GET /api/embedded/logs ───────────────────────────────────────────────────
-router.get('/logs', resolveAuth, (req, res) => {
+router.get('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
   const device = resolveDevice(req, res);
   if (!device) return;
 
@@ -1471,7 +1472,7 @@ function getFirmwareInfo(preset) {
 }
 
 // GET /api/embedded/firmware/:preset/version
-router.get('/firmware/:preset/version', (req, res) => {
+router.get('/firmware/:preset/version', firmwareLimiter, (req, res) => {
   const preset = req.params.preset;
   const fw = getFirmwareInfo(preset);
   if (!fw) {
@@ -1488,7 +1489,7 @@ router.get('/firmware/:preset/version', (req, res) => {
 });
 
 // GET /api/embedded/firmware/:preset/latest.bin
-router.get('/firmware/:preset/latest.bin', (req, res) => {
+router.get('/firmware/:preset/latest.bin', firmwareLimiter, (req, res) => {
   const preset = req.params.preset;
   const fw = getFirmwareInfo(preset);
   if (!fw) {
