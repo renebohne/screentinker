@@ -36,7 +36,7 @@ db.exec(`
   );
   CREATE TABLE device_telemetry (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id TEXT, battery_level INTEGER, battery_charging INTEGER,
+    device_id TEXT, battery_level INTEGER, battery_charging INTEGER NOT NULL DEFAULT 0,  -- as schema.sql
     wifi_rssi INTEGER, local_ip TEXT, power_source TEXT,
     temperature_c REAL, humidity REAL,
     reported_at INTEGER
@@ -1340,10 +1340,18 @@ describe('Embedded Device Liveness & Telemetry Ingestion', () => {
     assert.equal(newCount, prevCount, 'no invalid telemetry row inserted');
   });
 
-  test('touchDeviceHeartbeat leaves battery_charging NULL when the panel does not report it', () => {
+  test('a panel that does not report charging still gets its telemetry row (battery_charging 0)', () => {
+    // ⚠️ This test used to assert NULL, against a hand-written table whose column was nullable. The
+    // real column is NOT NULL DEFAULT 0, so on a real server NULL failed the insert and the row was
+    // lost. The table above now matches schema.sql; embedded-telemetry-real-schema.test.js checks it
+    // against the real database too.
+    const before = db.prepare('SELECT COUNT(*) c FROM device_telemetry WHERE device_id = ?').get(devId).c;
     touchDeviceHeartbeat({ id: devId }, { headers: { 'x-st-device-battery': '40' }, socket: { remoteAddress: '192.168.1.54' } });
-    const row = db.prepare('SELECT battery_charging, power_source FROM device_telemetry WHERE device_id = ? ORDER BY id DESC LIMIT 1').get(devId);
-    assert.equal(row.battery_charging, null);
+    const after = db.prepare('SELECT COUNT(*) c FROM device_telemetry WHERE device_id = ?').get(devId).c;
+    assert.equal(after, before + 1, 'the row was written');
+    const row = db.prepare('SELECT battery_level, battery_charging, power_source FROM device_telemetry WHERE device_id = ? ORDER BY id DESC LIMIT 1').get(devId);
+    assert.equal(row.battery_level, 40);
+    assert.equal(row.battery_charging, 0);
     assert.equal(row.power_source, null);
   });
 
@@ -1369,3 +1377,29 @@ describe('Embedded Device Liveness & Telemetry Ingestion', () => {
   });
 });
 
+
+// puppeteer-core 25: executablePath() became async. Calling it made isBrowserAvailable() say true on a
+// host with no Chromium and left a rejection with no handler, which server.js treats as fatal.
+test('isBrowserAvailable never calls puppeteer.executablePath() (async in v25: a fatal unhandled rejection)', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'lib', 'embedded-render.js'), 'utf8');
+  const fn = src.slice(src.indexOf('function isBrowserAvailable'), src.indexOf('async function getBrowser'));
+  assert.ok(!/\.executablePath\s*\(/.test(fn), 'isBrowserAvailable must decide from CHROME_PATH, not puppeteer');
+});
+
+test('with no CHROME_PATH there is no browser, and no stray rejection', async () => {
+  const saved = { c: process.env.CHROME_PATH, p: process.env.PUPPETEER_EXECUTABLE_PATH };
+  delete process.env.CHROME_PATH; delete process.env.PUPPETEER_EXECUTABLE_PATH;
+  const rejections = [];
+  const onRej = (r) => rejections.push(r);
+  process.on('unhandledRejection', onRej);
+  try {
+    const { isBrowserAvailable } = require('../lib/embedded-render');
+    assert.equal(isBrowserAvailable(), false);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.deepEqual(rejections, [], 'nothing may be left rejecting in the background');
+  } finally {
+    process.off('unhandledRejection', onRej);
+    if (saved.c !== undefined) process.env.CHROME_PATH = saved.c;
+    if (saved.p !== undefined) process.env.PUPPETEER_EXECUTABLE_PATH = saved.p;
+  }
+});

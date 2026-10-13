@@ -41,7 +41,7 @@ roku/
     playorder.brs               sequential / shuffle / weighted next-item (tizen/js/play-order.js)
   components/
     MainScene.xml/.brs          setup -> pairing -> playing; socket events, commands, heartbeats,
-                                layouts, power windows, the screensaver keep-awake
+                                layouts, power windows, launch beacons, the autoplay wait
     tasks/SocketTask.xml/.brs   the Engine.IO session in a Task thread (long-poll GET + one POST at a
                                 time, ping/pong, ping and POST timeouts, reconnect with backoff)
     tasks/RasterTask.xml/.brs   fetches server-rendered frames to tmp:/ (Bearer auth, ETag/304,
@@ -51,7 +51,6 @@ roku/
     ui/PairingView, ui/Overlay  pairing code screen; status / info strip
   images/                       icons + splash (from the ScreenTinker logo)
   fonts/                        Inter Regular/Bold (OFL, the server's own font, as static TTF)
-  assets/keepalive.mp4          1-second silent black clip we generate (keeps the screensaver off)
   tests/                        vectors, codec, end-to-end protocol, whole-app and screenshot harnesses
 ```
 
@@ -234,21 +233,40 @@ If-None-Match: "<etag from the last 200>"                      (optional)
   uses); a structural change rebuilds the stage.
 - **The socket rebuilds itself** when no ping arrives within `pingInterval + pingTimeout + 5 s`, or a
   POST has not completed in 15 s (re-sending what was in flight, then re-registering).
-- **Screensaver**: Roku holds off its screensaver only while a Video node with `disableScreenSaver`
-  plays, so while no zone plays video a 2×2 px silent clip loops behind the stage.
+- **Screensaver**: the app leaves Roku's screensaver alone (certification 4.5). Up to 0.1.x a 2×2 px
+  silent clip looped behind the stage to hold it off, and the Video node set `disableScreenSaver`;
+  both are gone. Over a still image or a frame, the Roku's own screensaver timeout applies; set it
+  to the longest the TV allows, or *Off* where the model offers that.
+- **Autoplay**: if Autoplay is off in the Roku's settings (`roDeviceInfo.IsAutoPlayEnabled()`), the
+  stage is built but nothing starts until OK is pressed, once per launch (certification 4.8). The
+  status line says so. On a Roku OS too old to have the call, playback starts as before.
+- **Launch beacons**: `AppLaunchComplete` fires on the first screen that answers the remote (pairing,
+  the first playlist, or 5 s of "Connecting to …"). The first-run server prompt is bracketed by
+  `AppDialogInitiate` / `AppDialogComplete` so typing time is not counted as launch time.
+- **Deep links**: Roku's `contentId` / `mediaType` (search, voice, certification tests) open the
+  player, at launch or while running; there is no catalogue to open a title from.
+- **Back / Cancel on first run** (no server saved yet) leave the app, since nothing is behind the
+  prompt. Elsewhere Back still needs two presses within 3 s.
 - **Power windows and `screen_off`** blank the screen and pause playback; the TV stays on.
 - **Debugging**: launch with `debug=1` to log every Engine.IO request; `debug=0` turns it off.
 
-## How it was tested (no Roku yet)
+## How it was tested
 
 | | |
 |---|---|
 | `bsc` + bslint | the whole app compiles with zero diagnostics |
 | `tests/run-vectors.js` | the shared schedule and power-window vectors, generated time-zone and next-edge cases, play order against `tizen/js/play-order.js` |
 | `tests/run-protocol.js --e2e` | the codec, then a real Engine.IO session against the server: register, pair, re-register, playlist, heartbeat ack |
-| `tests/run-app.js` | the whole app in brs-node: pairing, a 3-item playlist (image, video, clock), server frames, tz_table, plays reported, `platform_family roku` |
+| `tests/run-app.js` | the whole app in brs-node: pairing, a 4-item playlist (image, video, clock, text widget), server frames, tz_table, plays reported, `platform_family roku`; the launch beacon; with the simulator's Autoplay off, nothing plays until OK is pressed over ECP |
 | `tests/screenshot-app.js [--layout]` | the app drawn by the simulator in Chromium: pairing screen, image, video, native clocks, server frames, a two-zone layout |
 | `server/test/roku-*.test.js`, `player-raster.test.js`, `tz-table.test.js` | the server side, plus a guard against BrightSign-only or certification-banned calls in `roku/` |
+| `tests/check-threads.js` | no component that Roku allows only on the main thread or in a Task (`roUrlTransfer`, sockets, `roChannelStore`) is created by a script running on the render thread. **The simulator does not enforce this, and a real Roku crashes on it.** |
+
+**On a real Roku** (Streaming Stick 4K 3820R2, Roku OS 15.3.4, paired to screentinker.com): pairing, image playlists, a launch of about 1.5 s by Roku's own `AppLaunchComplete` beacon, and reinstalling over an existing install keeping the pairing. Found only on the device:
+- `roUrlTransfer.Escape()` on the render thread crashed into the debugger, leaving a black screen. `ST_UrlEncode` now uses `EncodeUriComponent()`, and `check-threads.js` guards the rule.
+- After a decode error, the Video node reported the next video `finished` without it ever playing. A playlist with nothing playable then spun about twice a second, with a black screen and a play row per attempt. Now: `finished` without `playing` is a failure; failures send `play_end` with `completed: false`; and a round where nothing played puts a message on screen and retries after 30 s, doubling to every 5 minutes.
+
+Debugging a device: `nc <roku-ip> 8085` is the BrightScript console (no password; it shows output only from when you connect). `POST :8060/launch/dev` relaunches the sideloaded app, and `GET :8060/query/app-ui` lists the scene, including hidden nodes.
 
 ## What a Roku cannot do (and will not pretend to)
 
@@ -260,3 +278,4 @@ If-None-Match: "<etag from the last 200>"                      (optional)
 - **Play items that need a browser natively.** They are shown as server-rendered frames: correct
   content, refreshed on a timer, but no animation, no video inside a web page, no touch.
 - **Video walls / group sync.** Not implemented.
+- **Play H.264 taller than 1080 pixels**, which in practice means portrait 1080x1920 phone and AI clips. The decoder refuses it (`unsupported video format`, code -5, `Image height too high`), and the size of the zone makes no difference, because decoding happens first. Use a copy no bigger than 1920x1080, e.g. `ffmpeg -i in.mp4 -vf "scale=-2:1080" -c:v libx264 -crf 20 -c:a copy out.mp4`. The screen now says so instead of going black.

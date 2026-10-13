@@ -1,5 +1,126 @@
 # Changelog
 
+## 2.6.1
+
+A fix release for 2.6.0, found while filming its release video. Server only: no player changed.
+
+### Fixed
+
+- **E-paper and other embedded panels lost all their telemetry** unless they sent `X-ST-Charging`
+  (#583). `device_telemetry.battery_charging` is `NOT NULL DEFAULT 0`. The embedded routes inserted
+  an explicit NULL when the header was missing, so the insert failed, and a bare `catch {}` hid it. A
+  panel sending only the documented battery, Wi-Fi signal and firmware headers (#570) never got its
+  battery or Wi-Fi cards. Unreported charging is now stored as 0, and a failed write is logged once
+  per device instead of swallowed. The old test passed against a hand-written table whose column
+  was nullable. That table now matches `schema.sql`, and a new test runs against the real database.
+- **E-paper panels can set a power schedule from their display page** (#583). The embedded renderer
+  honours a device power schedule (#569), but the editor lived only in the Controls tab, which
+  needed a volume or brightness control. Embedded panels now get the tab with only the schedule in
+  it.
+- **The Triggers listener settings are no longer offered on Roku** (#583), which does not implement
+  triggers. Launch Player stays, because on Roku it refreshes the app.
+
+### Release tooling
+
+- `scripts/finalize-release.sh` builds the Roku sideload zip from the tagged tree and uploads it as
+  `screentinker-roku.zip` (#582). The release is not complete without it. Until Roku publishes the
+  store app, it is installed in developer mode from that zip.
+
+## 2.6.0
+
+**@renebohne authored 3 of the 13 commits in this release (#569, #570, #571):** display power schedules
+and deep sleep for e-paper and other battery panels, device telemetry over HTTP polling, and
+dithering profiles with remote reboot. Thank you, René.
+
+### Upgrade notes
+
+- **The first start after upgrading builds two indexes on `play_logs`** (#577). It is one synchronous
+  statement per index, so the server answers nothing until both finish, and the log says so before it
+  starts. On screentinker.com (5.2M plays) both took 10 s with a warm cache. A cold copy of the same
+  database took 48 s and 56 s at idle disk priority. Do not stop the server while it builds. Every
+  start after that skips them.
+- **Roku screens need Chromium on the server** for widgets, web pages and slides, which reach a Roku as
+  pictures the server draws (`GET /api/player/raster`). Without `CHROME_PATH`, those items answer 501
+  and the Roku skips them; images and video play either way.
+- `scripts/upgrade.sh` is a tracked file, so the copy that runs is the one from the release you are
+  leaving. Its pm2 support (below) helps from the upgrade after this one, or now if you run the new
+  script from outside the checkout with `APP_DIR=`.
+
+### Added
+
+- **A ScreenTinker player for Roku** (#576, #579). A native BrightScript app on the same socket protocol
+  as every other player. It pairs with a code, and plays playlists, schedules, play order, power
+  schedules and multi-zone layouts. Clocks are drawn on the Roku, and everything that needs a browser
+  is a frame the server renders. It needs Roku OS 15.1 or later. It is submitted to the Roku Channel
+  Store, and will be added with the channel code `Screentinker` once Roku publishes it.
+  - Server side: a `roku` player family, `GET /api/player/raster` (server-rendered frames, with an
+    ETag), and time-zone offset tables in the playlist payload, because a Roku has no time-zone
+    database.
+  - Certification: the app no longer holds off the system screensaver, honours the Roku's Autoplay
+    setting (it waits for OK when Autoplay is off), sends Roku's launch and dialog beacons, accepts
+    Roku deep links, and leaves on Back from the first-run prompt. It declares RSG 1.3, logs its memory
+    limits and warnings, and uses `StandardKeyboardDialog` for the server address.
+  - Found on the first real Roku and fixed: a render-thread crash (black screen) from `roUrlTransfer`
+    (now `roku/tests/check-threads.js`, in CI); full Roku error details for videos that will not
+    decode; and a playlist with nothing playable no longer spins. It shows a message on screen and
+    retries after 30 s, doubling to 5 minutes, and failed attempts are not recorded as plays.
+  - What a Roku cannot do is written down, not glossed over: it does not start by itself after a power
+    cut, cannot be rebooted, screenshotted or have its volume set remotely, and cannot decode H.264
+    taller than 1080 pixels (portrait clips). See the new guide (#580).
+- **E-paper and battery panels follow display power schedules** (#569, @renebohne). The embedded
+  renderer evaluates the device's power schedule, then its group's. During an off window it answers
+  with how long the panel may deep sleep, so a panel can sleep through the night on one charge.
+  A missing or broken schedule falls back to on.
+- **Embedded panels report battery, Wi-Fi signal and firmware** (#570, @renebohne) through
+  `X-ST-Device-Battery`, `X-ST-Device-RSSI` and `X-ST-Firmware-Version` on their HTTP polls. Each poll
+  counts as a heartbeat. The display's page shows the battery and Wi-Fi cards, and the device name is
+  sent back in `X-ST-Device-Name`.
+- **E-paper dithering profiles, and remote and scheduled reboot for embedded panels** (#571,
+  @renebohne). Pick Floyd–Steinberg, Atkinson or none (threshold) per display. A reboot, from the
+  dashboard or the nightly reboot schedule, is queued and delivered on the next poll as
+  `X-ST-Command: reboot`. Controls a polling panel cannot honour are hidden.
+- **Templates: ISO event times, larger `ST.data`, and translations** (#574). iCal data adds
+  `event_N_start_iso` / `_end_iso` / `_all_day`, and `max_events` goes up to 200. `ST.data` holds up to
+  3000 keys per source, with byte caps that keep a template under the render limit. A template package
+  may carry `locales/<lang>.json` for ten languages, validated strictly at install, and slide
+  countdowns take a `locale`.
+- **Templates library: search, filters and bulk install** (#575). Search covers names, descriptions,
+  tags, id and author, in English and the translated text. You can filter by status, type,
+  orientation and tag. **Install selected** and **Update all** take one confirmation, which still names
+  every code template and the hosts it may contact. The Templates page is translated into de, es, fr,
+  hi, it, ja, nl, pt and zh.
+- **Boot warnings for two silent self-hosting traps** (#578).
+  - `[config]` names any key in `server/.env` or a repository-root `.env` that the running server does
+    not have, and says why: the file is not read, it is read only by `npm start`, or the environment
+    overrides it. Key names only, never values.
+  - `[secrets]` reports a `JWT_SECRET` that changed under saved secrets: everyone is signed out and
+    saved secrets cannot be decrypted. When the server's generated `certs/.jwt_secret` is the previous
+    secret, the warning names it as the way back.
+- **`scripts/upgrade.sh` restarts pm2 and anything else** (#578). It uses `RESTART_CMD`, then the
+  systemd unit, then the pm2 process for this checkout. If none applies, it says the new release is
+  installed but not running, and exits 2. A failing step is named, with the advice not to finish by
+  `git pull`. Local edits to tracked files stop it before the backup.
+- **A Roku guide, Roku in the platform lists, and the Roku Streaming Stick 4K under Known issues on the
+  certified hardware page** (#580). That tier is not Certified Hardware and carries no support
+  commitment.
+
+### Fixed
+
+- **Deleting content or a widget froze the whole server** (#577). `play_logs.content_id` and
+  `widget_id` are `ON DELETE SET NULL` foreign keys with no index since #451, so each delete scanned
+  every play synchronously. On screentinker.com that meant up to 34 s per delete, dropping screens
+  and dashboards. Account deletion paid one scan per item. Two partial indexes make each delete a
+  lookup (180 ms to 10 ms on 3M rows).
+- **Every start rebuilt and then dropped a 260 MB index** (#581). `schema.sql`, which runs on every
+  boot, still created `idx_play_logs_content`, which a migration drops. Starts and upgrades no longer
+  pay for it.
+- **Sleeping e-paper panels no longer raise "display offline" alerts** (#572). A render answer records
+  when the panel is next due, and the heartbeat sweep, the offline email and the alert channels
+  measure lateness from that. One poll writes one telemetry row, not two.
+- The `.env.example` header said the file is never loaded. `npm start` loads `server/.env`; pm2,
+  systemd and `node server.js` do not. It now says where settings go (#578).
+- A rooms test depended on what UTC's tomorrow was (#573).
+
 ## 2.5.1
 
 Thanks to the people whose reports this release fixes: @PowerSprout and カタカナ.

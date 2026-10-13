@@ -14,7 +14,7 @@
 
 ScreenTinker is a free, open-source **digital signage CMS** you can self-host on your own server — or run in our managed cloud. Manage TVs, video walls, and kiosks across multiple locations from one dashboard, with remote control, scheduling, playlists, and analytics. Built for retail, QSR menu boards, offices, lobbies, education, and any environment where you need centralized control over remote screens. Multi-tenant, MIT-licensed, single-developer maintained with direct contact access.
 
-**Runs on any screen** — Android TV, Fire TV, Samsung Tizen, LG webOS, Amazon Vega OS, Raspberry Pi, Windows, ChromeOS, or any web browser. No per-device player licence, no hardware lock-in.
+**Runs on any screen** — Android TV, Fire TV, Samsung Tizen, LG webOS, Amazon Vega OS, Roku, Raspberry Pi, Windows, ChromeOS, or any web browser. No per-device player licence, no hardware lock-in.
 
 **Why self-host?** Keep your content and data on your own infrastructure, avoid per-screen SaaS fees, run air-gapped on a private LAN, and read or fork the source. Set `SELF_HOSTED=true` and a $5 VPS drives hundreds of screens.
 
@@ -151,8 +151,9 @@ away, how many hops a screen's data crosses to reach you, and which server relay
 
 ## Supported Platforms
 
-Android TV, Fire TV, Raspberry Pi, Windows, ChromeOS, LG webOS, Samsung Tizen, BrightSign, and any
-device with a web browser.
+Android TV, Fire TV, Roku, Raspberry Pi, Windows, ChromeOS, LG webOS, Samsung Tizen, BrightSign, and any
+device with a web browser. Roku has limits a sign owner should read first: see
+[the Roku guide](https://screentinker.com/guides/roku-digital-signage.html).
 
 Anything with a reasonably modern browser can be a display without installing anything: point it at
 `/player`. The native players add what a browser cannot: the **Android APK** gives you unattended boot,
@@ -198,6 +199,8 @@ Schema migrations run automatically on first boot — no manual migration comman
 
 `npm start` is preferred over `node server.js` directly because the script invokes Node with `--env-file-if-exists=.env` so a `server/.env` file (gitignored) is loaded automatically for local dev.
 
+⚠️ **Only `npm start` reads `server/.env`.** Under pm2, systemd or `node server.js`, set the variables in that process manager instead: systemd `Environment=`, or for pm2 `SELF_HOSTED=true pm2 restart <id> --update-env` then `pm2 save`. A `.env` at the repository root is never read. At boot the server logs a `[config]` warning naming any key in either file that is not in effect.
+
 ### Environment Variables
 
 | Variable | Description | Default |
@@ -212,7 +215,7 @@ Schema migrations run automatically on first boot — no manual migration comman
 | `VIEW_ONLY_ENABLED` | View-only display links (`/view/<token>`). Each display is still off until a workspace admin turns it on. `false` removes the feature from the instance — see [View-only display access](docs/view-only-access.md). | `true` when `SELF_HOSTED=true`, else `false` |
 | `VIEW_TRUSTED_PROXIES` | Comma-separated proxy addresses/CIDRs whose `X-Forwarded-For` the view-only **network** check believes. Unset = only the TCP peer counts. | unset |
 | `APP_URL` | Your public URL (used for Stripe callbacks and invite-accept URLs in emailed invites) | _(none)_ |
-| `JWT_SECRET` | JWT signing key (auto-generated if not set) | _(auto)_ |
+| `JWT_SECRET` | JWT signing key, also the source of the key that encrypts saved secrets. Auto-generated into `certs/.jwt_secret` if not set. ⚠️ Changing it later signs everyone out and makes saved secrets unreadable; the server warns at boot if it changed. | _(auto)_ |
 | `SSL_CERT` | Path to SSL certificate | `server/certs/cert.pem` |
 | `SSL_KEY` | Path to SSL private key | `server/certs/key.pem` |
 | `PING_INTERVAL` | Socket.IO Engine.IO ping interval (ms). Raise for slow TV WebKits that miss pongs under decode load. | `30000` |
@@ -665,9 +668,11 @@ direction — but it should be a decision, not a surprise.
 #### Dependency preflight on boot
 
 Before anything else is loaded, the server checks that the packages this build declares are actually
-installed and that the native database module loads under the running Node. If either is wrong it
-repairs it (`npm install --omit=dev`, or `npm rebuild better-sqlite3`) and continues; if it cannot,
-it exits saying what to run rather than dying on a `MODULE_NOT_FOUND` naming a file.
+installed, that the installed ones are the **versions `package-lock.json` names**, and that the native
+database module loads under the running Node. If any is wrong it repairs it (installs what is
+missing, updates what is out of date to the lockfile in place, or `npm rebuild better-sqlite3`) and
+continues; if it cannot, it says what to run rather than dying on a `MODULE_NOT_FOUND` naming a file.
+A failed update is not fatal: the server starts on the versions it has and logs that it did.
 
 `scripts/upgrade.sh` already installs dependencies, so this is not for the normal path. It is for
 the ways a box ends up with the wrong `node_modules`:
@@ -676,6 +681,11 @@ the ways a box ends up with the wrong `node_modules`:
   are rolling back because something is already wrong;
 - **upgrading Node** leaves `better-sqlite3` compiled against the previous ABI, which fails in a way
   that reads like database corruption and is not.
+- **upgrading with `git pull`** and a restart (by hand, or under pm2) instead of `upgrade.sh`: the
+  new release's lockfile arrives but its packages do not. Without the version check the server ran
+  on the old ones, and with them the old security bugs; now it updates them on that first restart.
+  It runs `npm install --omit=dev` on a production tree and leaves a developer's dev packages
+  alone. If the service user has no writable home, npm's cache goes in `.npm-cache` beside `server/`.
 
 Set `ST_SKIP_DEP_PREFLIGHT=1` on an air-gapped host, or anywhere you manage `node_modules` yourself
 and do not want a boot reaching for the registry.
@@ -883,7 +893,7 @@ scripts/upgrade.sh
 scripts/upgrade.sh v1.8.0
 ```
 
-Set `SERVICE_NAME` if your systemd unit is not named `screentinker`.
+It restarts the systemd unit `screentinker` (set `SERVICE_NAME` if yours is named differently), or else the pm2 process running this checkout's `server/`. Run it as the user that owns the pm2 process, since pm2 is per user. For anything else, set `RESTART_CMD='<your restart command>'`. If it can't find a way to restart, it says so and exits with status 2: the new release is installed, but the old one is still running until you restart it.
 
 If you deployed without git, initialize it once so `upgrade.sh` can resolve tags:
 
@@ -1149,7 +1159,7 @@ scripts/          Device setup scripts + admin recovery
 
 ## Tech Stack
 
-- **Backend:** Node.js 20.6+, Express, Socket.IO, SQLite (better-sqlite3)
+- **Backend:** Node.js 22.12+, Express, Socket.IO, SQLite (better-sqlite3)
 - **Frontend:** Vanilla JS SPA (no framework, no build step), ES modules, Service Worker for offline support
 - **Android:** Kotlin, ExoPlayer, Socket.IO client
 - **Auth:** JWT with bcrypt, Google/Microsoft OAuth (optional)

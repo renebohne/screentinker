@@ -117,6 +117,113 @@ test('an optional dependency counts as required where node:sqlite is unavailable
 
 test('requiredDeps copes with a package.json missing either section', () => {
   assert.deepEqual(preflight.requiredDeps({}, false), []);
-  assert.deepEqual(preflight.requiredDeps({ optionalDependencies: { a: '1' } }, false), ['a']);
+  assert.deepEqual(preflight.requiredDeps({ optionalDependencies: { a: '1' } }, false), [],
+    'an optional package that is not the database driver is never required');
   assert.deepEqual(preflight.requiredDeps({ dependencies: { b: '1' } }, false), ['b']);
+});
+
+// ---- installed but OUT OF DATE (an upgrade by git pull + restart) ----
+
+const os = require('node:os');
+
+function fakeTree({ pkg, lock, installed }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'st-preflight-'));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify(pkg));
+  fs.writeFileSync(path.join(dir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': {}, ...lock } }));
+  for (const [key, version] of Object.entries(installed)) {
+    fs.mkdirSync(path.join(dir, key), { recursive: true });
+    fs.writeFileSync(path.join(dir, key, 'package.json'), JSON.stringify({ version }));
+  }
+  return dir;
+}
+
+test('⚠️ a package that is installed but older than the lockfile is STALE, nested ones too', () => {
+  // 2.6.2: git pull + restart kept nodemailer 9 under ^10, and proxy-addr/engine.io underneath.
+  const dir = fakeTree({
+    pkg: { dependencies: { nodemailer: '^10.1.0', express: '^4.18.2' } },
+    lock: {
+      'node_modules/nodemailer': { version: '10.1.0' },
+      'node_modules/express': { version: '4.22.3' },
+      'node_modules/proxy-addr': { version: '2.0.8' },
+      'node_modules/get-uri/node_modules/basic-ftp': { version: '6.2.3' },
+    },
+    installed: {
+      'node_modules/nodemailer': '9.0.5',
+      'node_modules/express': '4.22.3',
+      'node_modules/proxy-addr': '2.0.7',
+      'node_modules/get-uri/node_modules/basic-ftp': '5.3.1',
+    },
+  });
+  try {
+    const st = preflight.staleDeps(dir).map((d) => `${d.name} ${d.installed}->${d.locked}`).sort();
+    assert.deepEqual(st, ['basic-ftp 5.3.1->6.2.3', 'nodemailer 9.0.5->10.1.0', 'proxy-addr 2.0.7->2.0.8']);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('dev-only, linked and absent optional packages are never stale', () => {
+  const dir = fakeTree({
+    pkg: { dependencies: {}, devDependencies: { sharp: '^0.35.3' } },
+    lock: {
+      'node_modules/sharp': { version: '0.35.3', dev: true },
+      'node_modules/local-thing': { version: '1.0.0', link: true },
+      'node_modules/@img/sharp-darwin-arm64': { version: '0.35.3', optional: true },
+      'node_modules/bundled': { version: '2.0.0', inBundle: true },
+    },
+    installed: { 'node_modules/sharp': '0.30.0', 'node_modules/local-thing': '0.0.1', 'node_modules/bundled': '1.0.0' },
+  });
+  try { assert.deepEqual(preflight.staleDeps(dir), []); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the repair keeps a developer tree whole and keeps a production tree lean', () => {
+  // `npm install --omit=dev` on a populated developer tree PRUNES devDependencies and breaks npm test.
+  const prod = fakeTree({ pkg: { dependencies: {}, devDependencies: { sharp: '^0.35.3' } }, lock: {}, installed: {} });
+  const dev = fakeTree({ pkg: { dependencies: {}, devDependencies: { sharp: '^0.35.3' } }, lock: {}, installed: { 'node_modules/sharp': '0.35.3' } });
+  try {
+    assert.equal(preflight.productionTree(prod), true);
+    assert.deepEqual(preflight.reconcileArgs(prod), ['install', '--omit=dev', '--no-save', '--no-audit', '--no-fund']);
+    assert.equal(preflight.productionTree(dev), false);
+    assert.deepEqual(preflight.reconcileArgs(dev), ['install', '--no-save', '--no-audit', '--no-fund']);
+    for (const args of [preflight.reconcileArgs(prod), preflight.reconcileArgs(dev)]) {
+      assert.ok(!args.includes('ci'), 'never `npm ci` on a populated tree: it deletes node_modules first');
+    }
+  } finally { for (const d of [prod, dev]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+test('npm gets a writable cache when the service user has no home', () => {
+  // prod's `screentinker` user has no /home directory; npm then dies writing ~/.npm/_logs.
+  const env = preflight.npmEnv('/opt/screentinker/server', { HOME: '/nonexistent/home', PATH: '/usr/bin' });
+  assert.equal(env.HOME, '/opt/screentinker');
+  assert.equal(env.npm_config_cache, '/opt/screentinker/.npm-cache');
+  assert.equal(env.PATH, '/usr/bin', 'the rest of the environment is kept');
+  const ok = preflight.npmEnv('/x/server', { HOME: os.tmpdir() });
+  assert.equal(ok.HOME, os.tmpdir(), 'a writable HOME is left alone');
+  assert.equal(ok.npm_config_cache, undefined);
+});
+
+test('this checkout itself is not stale (or every boot would reinstall)', () => {
+  assert.deepEqual(preflight.staleDeps(), [], 'node_modules should match package-lock.json after npm ci');
+});
+
+test('⚠️ an optional package npm skipped is NOT a reason to refuse to boot (puppeteer-core on Node 20)', () => {
+  // puppeteer-core 25 needs Node 22.12; on Node 20 npm skips it. The server must still start there.
+  const pkg = { dependencies: { express: '^4' }, optionalDependencies: { 'better-sqlite3': '12.9.0', 'puppeteer-core': '^25.13.0' } };
+  assert.deepEqual(preflight.requiredDeps(pkg, false).sort(), ['better-sqlite3', 'express'],
+    'no built-in driver: the native driver is required, puppeteer-core is not');
+  assert.deepEqual(preflight.requiredDeps(pkg, true), ['express']);
+});
+
+test('the Node floor comes from engines, and only a lower Node is reported', () => {
+  const pkg = { engines: { node: '>=22.12.0' } };
+  assert.equal(preflight.nodeBelowFloor(pkg, '20.20.2'), '22.12.0');
+  assert.equal(preflight.nodeBelowFloor(pkg, '22.11.9'), '22.12.0');
+  assert.equal(preflight.nodeBelowFloor(pkg, '22.12.0'), null);
+  assert.equal(preflight.nodeBelowFloor(pkg, '22.23.2'), null);
+  assert.equal(preflight.nodeBelowFloor(pkg, '24.1.0'), null);
+  assert.equal(preflight.nodeBelowFloor({}, '18.0.0'), null, 'no floor declared, nothing to say');
+  assert.equal(preflight.nodeBelowFloor({ engines: { node: '20.x || >=22' } }, '18.0.0'), null, 'a range it does not parse is not guessed at');
+});
+
+test('this checkout declares the Node floor the release needs', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  assert.equal(pkg.engines && pkg.engines.node, '>=22.12.0', 'puppeteer-core 25 is the floor-setter');
 });

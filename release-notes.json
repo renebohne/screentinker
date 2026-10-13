@@ -14,6 +14,27 @@
   ],
   "releases": [
     {
+      "version": "2.6.1",
+      "date": "2026-10-12",
+      "notes": [
+        "E-paper and other battery displays show their battery and Wi-Fi signal again. In 2.6.0 those readings were lost unless the panel also reported whether it was charging.",
+        "E-paper displays can have a power schedule set from their own page, under Controls.",
+        "Roku displays no longer offer Triggers settings, which a Roku does not support."
+      ]
+    },
+    {
+      "version": "2.6.0",
+      "date": "2026-10-12",
+      "notes": [
+        "New: a ScreenTinker player for Roku, for Roku OS 15.1 or later. It plays playlists, schedules and layouts, and shows widgets and web pages as pictures drawn by the server. A Roku cannot start itself after a power cut, so read the Roku guide before choosing one.",
+        "Deleting content or a widget no longer freezes the server for seconds at a time on a large installation. The first start after this update builds two database indexes, which can take a minute on a big install.",
+        "E-paper and other battery displays follow display power schedules and sleep through the off hours without raising offline alerts. They report battery, Wi-Fi signal and firmware, can be rebooted from the dashboard, and offer three dithering styles.",
+        "The Templates library has search, filters and bulk install, and the Templates page and template labels are translated into ten languages.",
+        "Self-hosted servers warn at start-up when a .env file's settings are not in effect, or when the JWT secret changed under saved secrets. The upgrade script now restarts servers run under pm2, and says which step failed if one does.",
+        "Restarts and upgrades are quicker: a database index that was rebuilt and thrown away on every start is gone."
+      ]
+    },
+    {
       "version": "2.5.1",
       "date": "2026-10-09",
       "notes": [
