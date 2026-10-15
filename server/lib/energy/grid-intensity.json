@@ -1,0 +1,472 @@
+{
+ "_note": "Generated from Ember yearly electricity data (see source). Country annual averages, power sector CO2 intensity. Regenerate, never hand-edit values.",
+ "source": {
+  "name": "Ember, Yearly electricity data",
+  "year": 2024,
+  "url": "https://ember-energy.org/data/yearly-electricity-data/",
+  "dataset": "https://storage.googleapis.com/emb-prod-bkt-publicdata/public-downloads/yearly_full_release_long_format.csv",
+  "variable": "CO2 intensity (Power sector emissions), gCO2/kWh",
+  "licence": "CC-BY-4.0",
+  "retrieved": "2026-10-14"
+ },
+ "world": {
+  "name": "World",
+  "g": 471.5,
+  "year": 2024
+ },
+ "countries": {
+  "AE": {
+   "name": "United Arab Emirates",
+   "g": 467.5,
+   "year": 2024
+  },
+  "AR": {
+   "name": "Argentina",
+   "g": 344.8,
+   "year": 2024
+  },
+  "AT": {
+   "name": "Austria",
+   "g": 103.5,
+   "year": 2024
+  },
+  "AU": {
+   "name": "Australia",
+   "g": 554.0,
+   "year": 2024
+  },
+  "BA": {
+   "name": "Bosnia Herzegovina",
+   "g": 602.5,
+   "year": 2024
+  },
+  "BD": {
+   "name": "Bangladesh",
+   "g": 695.9,
+   "year": 2024
+  },
+  "BE": {
+   "name": "Belgium",
+   "g": 127.3,
+   "year": 2024
+  },
+  "BG": {
+   "name": "Bulgaria",
+   "g": 278.9,
+   "year": 2024
+  },
+  "BR": {
+   "name": "Brazil",
+   "g": 106.1,
+   "year": 2024
+  },
+  "CA": {
+   "name": "Canada",
+   "g": 185.4,
+   "year": 2024
+  },
+  "CH": {
+   "name": "Switzerland",
+   "g": 34.6,
+   "year": 2024
+  },
+  "CL": {
+   "name": "Chile",
+   "g": 260.9,
+   "year": 2024
+  },
+  "CN": {
+   "name": "China",
+   "g": 556.3,
+   "year": 2024
+  },
+  "CO": {
+   "name": "Colombia",
+   "g": 298.3,
+   "year": 2024
+  },
+  "CY": {
+   "name": "Cyprus",
+   "g": 511.2,
+   "year": 2024
+  },
+  "CZ": {
+   "name": "Czechia",
+   "g": 414.2,
+   "year": 2024
+  },
+  "DE": {
+   "name": "Germany",
+   "g": 337.1,
+   "year": 2024
+  },
+  "DK": {
+   "name": "Denmark",
+   "g": 131.9,
+   "year": 2024
+  },
+  "EE": {
+   "name": "Estonia",
+   "g": 343.4,
+   "year": 2024
+  },
+  "EG": {
+   "name": "Egypt",
+   "g": 574.5,
+   "year": 2024
+  },
+  "ES": {
+   "name": "Spain",
+   "g": 146.2,
+   "year": 2024
+  },
+  "FI": {
+   "name": "Finland",
+   "g": 66.8,
+   "year": 2024
+  },
+  "FR": {
+   "name": "France",
+   "g": 40.5,
+   "year": 2024
+  },
+  "GB": {
+   "name": "United Kingdom",
+   "g": 216.5,
+   "year": 2024
+  },
+  "GR": {
+   "name": "Greece",
+   "g": 321.8,
+   "year": 2024
+  },
+  "HK": {
+   "name": "Hong Kong",
+   "g": 675.5,
+   "year": 2024
+  },
+  "HR": {
+   "name": "Croatia",
+   "g": 170.7,
+   "year": 2024
+  },
+  "HU": {
+   "name": "Hungary",
+   "g": 184.5,
+   "year": 2024
+  },
+  "ID": {
+   "name": "Indonesia",
+   "g": 681.1,
+   "year": 2024
+  },
+  "IE": {
+   "name": "Ireland",
+   "g": 270.9,
+   "year": 2024
+  },
+  "IL": {
+   "name": "Israel",
+   "g": 540.5,
+   "year": 2024
+  },
+  "IN": {
+   "name": "India",
+   "g": 706.7,
+   "year": 2024
+  },
+  "IS": {
+   "name": "Iceland",
+   "g": 27.8,
+   "year": 2024
+  },
+  "IT": {
+   "name": "Italy",
+   "g": 281.4,
+   "year": 2024
+  },
+  "JP": {
+   "name": "Japan",
+   "g": 483.6,
+   "year": 2024
+  },
+  "KE": {
+   "name": "Kenya",
+   "g": 85.2,
+   "year": 2024
+  },
+  "KR": {
+   "name": "South Korea",
+   "g": 415.6,
+   "year": 2024
+  },
+  "LT": {
+   "name": "Lithuania",
+   "g": 116.4,
+   "year": 2024
+  },
+  "LU": {
+   "name": "Luxembourg",
+   "g": 132.4,
+   "year": 2024
+  },
+  "LV": {
+   "name": "Latvia",
+   "g": 134.3,
+   "year": 2024
+  },
+  "MA": {
+   "name": "Morocco",
+   "g": 595.3,
+   "year": 2024
+  },
+  "MD": {
+   "name": "Moldova",
+   "g": 634.3,
+   "year": 2024
+  },
+  "ME": {
+   "name": "Montenegro",
+   "g": 422.1,
+   "year": 2024
+  },
+  "MK": {
+   "name": "North Macedonia",
+   "g": 510.3,
+   "year": 2024
+  },
+  "MT": {
+   "name": "Malta",
+   "g": 488.6,
+   "year": 2024
+  },
+  "MX": {
+   "name": "Mexico",
+   "g": 483.1,
+   "year": 2024
+  },
+  "MY": {
+   "name": "Malaysia",
+   "g": 601.7,
+   "year": 2024
+  },
+  "NG": {
+   "name": "Nigeria",
+   "g": 495.7,
+   "year": 2024
+  },
+  "NL": {
+   "name": "Netherlands",
+   "g": 250.7,
+   "year": 2024
+  },
+  "NO": {
+   "name": "Norway",
+   "g": 29.7,
+   "year": 2024
+  },
+  "NZ": {
+   "name": "New Zealand",
+   "g": 112.0,
+   "year": 2024
+  },
+  "PE": {
+   "name": "Peru",
+   "g": 258.7,
+   "year": 2024
+  },
+  "PH": {
+   "name": "Philippines",
+   "g": 629.5,
+   "year": 2024
+  },
+  "PK": {
+   "name": "Pakistan",
+   "g": 335.6,
+   "year": 2024
+  },
+  "PL": {
+   "name": "Poland",
+   "g": 608.4,
+   "year": 2024
+  },
+  "PT": {
+   "name": "Portugal",
+   "g": 110.6,
+   "year": 2024
+  },
+  "QA": {
+   "name": "Qatar",
+   "g": 581.7,
+   "year": 2024
+  },
+  "RO": {
+   "name": "Romania",
+   "g": 259.7,
+   "year": 2024
+  },
+  "RS": {
+   "name": "Serbia",
+   "g": 668.0,
+   "year": 2024
+  },
+  "SA": {
+   "name": "Saudi Arabia",
+   "g": 692.0,
+   "year": 2024
+  },
+  "SE": {
+   "name": "Sweden",
+   "g": 34.9,
+   "year": 2024
+  },
+  "SG": {
+   "name": "Singapore",
+   "g": 498.7,
+   "year": 2024
+  },
+  "SI": {
+   "name": "Slovenia",
+   "g": 230.4,
+   "year": 2024
+  },
+  "SK": {
+   "name": "Slovakia",
+   "g": 96.9,
+   "year": 2024
+  },
+  "TH": {
+   "name": "Thailand",
+   "g": 555.4,
+   "year": 2024
+  },
+  "TR": {
+   "name": "Turkey",
+   "g": 470.8,
+   "year": 2024
+  },
+  "TW": {
+   "name": "Taiwan",
+   "g": 636.2,
+   "year": 2024
+  },
+  "US": {
+   "name": "United States of America",
+   "g": 383.8,
+   "year": 2024
+  },
+  "VN": {
+   "name": "Viet Nam",
+   "g": 487.0,
+   "year": 2024
+  },
+  "ZA": {
+   "name": "South Africa",
+   "g": 717.7,
+   "year": 2024
+  }
+ },
+ "zone_country": {
+  "Africa/Cairo": "EG",
+  "Africa/Casablanca": "MA",
+  "Africa/Johannesburg": "ZA",
+  "Africa/Lagos": "NG",
+  "Africa/Nairobi": "KE",
+  "America/Anchorage": "US",
+  "America/Argentina/Buenos_Aires": "AR",
+  "America/Bahia": "BR",
+  "America/Bogota": "CO",
+  "America/Boise": "US",
+  "America/Buenos_Aires": "AR",
+  "America/Cancun": "MX",
+  "America/Chicago": "US",
+  "America/Denver": "US",
+  "America/Detroit": "US",
+  "America/Edmonton": "CA",
+  "America/Fortaleza": "BR",
+  "America/Halifax": "CA",
+  "America/Indiana/Indianapolis": "US",
+  "America/Lima": "PE",
+  "America/Los_Angeles": "US",
+  "America/Manaus": "BR",
+  "America/Mexico_City": "MX",
+  "America/Monterrey": "MX",
+  "America/Montreal": "CA",
+  "America/New_York": "US",
+  "America/Phoenix": "US",
+  "America/Recife": "BR",
+  "America/Regina": "CA",
+  "America/Santiago": "CL",
+  "America/Sao_Paulo": "BR",
+  "America/St_Johns": "CA",
+  "America/Tijuana": "MX",
+  "America/Toronto": "CA",
+  "America/Vancouver": "CA",
+  "America/Winnipeg": "CA",
+  "Asia/Bangkok": "TH",
+  "Asia/Calcutta": "IN",
+  "Asia/Dhaka": "BD",
+  "Asia/Dubai": "AE",
+  "Asia/Ho_Chi_Minh": "VN",
+  "Asia/Hong_Kong": "HK",
+  "Asia/Jakarta": "ID",
+  "Asia/Jerusalem": "IL",
+  "Asia/Karachi": "PK",
+  "Asia/Kolkata": "IN",
+  "Asia/Kuala_Lumpur": "MY",
+  "Asia/Manila": "PH",
+  "Asia/Nicosia": "CY",
+  "Asia/Qatar": "QA",
+  "Asia/Riyadh": "SA",
+  "Asia/Seoul": "KR",
+  "Asia/Shanghai": "CN",
+  "Asia/Singapore": "SG",
+  "Asia/Taipei": "TW",
+  "Asia/Tokyo": "JP",
+  "Atlantic/Reykjavik": "IS",
+  "Australia/Adelaide": "AU",
+  "Australia/Brisbane": "AU",
+  "Australia/Darwin": "AU",
+  "Australia/Hobart": "AU",
+  "Australia/Melbourne": "AU",
+  "Australia/Perth": "AU",
+  "Australia/Sydney": "AU",
+  "Europe/Amsterdam": "NL",
+  "Europe/Athens": "GR",
+  "Europe/Belgrade": "RS",
+  "Europe/Berlin": "DE",
+  "Europe/Bratislava": "SK",
+  "Europe/Brussels": "BE",
+  "Europe/Bucharest": "RO",
+  "Europe/Budapest": "HU",
+  "Europe/Chisinau": "MD",
+  "Europe/Copenhagen": "DK",
+  "Europe/Dublin": "IE",
+  "Europe/Helsinki": "FI",
+  "Europe/Istanbul": "TR",
+  "Europe/Lisbon": "PT",
+  "Europe/Ljubljana": "SI",
+  "Europe/London": "GB",
+  "Europe/Luxembourg": "LU",
+  "Europe/Madrid": "ES",
+  "Europe/Malta": "MT",
+  "Europe/Oslo": "NO",
+  "Europe/Paris": "FR",
+  "Europe/Podgorica": "ME",
+  "Europe/Prague": "CZ",
+  "Europe/Riga": "LV",
+  "Europe/Rome": "IT",
+  "Europe/Sarajevo": "BA",
+  "Europe/Skopje": "MK",
+  "Europe/Sofia": "BG",
+  "Europe/Stockholm": "SE",
+  "Europe/Tallinn": "EE",
+  "Europe/Vienna": "AT",
+  "Europe/Vilnius": "LT",
+  "Europe/Warsaw": "PL",
+  "Europe/Zagreb": "HR",
+  "Europe/Zurich": "CH",
+  "Pacific/Auckland": "NZ",
+  "Pacific/Honolulu": "US"
+ }
+}

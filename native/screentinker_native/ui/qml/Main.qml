@@ -106,7 +106,18 @@ Window {
 
     PipLayer { anchors.fill: parent }
 
-    TalkVideo { anchors.fill: parent }
+    // The WebRTC layer (Talk's webcam, a 3.0 screen share) and the meeting-room code turn with the
+    // panel like the content does, so a portrait-mounted screen shows them upright.
+    Item {
+        readonly property bool swapped: stage.rotation === 90 || stage.rotation === 270
+        width: swapped ? parent.height : parent.width
+        height: swapped ? parent.width : parent.height
+        anchors.centerIn: parent
+        rotation: stage.rotation
+
+        ShareCode { anchors.fill: parent }
+        TalkVideo { anchors.fill: parent }
+    }
 
     // ---- window brightness (set_brightness): Android dims the window; we dim with black ----
     Rectangle {

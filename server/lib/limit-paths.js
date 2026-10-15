@@ -27,6 +27,11 @@ const LIMIT_PATH_SHAPES = [
   // shares a bucket with every other content operation. It wants its own, and a tight one.
   [/^\/api\/content\/uploads$/, () => '/api/content/uploads'],
   [/^\/api\/content\/[^/]+$/, () => '/api/content/:id'],
+  // 3.0 SCIM: user and group ids are caller-chosen, so the whole protocol surface is one bucket per
+  // IP; the admin routes fold their ids the same way.
+  [/^\/scim(\/.*)?$/, () => '/scim/v2'],
+  [/^\/api\/organizations\/[^/]+\/scim\/(tokens|mappings)\/[^/]+$/, (m) => `/api/organizations/:id/scim/${m[1]}/:id`],
+  [/^\/api\/organizations\/[^/]+\/scim(\/(tokens|mappings|events|users))?$/, (m) => `/api/organizations/:id/scim${m[1] || ''}`],
   [/^\/api\/organizations\/[^/]+\/sso\/[^/]+\/domains\/[^/]+\/verify$/, () => '/api/organizations/:id/sso/:id/domains/:domain/verify'],
   [/^\/api\/organizations\/[^/]+\/sso\/[^/]+\/test$/, () => '/api/organizations/:id/sso/:id/test'],
   [/^\/api\/organizations\/[^/]+\/sso\/[^/]+$/, () => '/api/organizations/:id/sso/:id'],
@@ -38,6 +43,14 @@ const LIMIT_PATH_SHAPES = [
   [/^\/api\/templates\/preview\/[^/]+$/, () => '/api/templates/preview/:token'],
   [/^\/api\/templates\/thumb\/[^/]+$/, () => '/api/templates/thumb/:sha'],
   [/^\/api\/templates\/asset\/.+$/, () => '/api/templates/asset/:sha/:path'],
+  /*
+   * 3.0 content requests: the form code (/r/<code>) and the upload id are caller-chosen, and the
+   * code is a secret — folded so a guess neither mints its own bucket nor lands in a 429 log line.
+   */
+  [/^\/r\/[^/]+$/, () => '/r/:code'],
+  [/^\/api\/public\/requests\/form\/[^/]+\/uploads\/[^/]+$/, () => '/api/public/requests/form/:code/uploads/:id'],
+  [/^\/api\/public\/requests\/form\/[^/]+(\/start|\/verify|\/verify\/confirm|\/sso|\/uploads|\/submit)?$/, (m) => `/api/public/requests/form/:code${m[1] || ''}`],
+  [/^\/api\/public\/requests\/form(\/.*)?$/, () => '/api/public/requests/form/:unmatched'],
   /*
    * ⚠️ THE LAST SEGMENT IS A CREDENTIAL. An inbound hook's URL carries its secret, so without this
    * the per-IP bucket was keyed on it (a new bucket per probe) and the `[limit] 429 <endpoint>`

@@ -133,7 +133,12 @@ async function syncDataSource(sourceOrId, force = false) {
   if (!row) {
     throw new Error('Data source not found');
   }
+  // The outbound ledger attributes this refresh's requests to the source's workspace, including the
+  // background poller's, which serves no request (lib/outbound-ledger.js).
+  return require('../outbound-ledger').withContext({ workspaceId: row.workspace_id || null }, () => syncDataSourceRow(row, force));
+}
 
+async function syncDataSourceRow(row, force) {
   if (force && row.workspace_id && !checkForcedSyncBudget(row.workspace_id)) {
     throw Object.assign(new Error('Rate limit exceeded for manual syncs in this workspace'), { code: 'rate-limit' });
   }
@@ -286,13 +291,19 @@ function keepUpdatedStamp(data, prevJson) {
   return strip(data) === strip(prev) ? { ...data, updated: prev.updated } : data;
 }
 
+// "Not allowed", plus how to allow it where the operator can (a hosted tenant cannot set env).
+function notAllowedMessage() {
+  const config = require('../../config');
+  return config.selfHosted ? 'The address is not allowed. ' + require('../ssrf-guard').privateAddressHint() : 'The address is not allowed';
+}
+
 function describeSyncError(err) {
   if (!err) return 'Sync failed';
   // Written for the operator by the built-in resolvers (lib/data-sources/http.js UserFacingError).
   if (typeof err.userMessage === 'string' && err.userMessage) return err.userMessage.slice(0, 300);
   const m = String(err.message || '');
   if (err.name === 'SsrfError' || err.code === 'ssrf' || /^blocked:/i.test(m)) {
-    return 'The address is not allowed';
+    return notAllowedMessage();
   }
   if (err.code === 'timeout' || /timed out/i.test(m)) {
     return 'The host did not respond in time';
@@ -317,7 +328,7 @@ function describeSyncError(err) {
     return 'The weather configuration is invalid';
   }
   if (err.code === 'egress-not-allowed') {
-    return 'The address is not allowed';
+    return notAllowedMessage();
   }
   if (/could not be parsed|parse/i.test(m)) {
     return 'The data could not be parsed';
@@ -412,6 +423,7 @@ module.exports = {
   syncDataSource,
   bumpDependentWidgets,
   describeSyncError,
+  notAllowedMessage,
   getWorkspaceDataMapSync,
   withFetchSlot,
   syncIntervalMin,

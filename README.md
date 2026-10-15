@@ -175,7 +175,8 @@ a kiosk and it has not been certified on hardware; see [docs/vega-player.md](doc
 
 ### Requirements
 
-- Node.js **20.6+** (the npm scripts use the built-in `--env-file-if-exists` flag, added in 20.6)
+- Node.js **22.14+** — required. Since 3.0 the server refuses to start on an older Node (exit code 78)
+  rather than crash-looping; see [Upgrading to 3.0](docs/upgrading-to-3.0.md). `.nvmrc` pins the major.
 - Linux, macOS, or Windows
 - SQLite (bundled via `better-sqlite3`; no separate install needed — `npm install` handles the native bindings)
 - **ffmpeg** (optional but recommended) — powers video thumbnails and duration extraction
@@ -209,6 +210,8 @@ Schema migrations run automatically on first boot — no manual migration comman
 | `HTTPS_PORT` | HTTPS port (used when SSL certs are present) | `3443` |
 | `NODE_ENV` | Runtime env (`production` enables Express production optimizations + stricter error handling) | _(none)_ |
 | `SELF_HOSTED` | First user gets all features unlocked | `false` |
+| `OUTBOUND_ALLOW_HOSTS` | Hosts, `*.suffixes`, IPs or CIDRs that calendars, data sources, webhooks, OIDC and AI may reach on a private network (refused by default). Cloud metadata stays blocked. See [Outbound requests](docs/outbound-requests.md). | _(none)_ |
+| `OUTBOUND_ALLOW_PRIVATE` | Open every private-network range at once (single-tenant installs) | `false` |
 | `HIDE_BILLING` | Hide the Subscription nav item + billing view; `#/billing` redirects to the dashboard (UI-only, opt-in) | `false` |
 | `DISABLE_REGISTRATION` | Block new account creation (including OAuth auto-signup). First-user setup on an empty DB is still allowed. | `false` |
 | `DISABLE_HOMEPAGE` | Redirect `/` to `/app` instead of serving the marketing landing page. For internal-only self-hosted deployments. | `false` |
@@ -222,6 +225,8 @@ Schema migrations run automatically on first boot — no manual migration comman
 | `PING_TIMEOUT` | Socket.IO Engine.IO pong wait (ms). Lower = faster dead-socket detection; higher = more forgiving of laggy clients. | `30000` |
 | `HEARTBEAT_INTERVAL` | App-level offline-checker frequency (ms). How often the server sweeps the device list looking for stale heartbeats. | `10000` |
 | `HEARTBEAT_TIMEOUT` | How long without an app-level heartbeat (ms) before marking a device offline. Raise for slow/jittery networks. | `45000` |
+| `RATE_LIMIT_BACKSTOP` | Global abuse backstop: requests per minute allowed for ONE credential (dashboard session, API token, device token), wherever it connects from. Sits above the per-endpoint limits (login, uploads, MCP...), which are unchanged. Static assets, content downloads, `/download/*` and socket.io are never counted. `0` turns the backstop off entirely. | `6000` |
+| `RATE_LIMIT_BACKSTOP_ANON` | The same backstop for requests with no credential: per minute, per client IP, or per IP + device for player requests that name their device (`?device=`, `?device_id=`). Many panels behind one NAT do not share a bucket once they carry a token or device id. `0` stops limiting anonymous requests (credentialed ones still use `RATE_LIMIT_BACKSTOP`). A 429 carries `Retry-After` and `RateLimit` headers. | `6000` |
 | `MAX_FILE_SIZE` | Largest upload the server will accept. Bytes, or a suffix (`2GB`, `1500MB`). **A reverse proxy caps this independently** — see below. | `500MB` |
 | `COMMAND_QUEUE_TTL_MS` | How long the server holds commands and playlist-updates for a device that's offline at emit time (ms). Flushed in order on reconnect within this window; dropped past TTL. | `30000` |
 | `OTA_ALLOW_MANAGED_DEVICES` | Let Android players self-update even when an MDM/DPC owns the device. Off by default — see below before enabling. | `0` |
@@ -679,8 +684,9 @@ the ways a box ends up with the wrong `node_modules`:
 
 - **rolling back** to an older tag restores that tag's `package.json` but not its packages — and you
   are rolling back because something is already wrong;
-- **upgrading Node** leaves `better-sqlite3` compiled against the previous ABI, which fails in a way
-  that reads like database corruption and is not.
+- **upgrading Node** to one too old for `better-sqlite3` (Node-API 10, Node 22.14+): preflight then
+  uses the built-in `node:sqlite` where the Node has it, and otherwise stops with "upgrade Node"
+  instead of letting the module crash the process.
 - **upgrading with `git pull`** and a restart (by hand, or under pm2) instead of `upgrade.sh`: the
   new release's lockfile arrives but its packages do not. Without the version check the server ran
   on the old ones, and with them the old security bugs; now it updates them on that first restart.
@@ -796,6 +802,8 @@ User=screentinker
 WorkingDirectory=/opt/screentinker/server
 ExecStart=/usr/bin/node server.js
 Restart=always
+# 78 = the server refused to start because Node is older than 22.14 - restarting will not help.
+RestartPreventExitStatus=78
 Environment=PORT=3001
 Environment=NODE_ENV=production
 Environment=SELF_HOSTED=true
@@ -1159,7 +1167,7 @@ scripts/          Device setup scripts + admin recovery
 
 ## Tech Stack
 
-- **Backend:** Node.js 22.12+, Express, Socket.IO, SQLite (better-sqlite3)
+- **Backend:** Node.js 22.14+, Express, Socket.IO, SQLite (better-sqlite3)
 - **Frontend:** Vanilla JS SPA (no framework, no build step), ES modules, Service Worker for offline support
 - **Android:** Kotlin, ExoPlayer, Socket.IO client
 - **Auth:** JWT with bcrypt, Google/Microsoft OAuth (optional)

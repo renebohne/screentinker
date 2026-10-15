@@ -94,5 +94,18 @@ test('rss widget: an ARRAY feed_url cannot break out of the JS string (non-strin
   seed('rss2', 'rss', { feed_url: ["');alert(document.domain);//"] });
   const html = await render('rss2');
   assert.ok(!html.includes("');alert(document.domain)"), 'unescaped quote must not break the JS string context');
-  assert.ok(html.includes('&#39;'), 'the quote is escaped, so the payload is inert data');
+  // 3.0 news feeds: the feed address is no longer written into the page at all. The page gets a
+  // signed /api/news-feeds/items path built from a URL that parses, and a non-string is no URL.
+  assert.ok(!html.includes('alert('), 'the payload is not in the page in any form');
+  assert.match(html, /"url":""/, 'no feed to read');
+});
+
+test('rss widget: a feed URL with quotes and markup reaches the page only as an encoded, signed path', async () => {
+  seed('rss3', 'rss', { feed_url: 'https://example.com/feed?x=\'</script><script>alert(1)</script>' });
+  const html = await render('rss3');
+  assert.ok(!/<script>alert\(1\)/.test(html), 'no markup breakout');
+  assert.ok(!html.includes("x='"), 'no raw quote from the URL');
+  // In the page's JSON block, so `&` is written \u0026.
+  assert.match(html, /\/api\/news-feeds\/items\?m=feed\\u0026u=https%3A%2F%2Fexample\.com%2Ffeed/);
+  assert.ok(!html.includes('rss2json'), 'no third-party converter');
 });

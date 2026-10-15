@@ -31,6 +31,7 @@ from PySide6.QtQuick import QQuickWindow  # noqa: F401 — makes rootObjects() c
 
 from . import capabilities
 from .config import Config
+from .logic import screen_share
 from .logic.kiosk import SessionQueue
 from .logic.offline_play_queue import OfflinePlayQueue, make_play, new_id
 from .net import device_http
@@ -137,6 +138,7 @@ class App:
         self.blanked = False
         self.talk_active = False
         self.live_active = False
+        self.share_id = None            # 3.0 screen share: the session on screen, or None
         self.frame_key = new_frame_key()
         self.frames_port = None
         self.media_volume = self.config.get("media_volume", 1.0)
@@ -346,6 +348,12 @@ class App:
             self.on_ui(lambda: self._talk_start(d))
         elif event == "device:talk-stop":
             self.on_ui(self._talk_stop)
+        elif event == "device:screenshare-start":
+            self.on_ui(lambda: self._share_start(d))
+        elif event == "device:screenshare-stop":
+            self.on_ui(lambda: self._share_stop(d))
+        elif event == "device:screenshare-code":
+            self.on_ui(lambda: self._share_code(d))
         elif event == "device:pty-open":
             asyncio.ensure_future(self.pty.open(d))
         elif event == "device:pty-input":
@@ -848,7 +856,7 @@ class App:
         self.set_blank(off, reason="schedule")
 
     def restore_mute(self):
-        muted = self.blanked or self.talk_active or bool(self.stage.triggerVisible)
+        muted = self.blanked or self.talk_active or bool(self.share_id) or bool(self.stage.triggerVisible)
         self.stage.set("muted", muted)
         self.slide_audio_player.set_master(1.0, muted)
 
@@ -1001,8 +1009,63 @@ class App:
         self._rtc_js("ST.liveStart(%s)" % self._creds_json(opts), delay)
 
     def _maybe_close_rtc(self):
-        if not self.talk_active and not self.live_active:
-            QTimer.singleShot(1000, lambda: (not self.talk_active and not self.live_active) and self.stage.set("rtcActive", False))
+        def idle():
+            return not self.talk_active and not self.live_active and not self.share_id
+        if idle():
+            QTimer.singleShot(1000, lambda: idle() and self.stage.set("rtcActive", False))
+
+    # ------------------------------------------------------------------ 3.0 screen share
+    # The receiver is the server's own /player/screen-share.js in the WebRTC page (ui/rtc_page.py), so
+    # this panel speaks the web player's protocol byte for byte, and its fullscreen overlay and
+    # "Shared by" badge are the web player's. logic/screen_share.py decides what to do with the
+    # events. The content keeps playing underneath, muted, and is visible again when the share ends
+    # however it ends (the page reports "[rtc] share stopped <reason>", see on_rtc_log).
+    def _share_start(self, d):
+        opts = screen_share.start_opts(d)
+        if not opts or not self.config.device_token:
+            return
+        self.share_id = opts["sessionId"]
+        self.stage.set("shareActive", True)
+        self.restore_mute()
+        delay = self._ensure_rtc()
+        self._rtc_js("ST.shareStart(%s)" % self._creds_json(opts), delay)
+
+    def _share_stop(self, d):
+        stop_id = d.get("session_id") if isinstance(d.get("session_id"), str) else None
+        if not screen_share.stop_applies(self.share_id, stop_id):
+            return
+        import json
+        reason = d.get("reason") if isinstance(d.get("reason"), str) else "stopped"
+        self.stage.rtcCommand.emit("ST.shareStop(%s, %s)" % (json.dumps(self.share_id), json.dumps(reason)))
+        self._share_ended()
+
+    def _share_ended(self):
+        self.share_id = None
+        self.stage.set("shareActive", False)
+        self.restore_mute()
+        self._maybe_close_rtc()
+
+    def _share_code(self, d):
+        """The meeting-room code (ui/qml/ShareCode.qml). The QR arrives as a PNG data URL; it is
+        written to the state dir and shown from there, so the badge never fetches anything."""
+        parsed = screen_share.parse_code(d)
+        if not parsed:
+            self.stage.set("shareCode", "")
+            return
+        code, shown, qr = parsed
+        url = ""
+        if qr:
+            try:
+                path = os.path.join(self.config.state_dir, "share-qr.png")
+                with open(path, "wb") as f:
+                    f.write(qr)
+                self._share_qr_n = getattr(self, "_share_qr_n", 0) + 1
+                url = QUrl.fromLocalFile(path).toString() + "?n=%d" % self._share_qr_n   # defeat the image cache
+            except OSError:
+                url = ""
+        self.stage.set("shareCodeQr", url)
+        self.stage.set("shareCodeUrl", shown)
+        self.stage.set("shareCode", code)
 
     def on_rtc_log(self, msg):
         parts = msg.split(" ", 3)
@@ -1015,6 +1078,11 @@ class App:
                 self.restore_mute()
         elif len(parts) >= 3 and parts[1] == "live" and parts[2] == "stopped":
             self.live_active = False
+        elif len(parts) >= 4 and parts[1] == "share" and parts[2] in ("stopped", "unsupported"):
+            # The page ended the share itself (sharer left, connection failed, time limit, …). Only
+            # for the share on screen: a replaced one reports its end after its successor started.
+            if self.share_id and screen_share.stop_applies(self.share_id, parts[3].split(" ", 1)[0] or "-"):
+                self._share_ended()
         if self.debug_mirror:
             self.log_remote("info", "rtc", msg, mirror=True)
 

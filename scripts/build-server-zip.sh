@@ -203,9 +203,9 @@ if 'better-sqlite3' in d.get('optionalDependencies', {}):
     print("    dropped better-sqlite3 (the player falls back to node:sqlite)")
 if 'better-sqlite3' in d.get('dependencies', {}):
     sys.exit("ERROR: better-sqlite3 is a hard dependency again - the player cannot build native code.")
-# The player has Node 24, and node:sqlite is unflagged only from 23.4 - on 22.x it needs
-# --experimental-sqlite and the fallback would not load. Say so, so an install on anything older
-# fails loudly rather than at the first query.
+# The player has Node 24, and this bundle has only node:sqlite (unflagged from 22.13, but tested on
+# 24 only). Say so, so an install on anything older fails loudly rather than at the first query;
+# server/lib/node-guard.js enforces this floor at boot.
 d['engines'] = {'node': '>=24.0.0'}
 json.dump(d, open(pkg, 'w'), indent=2)
 PY

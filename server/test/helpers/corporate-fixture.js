@@ -30,12 +30,13 @@ function freshDb({ views = true, guards = true } = {}) {
     CREATE TABLE widgets (id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT);
     CREATE TABLE playlists (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL DEFAULT '',
       description TEXT, status TEXT NOT NULL DEFAULT 'draft', published_snapshot TEXT, published_structure TEXT,
-      playback_order TEXT, published_playback_order TEXT, smart_rules TEXT, is_auto_generated INTEGER NOT NULL DEFAULT 0, updated_at INTEGER, user_id TEXT);
+      playback_order TEXT, published_playback_order TEXT, smart_rules TEXT, is_auto_generated INTEGER NOT NULL DEFAULT 0, updated_at INTEGER, user_id TEXT,
+      layout_id TEXT, published_layout_id TEXT);
     CREATE TABLE playlist_items (id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id TEXT NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
       content_id TEXT REFERENCES content(id) ON DELETE CASCADE, widget_id TEXT, child_playlist_id TEXT REFERENCES playlists(id) ON DELETE RESTRICT,
       zone_id TEXT, sort_order INTEGER NOT NULL DEFAULT 0, duration_sec INTEGER, muted INTEGER NOT NULL DEFAULT 0,
       play_from TEXT, play_until TEXT, enabled INTEGER NOT NULL DEFAULT 1, log_play INTEGER NOT NULL DEFAULT 1, fit_mode TEXT,
-      play_when TEXT, weight INTEGER NOT NULL DEFAULT 1, repeat_every_sec INTEGER);
+      play_when TEXT, weight INTEGER NOT NULL DEFAULT 1, repeat_every_sec INTEGER, play_to_end INTEGER);
     CREATE INDEX idx_playlist_items_child ON playlist_items(child_playlist_id);
     CREATE TABLE playlist_item_schedules (id TEXT PRIMARY KEY, playlist_item_id INTEGER NOT NULL REFERENCES playlist_items(id) ON DELETE CASCADE,
       active_days TEXT, start_time TEXT, end_time TEXT, start_date TEXT, end_date TEXT, sort_order INTEGER NOT NULL DEFAULT 0);

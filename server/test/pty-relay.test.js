@@ -12,7 +12,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createPtyRelay, MAX_FRAME_B64 } = require('../lib/pty-relay');
+const { createPtyRelay, MAX_FRAME_B64, REAUTH_MS } = require('../lib/pty-relay');
 
 function harness(opts = {}) {
   const sent = [];   // { ns, to, event, payload }
@@ -183,4 +183,20 @@ test('system.pty is a real, separate capability and never a mesh command', () =>
   for (const [family, list] of Object.entries(caps.BASELINE)) {
     assert.equal(list.includes('system.pty'), false, `${family} baseline must not hand out a terminal`);
   }
+});
+
+test('access revoked mid-session: the next input after the re-auth window ends the shell on both sides', () => {
+  const forbid = [];
+  const h = harness({ forbid });
+  const a = h.sock('dash-a');
+  const sid = h.relay.open(a, { device_id: 'pi-1' });
+  assert.equal(h.relay.input(a, { session_id: sid, data: 'bHMK' }), true);
+  forbid.push('u1:pi-1');                       // demoted / removed / support grant revoked
+  assert.equal(h.relay.input(a, { session_id: sid, data: 'bHMK' }), true, 'within the window: not re-asked yet');
+  h.clock.t += REAUTH_MS;
+  assert.equal(h.relay.input(a, { session_id: sid, data: 'cm0K' }), false, 'refused once re-asked');
+  assert.deepEqual(h.last('device:pty-close').payload, { session_id: sid });
+  assert.equal(h.last('dashboard:pty-exit').payload.reason, 'forbidden');
+  assert.equal(h.relay._sessions.size, 0);
+  assert.equal(h.relay.input(a, { session_id: sid, data: 'bHMK' }), false, 'the id is dead');
 });

@@ -32,6 +32,7 @@ function runReset(search, store) {
   }
   const scope = {
     SCREEN_SUFFIX: '',
+    LINK_SUFFIX: '',   // 3.0: plain /player (no ?k=) has no per-link namespace
     STORAGE_KEY: 'rd_config',
     PLAYLIST_CACHE_KEY: 'rd_playlist_cache',
     LAYOUT_CACHE_KEY: 'rd_layout_cache',
@@ -123,6 +124,7 @@ test('storage being unavailable does not throw — a dying panel must still boot
   }
   const scope = {
     SCREEN_SUFFIX: '',
+    LINK_SUFFIX: '',   // 3.0: plain /player (no ?k=) has no per-link namespace
     STORAGE_KEY: 'rd_config', PLAYLIST_CACHE_KEY: 'p', LAYOUT_CACHE_KEY: 'l',
     getConfig: () => ({}),
     localStorage: { getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); }, removeItem() { throw new Error('denied'); } },

@@ -94,7 +94,12 @@ const NOT_WORKSPACE_SCOPED = Object.freeze({
   'ota-rollouts.js': 'platform admin: a player rollout is the whole instance\'s fleet, not a workspace\'s',
   // route file -> why its writes are not workspace writes (and so cannot land on a copied workspace)
   'auth.js': 'account/session endpoints; login on a replica proxies for copied users (routes/auth.js /login)',
+  'passkeys.js': '3.0 passkeys: mounted inside routes/auth.js; per-ACCOUNT credentials and sign-in, no workspace data',
   'org-sso.js': 'organization-level SSO configuration; not replicated (§3.1)',
+  // 3.0 SCIM: organization-level identity provisioning. Group access is only ever applied to LOCAL
+  // workspaces (lib/scim/provision.js filters origin_node_id IS NULL), so a copied one is never written.
+  'scim.js': 'identity provisioning from an organization\'s IdP; never writes a copied workspace (lib/scim/provision.js)',
+  'org-scim.js': 'organization-level provisioning settings; mappings refuse a copied workspace',
   'subscription.js': 'billing, owner-only, not scaled (Phase D)',
   'stripe.js': 'webhook from Stripe, not a user write',
   'billing.js': 'billing, not scaled',
@@ -113,6 +118,8 @@ const NOT_WORKSPACE_SCOPED = Object.freeze({
   'plugin-submissions.js': 'mounted with tenancy in api-surface; listed for the inline rate-limit mount',
   'agency.js': 'agency-token surface, mounted behind bearerAuth + resolveTenancy (AGENCY_ROUTERS)',
   'kiosk.js': 'mounted with tenancy (PUBLIC_ROUTERS)',
+  // 3.0 content requests: the public form has no session; the workspace comes from the form code.
+  'request-public.js': 'public request form; a router.param(code) guard forwards every mutating call for a copied workspace to the primary (and the status cancel does the same), asserted below',
   // Writes one column on a users row, authorised by an HMAC in an email link — not a workspace write.
   // ⚠️ It is NOT simply exempt: `users` IS copied and `email_alerts` is not blocklisted, so the POST
   // proxies to the primary for a copied user (same isCopiedUser test routes/auth.js uses for login).
@@ -137,6 +144,10 @@ const NOT_WORKSPACE_SCOPED = Object.freeze({
   // session. Not exempt on trust: a guard forwards every action for a copied workspace to the
   // primary before the body is read (asserted below).
   'room-panel.js': 'room display actions; a guard forwards every one for a copied workspace to the primary (asserted below)',
+  // 3.0 site cache: the cache BOX's own door, authenticated by its token. Its one write is that cache
+  // row's status columns (disk, hits, last seen), which are display only and never replicated.
+  'site-cache-node.js': 'site cache box status report, authenticated by the box token; writes only its own site_caches status columns',
+  'screen-share-guest.js': '3.0 meeting-room screen share join: spends an in-memory code and mints an in-memory session on the node the screen is connected to; writes no workspace row (only the activity_log audit line)',
 });
 
 const INLINE_NOT_WORKSPACE_SCOPED = Object.freeze({
@@ -145,6 +156,8 @@ const INLINE_NOT_WORKSPACE_SCOPED = Object.freeze({
   '/api/trigger': 'LAN trigger from a player/sensor, device-authenticated',
   '/api/widgets/:id/telemetry': 'player-authenticated widget telemetry',
   '/api/plugin-submissions': 'rate-limit mount only; the handler is the tenancy router',
+  '/api/migrate/jobs': '3.0 switch to ScreenTinker: rate-limit mount only; the handler is the tenancy router (routes/migrate.js)',
+  '/api/migrate/jobs/upload': '3.0 switch to ScreenTinker: rate-limit mount only; the handler is the tenancy router (routes/migrate.js)',
   '/api/admin/plugins/submissions': 'platform-admin, node-local',
   '/api/device/exit': 'player exit beacon, device-authenticated',
   '/api/devices/:id/live/publish': 'device-authenticated live-video publish',
@@ -195,8 +208,12 @@ test('test_every_mutating_route_passes_resolveTenancy: no second writer can hide
   assert.match(workspaces, /router\.param\('id'/, 'workspaces.js: router.param guard');
   assert.match(workspaces, /replicaProxy\.shouldIntercept\(req, ws\)\) return replicaProxy\.proxyToPrimary\(req, res, appConfig\)/);
   assert.match(workspaces, /isCopiedOrganization\(organizationId\)\) return replicaProxy\.proxyToPrimary/);
+  const requestPublic = read('routes/request-public.js');
+  assert.match(requestPublic, /router\.param\('code'[\s\S]{0,300}replicaProxy\.shouldIntercept\(req, ws\)\) return replicaProxy\.proxyToPrimary\(req, res, appConfig\)/,
+    'request-public.js: the copy guard runs as a param handler, before the chunk body parser');
   const status = read('routes/status.js');
-  assert.match(status, /router\.post\('\/import', proxyImportIfCopied, importUpload/, 'status.js: the import guard runs before multer');
+  // authenticateImport (the session check) also runs before multer, after the copy guard.
+  assert.match(status, /router\.post\('\/import', proxyImportIfCopied, (authenticateImport, )?importUpload/, 'status.js: the import guard runs before multer');
   assert.match(status, /replicaProxy\.shouldIntercept\(req, ws\)\) return replicaProxy\.proxyToPrimary\(req, res, config\)/);
 });
 

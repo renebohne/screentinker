@@ -99,11 +99,12 @@ before(async () => {
   S.adminToken = reg.body.token;
   assert.equal(reg.body.user.role, 'platform_admin', 'first user is platform_admin');
 
-  // Enroll TOTP, then log in again to obtain a genuine mfa_pending token. The pre-existing
-  // session token stays valid across enrollment (see totp.test.js), so S.adminToken is
-  // still our "full session" fixture for the same account.
+  // Enroll TOTP, then log in again to obtain a genuine mfa_pending token. Since 3.0 enabling TOTP
+  // ends every other session and returns a fresh one for this caller (token_version), which is
+  // our "full session" fixture for the same account.
   const setup = await jfetch('/api/auth/totp/setup', post(S.adminToken, {}));
-  await jfetch('/api/auth/totp/enable', post(S.adminToken, { code: authenticator.generate(setup.body.secret) }));
+  const enabled = await jfetch('/api/auth/totp/enable', post(S.adminToken, { code: authenticator.generate(setup.body.secret) }));
+  S.adminToken = enabled.body.token;
   const login = await jfetch('/api/auth/login', post(null, { email: S.adminEmail, password: PW }));
   assert.equal(login.body.mfa_required, true, 'login now stops at the TOTP step');
   assert.equal(login.body.token, undefined, 'no full session token before TOTP');

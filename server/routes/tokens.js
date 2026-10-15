@@ -3,6 +3,8 @@
 // self-escalation). A user manages their own tokens, bound to their active workspace.
 const express = require('express');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const crypto = require('crypto');
 const { db } = require('../db/database');
 const { generateToken, hashToken, displayPrefix } = require('../middleware/apiToken');
@@ -148,12 +150,27 @@ router.delete('/:id', (req, res) => {
   res.json({ success: true });
 });
 
+// ⚠️ The mint-time viewer check (POST /) is not enough on its own: an owner demoted to
+// workspace_viewer AFTER minting could still re-point their agency token's targets / upload folder.
+// Judge the owner's CURRENT role in the token's BOUND workspace (not the active one), with platform
+// powers stripped exactly as apiTokenAuth strips them at use time. Sends the 403 and returns true.
+function denyReadOnlyTokenOwner(req, res, tok) {
+  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(tok.workspace_id);
+  const ctx = ws ? accessContext(req.user.id, 'user', ws) : null;
+  if (!ctx || (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer')) {
+    res.status(403).json({ error: 'Read-only members cannot change an agency token' });
+    return true;
+  }
+  return false;
+}
+
 // #73: re-designate an agency token's playlist allowlist (atomic replace). JWT-only (this
 // whole router is JWT-only), so an agency token can never widen its OWN targets.
 router.put('/:id/targets', (req, res) => {
   const tok = db.prepare('SELECT id, scope, workspace_id FROM api_tokens WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!tok) return res.status(404).json({ error: 'Token not found' });
   if (tok.scope !== 'agency') return res.status(400).json({ error: 'only agency tokens have targets' });
+  if (denyReadOnlyTokenOwner(req, res, tok)) return;
   const ids = Array.isArray(req.body.target_playlist_ids) ? req.body.target_playlist_ids : [];
   if (!ids.length) return res.status(400).json({ error: 'target_playlist_ids must be a non-empty array' });
   const inWs = db.prepare('SELECT id FROM playlists WHERE id = ? AND workspace_id = ?');
@@ -179,6 +196,7 @@ router.put('/:id/upload-folder', (req, res) => {
   const tok = db.prepare('SELECT id, scope, workspace_id FROM api_tokens WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!tok) return res.status(404).json({ error: 'Token not found' });
   if (tok.scope !== 'agency') return res.status(400).json({ error: 'only agency tokens have an upload folder' });
+  if (denyReadOnlyTokenOwner(req, res, tok)) return;
   const folderId = req.body.upload_folder_id || null;
   if (folderId) {
     const f = db.prepare('SELECT id, workspace_id FROM content_folders WHERE id = ?').get(folderId);

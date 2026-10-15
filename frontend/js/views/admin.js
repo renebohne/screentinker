@@ -13,6 +13,19 @@ import { openTypeToConfirmModal } from '../components/type-to-confirm-modal.js';
 // second mapper.
 import { mapMutationError } from './workspace-members.js';
 import { mountInstanceStorage } from '../components/storage-settings.js';
+import { reportHtml, mountOutbound, mountPublicToggle } from '../components/trust-report.js';
+import { mountServerMove } from '../components/org-move.js';
+
+async function loadTrustInstance() {
+  const el = document.getElementById('trustInstance');
+  if (!el) return;
+  try { el.innerHTML = reportHtml(await api.get('/trust/report?scope=instance')); }
+  catch (e) { el.innerHTML = `<p style="color:var(--text-muted)">${esc(e.message)}</p>`; }
+  mountOutbound(document.getElementById('trustOutboundInstance'), { instance: true });
+  mountPublicToggle(document.getElementById('trustPublic'));
+  // 3.0 export / import the whole server (components/org-move.js, docs/move-server.md).
+  mountServerMove(document.getElementById('trustServerMove'));
+}
 
 const headers = () => ({ Authorization: `Bearer ${localStorage.getItem('token')}`, 'Content-Type': 'application/json' });
 // A refused request must reject, not resolve.
@@ -179,8 +192,21 @@ ${section(t('admin.orgs.title'), t('admin.orgs.desc'), `
       <div id="diagBody"><p style="color:var(--text-muted)">${t('common.loading')}</p></div>
     </div>
       ${section(esc(t('platform.system.status_endpoint')), '', `<div id="statusDebugForm">${loading()}</div>`)}
+      ${section(esc(t('platform.tvsafe.title')), esc(t('platform.tvsafe.desc')), `<div id="tvSafeForm">${loading()}</div>`)}
+      <div id="sharePresentersSection">${section(esc(t('screen_share.admin.title')), esc(t('screen_share.admin.desc')), `<div id="sharePresentersForm">${loading()}</div>`)}</div>
+      <div id="stockKeysSection">${section(esc(t('stock.admin.title')), esc(t('stock.admin.desc')), `<div id="stockKeysForm">${loading()}</div>`)}</div>
       ${section(esc(t('platform.system.player_debug')), esc(t('platform.system.player_debug_desc')), `<a class="btn btn-secondary" href="#/admin/player-debug">${esc(t('platform.system.player_debug_open'))} &rarr;</a>`)}`,
-    load: () => { loadSystem(); mountInstanceStorage(document.getElementById('instanceStorage')); loadDiagnostics(); wireDiagnostics(); loadStatusDebug(); },
+    load: () => { loadSystem(); mountInstanceStorage(document.getElementById('instanceStorage')); loadDiagnostics(); wireDiagnostics(); loadStatusDebug(); loadTvSafe(); loadSharePresenters(); loadStockKeys(); },
+  },
+  // 3.0 "Your data, provably" (components/trust-report.js, docs/trust.md): the instance's data
+  // handling report, every external host contacted, and the optional public /trust page.
+  privacy: {
+    tab: 'platform.tab.privacy', title: 'trust.platform.title', subtitle: 'trust.platform.subtitle',
+    html: () => `<div id="trustInstance">${loading()}</div>
+      ${section(esc(t('trust.out.title')), esc(t('trust.out.desc_instance')), '<div id="trustOutboundInstance"></div>')}
+      ${section(esc(t('imp.server.title')), '', '<div id="trustServerMove"></div>')}
+      ${section(esc(t('trust.pub.title_admin')), '', '<div id="trustPublic"></div>')}`,
+    load: () => loadTrustInstance(),
   },
   cleanup: {
     tab: 'platform.tab.cleanup', title: 'platform.cleanup.title', subtitle: 'platform.cleanup.subtitle',
@@ -244,7 +270,8 @@ function formatBytes(n) {
   const b = Number(n) || 0;
   if (b < 1024 * 1024) return `${Math.round(b / 1024)} KB`;
   if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(1)} MB`;
-  return `${(b / 1024 ** 3).toFixed(2)} GB`;
+  if (b < 1024 ** 4) return `${(b / 1024 ** 3).toFixed(b < 100 * 1024 ** 3 ? 2 : 0)} GB`;
+  return `${(b / 1024 ** 4).toFixed(2)} TB`;
 }
 
 /*
@@ -258,8 +285,8 @@ async function loadAttentionDetail(d) {
   const ago = (sec) => (sec ? relAgo(sec) : t('platform.att.never'));
   const table = (heads, rows) => rows.length ? `<div class="table-wrap"><table class="att-table"><thead><tr>${heads.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead>
     <tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : `<p class="platform-empty">${esc(t('platform.att.nothing_now'))}</p>`;
-  let r;
-  try { r = await api.adminAttention(item); } catch (err) { body.innerHTML = `<p style="color:var(--danger)">${esc(err.message)}</p>`; return; }
+  let r = {};
+  if (item !== 'host') try { r = await api.adminAttention(item); } catch (err) { body.innerHTML = `<p style="color:var(--danger)">${esc(err.message)}</p>`; return; }
   switch (item) {
     case 'sso':
       body.innerHTML = `<p class="att-why">${esc(t('platform.att.sso_why'))}</p>` +
@@ -270,6 +297,9 @@ async function loadAttentionDetail(d) {
       body.innerHTML = `<p class="att-why">${esc(t('platform.att.plugins_why'))}</p>` +
         table([t('platform.att.col_plugin'), t('platform.att.col_version'), t('platform.att.col_submitted_by'), t('platform.att.col_waiting')],
           r.rows.map((x) => [esc(x.name || x.plugin_id), esc(x.version || '—'), esc(x.submitted_by || '—'), esc(ago(x.submitted_at))])) + go(t('platform.att.go_plugins'));
+      break;
+    case 'host':
+      body.innerHTML = `<p class="att-why">${esc(t('platform.host.att_why'))}</p>`;
       break;
     case 'update':
       body.innerHTML = `<p class="att-why">${esc(t('platform.att.update_why', { current: r.current, latest: r.latest || '?' }))}</p>` + go(t('platform.att.go_system'));
@@ -309,6 +339,83 @@ function relAgo(sec) {
   return t('platform.att.ago_d', { n: Math.round(d / 86400) });
 }
 
+/*
+ * 3.0: this server's machine — disk, CPU, memory (GET /api/admin/host, lib/host-stats.js). Refreshed
+ * every 10 s while the overview is on screen; the timer stops itself once the section is gone.
+ */
+let hostTimer = null;
+function pctBar(pct, warnAt = 85) {
+  const p = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+  return `<span class="host-bar"><span class="${pct != null && pct >= warnAt ? 'warn' : ''}" style="width:${p}%"></span></span>`;
+}
+function durationShort(sec) {
+  if (!(sec > 0)) return '—';
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+  return d ? t('platform.host.uptime_d', { d, h }) : h ? t('platform.host.uptime_h', { h, m }) : t('platform.host.uptime_m', { m });
+}
+// 3.0 TV-safe video copies (server/lib/video-variants.js): the encode queue beside the CPU it uses.
+// Shown once the server has had any copy to make (or when the feature is switched off).
+function tvCard(v) {
+  if (!v || (!v.queued && !(v.running || []).length && !v.failed && !v.ready && v.enabled)) return '';
+  const now = (v.running || [])[0];
+  const wait = { cpu: 'platform.host.tv_wait_cpu', window: 'platform.host.tv_wait_window', no_ffmpeg: 'platform.host.tv_wait_ffmpeg', disabled: 'platform.host.tv_wait_disabled' }[v.waiting];
+  const main = now ? t('platform.host.tv_now', { name: now.filename || now.content_id, secs: now.seconds })
+    : wait ? t(wait) : v.queued ? t('platform.host.tv_queue', { n: v.queued }) : t('platform.host.tv_idle');
+  const sub = [now && v.queued ? t('platform.host.tv_queue', { n: v.queued }) : '', v.failed ? t('platform.host.tv_failed', { n: v.failed }) : '', v.encoder || '']
+    .filter(Boolean).join(' · ');
+  return `<div class="host-card">
+        <span class="host-k">${esc(t('platform.host.tv'))}</span>
+        <span class="host-v" style="font-size:14px">${esc(main)}</span>
+        <span class="host-s">${esc(sub)}</span>
+      </div>`;
+}
+async function loadHost() {
+  clearTimeout(hostTimer);
+  const el = document.getElementById('platformHost');
+  if (!el) return;
+  let h;
+  try { h = await api.adminHost(); } catch (err) { el.innerHTML = ''; return; }
+  if (!document.contains(el)) return;
+  const disk = (d) => {
+    const used = d.total - d.free;
+    const pct = Math.round((used / d.total) * 1000) / 10;
+    return `<div class="host-card" title="${esc(d.path)}">
+      <span class="host-k">${esc(t(d.role === 'uploads' ? 'platform.host.disk_uploads' : 'platform.host.disk'))}</span>
+      <span class="host-v">${esc(t('platform.host.pct_used', { n: Math.round(pct) }))}</span>
+      ${pctBar(pct, 90)}
+      <span class="host-s">${esc(t('platform.host.disk_free', { free: formatBytes(d.free), total: formatBytes(d.total) }))}</span>
+    </div>`;
+  };
+  const cpu = h.cpu || {};
+  const mem = h.memory || {};
+  const memUsed = mem.total && mem.available != null ? mem.total - mem.available : null;
+  const memPct = memUsed != null ? Math.round((memUsed / mem.total) * 1000) / 10 : null;
+  const warn = (h.warnings || []).map((w) => w.kind === 'disk_low'
+    ? t('platform.host.warn_disk', { free: formatBytes(w.free) })
+    : t('platform.host.warn_mem', { free: formatBytes(w.available) }));
+  el.innerHTML = `
+    <h3 class="platform-subhead">${esc(t('platform.host.title'))} <span class="host-name">${esc(h.hostname || '')}</span></h3>
+    ${warn.length ? `<p class="host-warn">&#9888;&#65039; ${warn.map(esc).join(' ')}</p>` : ''}
+    <div class="host-grid">
+      ${(h.disks || []).map(disk).join('') || `<div class="host-card"><span class="host-k">${esc(t('platform.host.disk'))}</span><span class="host-v">—</span></div>`}
+      <div class="host-card">
+        <span class="host-k">${esc(t('platform.host.cpu'))}</span>
+        <span class="host-v">${cpu.pct == null ? '—' : esc(t('platform.host.pct_busy', { n: Math.round(cpu.pct) }))}</span>
+        ${pctBar(cpu.pct)}
+        <span class="host-s">${esc(tn('platform.host.cores', cpu.cores || 0))}${cpu.load ? ` · ${esc(t('platform.host.load', { l: cpu.load.join(' / ') }))}` : ''}</span>
+      </div>
+      ${tvCard(h.video_variants)}
+      <div class="host-card">
+        <span class="host-k">${esc(t('platform.host.memory'))}</span>
+        <span class="host-v">${memPct == null ? '—' : esc(t('platform.host.pct_used', { n: Math.round(memPct) }))}</span>
+        ${pctBar(memPct, 90)}
+        <span class="host-s">${memUsed == null ? '' : esc(t('platform.host.mem_used', { used: formatBytes(memUsed), total: formatBytes(mem.total) }))}${mem.process_rss ? ` · ${esc(t('platform.host.mem_app', { n: formatBytes(mem.process_rss) }))}` : ''}</span>
+      </div>
+    </div>
+    <p class="host-foot">${esc(t('platform.host.foot', { db: h.db_bytes ? formatBytes(h.db_bytes) : '—', up: durationShort(h.uptime && h.uptime.process_sec), host: durationShort(h.uptime && h.uptime.host_sec) }))}</p>`;
+  hostTimer = setTimeout(loadHost, 10000);
+}
+
 async function loadOverview() {
   const el = document.getElementById('platformOverview');
   if (!el) return;
@@ -324,6 +431,11 @@ async function loadOverview() {
     if (o.sso_only_requests > 0) attention.push(['sso', '#/platform/orgs', tn('platform.overview.att_sso', o.sso_only_requests), 'warn']);
     if (o.plugin_submissions > 0) attention.push(['plugins', '#/platform/plugins', tn('platform.overview.att_plugins', o.plugin_submissions), 'info']);
     if (o.update_available) attention.push(['update', '#/platform/system', t('platform.overview.att_update', { v: o.latest_version }), 'info']);
+    for (const w of o.host_warnings || []) {
+      attention.push(['host', '#/platform/overview', w.kind === 'disk_low'
+        ? t('platform.host.warn_disk', { free: formatBytes(w.free) })
+        : t('platform.host.warn_mem', { free: formatBytes(w.available) }), 'warn']);
+    }
     if (o.orphaned_plan_users > 0) attention.push(['orphans', '#/platform/billing', tn('platform.overview.att_orphans', o.orphaned_plan_users), 'warn']);
     if (o.stale_accounts_180d > 0) attention.push(['stale', '#/platform/cleanup', tn('platform.overview.att_stale', o.stale_accounts_180d), 'info']);
     if (o.screens_offline_24h > 0) attention.push(['offline', '#/platform/orgs', tn('platform.overview.att_offline', o.screens_offline_24h), 'info']);
@@ -340,6 +452,7 @@ async function loadOverview() {
         ${card('#/platform/orgs', o.devices, t('platform.overview.devices'), t('platform.overview.online', { n: o.devices_online }))}
         ${card('#/platform/billing', o.paying_accounts, t('platform.overview.paying'), tn('platform.overview.trialing', o.trialing))}
       </div>
+      <div id="platformHost"></div>
       <h3 class="platform-subhead">${esc(t('platform.overview.health'))}</h3>
       <div class="platform-minis">
         ${mini('#/platform/users', o.new_users_7d, t('platform.overview.new_7d'))}
@@ -351,6 +464,7 @@ async function loadOverview() {
         ${mini('#/platform/system', formatBytes(o.storage_bytes), t('platform.overview.storage'))}
         ${mini('#/platform/cleanup', o.stale_accounts_180d, t('platform.overview.stale'), t('platform.overview.stale_sub'))}
       </div>
+      <div id="platformFunnel"></div>
       <div class="settings-section">
         <h3>${esc(t('platform.overview.attention'))}</h3>
         ${attention.length ? `<div class="platform-attention">${attention.map(([item, href, text, kind]) => `
@@ -361,6 +475,8 @@ async function loadOverview() {
           : `<p class="platform-empty">${esc(t('platform.overview.all_clear'))}</p>`}
       </div>
       <p class="platform-version">${esc(t('platform.overview.version', { v: o.version }))}</p>`;
+    loadFunnel();
+    loadHost();
     // Details load the first time an item is opened (GET /admin/overview/attention/:item).
     el.querySelectorAll('details.att').forEach((d) => {
       d.addEventListener('toggle', () => { if (d.open && !d.dataset.loaded) { d.dataset.loaded = '1'; loadAttentionDetail(d); } });
@@ -368,6 +484,35 @@ async function loadOverview() {
   } catch (err) {
     el.innerHTML = `<p style="color:var(--danger)">${esc(err.message)}</p>`;
   }
+}
+
+/*
+ * 3.0: the trial-to-paid funnel (GET /api/subscription/funnel, lib/conversion-events.js). Hidden on
+ * a self-hosted instance, which records nothing. Each step is the share of the last 30 days' signups
+ * who reached it, so a change to onboarding or pricing shows up as a moved number, not an anecdote.
+ */
+async function loadFunnel() {
+  const host = document.getElementById('platformFunnel');
+  if (!host) return;
+  let f;
+  try { f = await api.adminConversionFunnel(30); } catch { return; }
+  if (!f || !f.enabled || !Array.isArray(f.steps)) return;
+  const base = (f.steps[0] && f.steps[0].accounts) || 0;
+  const rows = f.steps.map((st) => {
+    const pct = base ? Math.round((st.accounts / base) * 100) : 0;
+    return `<div class="funnel-row">
+        <span class="funnel-label">${esc(t('platform.funnel.step.' + st.event))}</span>
+        <span class="funnel-bar"><span style="width:${pct}%"></span></span>
+        <span class="funnel-n">${esc(String(st.accounts))}${base ? ` · ${pct}%` : ''}</span>
+      </div>`;
+  }).join('');
+  const hits = (f.limit_hits || []).map((h) => `${esc(String(h.code || '?'))}: ${esc(String(h.n))}`).join(' · ');
+  host.innerHTML = `<div class="settings-section">
+      <h3>${esc(t('platform.funnel.title'))}</h3>
+      <p class="platform-empty" style="margin-bottom:10px">${esc(t('platform.funnel.sub', { days: f.days }))}</p>
+      <div class="funnel">${rows}</div>
+      ${hits ? `<p class="platform-empty" style="margin-top:8px">${esc(t('platform.funnel.limit_hits'))} ${hits}</p>` : ''}
+    </div>`;
 }
 
 // #36: list organizations with owner + resource counts; platform admin can
@@ -747,6 +892,136 @@ async function loadStatusDebug() {
   };
 }
 
+/*
+ * 3.0 TV-safe video copies (server/lib/video-variants.js, docs/tv-safe-video.md): how much of this
+ * server's CPU may go to re-encoding tall videos for Samsung TVs. Platform admins only (the server
+ * enforces it); each value also has a VIDEO_VARIANTS_* env default.
+ */
+async function loadTvSafe() {
+  const el = document.getElementById('tvSafeForm');
+  if (!el) return;
+  let data;
+  try { data = await api.adminGetVideoVariants(); }
+  catch (e) { el.innerHTML = `<p style="color:var(--danger)">${esc(e.message || 'Failed to load')}</p>`; return; }
+  const s = data.settings || {};
+  const row = (label, input, hint = '') => `<div class="form-group" style="margin-bottom:10px"><label style="font-size:13px">${esc(label)}</label>${input}${hint ? `<p style="color:var(--text-muted);font-size:12px;margin:4px 0 0">${esc(hint)}</p>` : ''}</div>`;
+  el.innerHTML = `
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:10px">
+      <input type="checkbox" id="tvSafeEnabled" ${s.enabled ? 'checked' : ''}> ${esc(t('platform.tvsafe.enabled'))}
+    </label>
+    ${row(t('platform.tvsafe.window'), `<input class="input" id="tvSafeWindow" style="max-width:140px" placeholder="22-6" value="${esc(s.window || '')}">`, t('platform.tvsafe.window_hint'))}
+    ${row(t('platform.tvsafe.concurrency'), `<select class="input" id="tvSafeConc" style="width:auto">${[1, 2, 3, 4].map((n) => `<option value="${n}" ${Number(s.concurrency) === n ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
+    ${row(t('platform.tvsafe.max_cpu'), `<input class="input" type="number" min="10" max="100" id="tvSafeCpu" style="max-width:100px" value="${esc(String(s.max_cpu ?? 70))}">`)}
+    ${row(t('platform.tvsafe.minutes'), `<input class="input" type="number" min="0" id="tvSafeMinutes" style="max-width:120px" value="${esc(String(s.org_monthly_minutes ?? 0))}">`)}
+    <p style="color:var(--text-muted);font-size:12px;margin:0 0 10px">${esc(t('platform.tvsafe.env_hint'))}</p>
+    <button class="btn btn-primary btn-sm" id="tvSafeSave">${esc(t('platform.tvsafe.save'))}</button>`;
+  document.getElementById('tvSafeSave').onclick = async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      await api.adminSetVideoVariants({
+        enabled: document.getElementById('tvSafeEnabled').checked,
+        window: document.getElementById('tvSafeWindow').value.trim(),
+        concurrency: Number(document.getElementById('tvSafeConc').value),
+        max_cpu: Number(document.getElementById('tvSafeCpu').value),
+        org_monthly_minutes: Number(document.getElementById('tvSafeMinutes').value),
+      });
+      showToast(t('platform.tvsafe.saved'), 'success');
+    } catch (err) { showToast(err.message, 'error'); }
+    finally { btn.disabled = false; }
+  };
+}
+
+/*
+ * 3.0 screen share: how many people may present on one screen at once where a workspace admin has
+ * switched "several people at once" on (server/routes/admin.js /screen-share, 1-4). Platform admins
+ * only: for anyone else the section is removed rather than shown broken.
+ */
+async function loadSharePresenters() {
+  const el = document.getElementById('sharePresentersForm');
+  if (!el) return;
+  let cur;
+  try { cur = (await api.adminGetScreenShare()).max_presenters; }
+  catch (_) { document.getElementById('sharePresentersSection')?.remove(); return; }
+  el.innerHTML = `
+    <label style="display:flex;align-items:center;gap:10px;font-size:13px">
+      ${esc(t('screen_share.admin.label'))}
+      <select class="input" id="sharePresentersSel" style="width:auto">
+        ${[1, 2, 3, 4].map((n) => `<option value="${n}" ${n === cur ? 'selected' : ''}>${n}</option>`).join('')}
+      </select>
+    </label>`;
+  document.getElementById('sharePresentersSel').onchange = async (e) => {
+    const sel = e.target;
+    sel.disabled = true;
+    try { await api.adminSetScreenShare(Number(sel.value)); showToast(t('screen_share.admin.saved'), 'success'); }
+    catch (err) { showToast(err.message, 'error'); }
+    finally { sel.disabled = false; }
+  };
+}
+
+/*
+ * 3.0 free stock photos (server/routes/stock-media.js): the instance's Pexels / Pixabay keys. A key
+ * is never sent back, only whether one is set and where from; one set in the environment is shown
+ * as such and cannot be changed here. Platform admins only (the server enforces it): for anyone
+ * else the section is removed rather than shown broken.
+ */
+const STOCK_KEY_PAGES = { pexels: 'https://www.pexels.com/api/', pixabay: 'https://pixabay.com/api/docs/' };
+async function loadStockKeys() {
+  const el = document.getElementById('stockKeysForm');
+  if (!el) return;
+  let data;
+  try { data = await api.adminGetStockKeys(); }
+  catch (e) {
+    if (e.status === 403) { document.getElementById('stockKeysSection')?.remove(); return; }
+    el.innerHTML = `<p style="color:var(--danger)">${esc(e.message || 'Failed to load')}</p>`;
+    return;
+  }
+  const stateText = (p) => p.source === 'env' ? t('stock.admin.from_env', { env: p.env })
+    : p.source === 'settings' ? t('stock.admin.saved') : t('stock.admin.not_set');
+  el.innerHTML = (data.providers || []).map((p) => `
+    <div class="stock-admin-row" data-stock-provider="${esc(p.id)}">
+      <div class="stock-admin-head">
+        <strong>${esc(p.name)}</strong>
+        <span class="stock-admin-state ${p.configured ? 'on' : ''}">${esc(stateText(p))}</span>
+        <a href="${esc(STOCK_KEY_PAGES[p.id] || '#')}" target="_blank" rel="noopener noreferrer">${esc(t('stock.admin.get_key'))}</a>
+      </div>
+      ${p.env_locked ? '' : `<form class="stock-admin-form" data-stock-form>
+        <label class="lib-visually-hidden" for="stockKey-${esc(p.id)}">${esc(t('stock.admin.key_label', { provider: p.name }))}</label>
+        <input id="stockKey-${esc(p.id)}" class="input" type="password" autocomplete="off" spellcheck="false" maxlength="200"
+          placeholder="${esc(t(p.configured ? 'stock.admin.key_ph_replace' : 'stock.admin.key_ph'))}">
+        <button type="submit" class="btn btn-primary btn-sm">${esc(t('common.save'))}</button>
+        ${p.configured ? `<button type="button" class="btn btn-secondary btn-sm" data-stock-remove>${esc(t('stock.admin.remove'))}</button>` : ''}
+      </form>`}
+      ${p.configured ? `<button type="button" class="btn btn-secondary btn-sm" data-stock-test>${esc(t('stock.admin.test'))}</button>` : ''}
+      <span class="stock-admin-result" data-stock-result role="status"></span>
+    </div>`).join('') + `<p style="color:var(--text-muted);font-size:12px;margin-top:8px">${esc(t('stock.admin.note'))}</p>`;
+  el.querySelectorAll('[data-stock-provider]').forEach((row) => {
+    const id = row.dataset.stockProvider;
+    const result = row.querySelector('[data-stock-result]');
+    row.querySelector('[data-stock-form]')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = row.querySelector('input');
+      const key = input.value.trim();
+      if (!key) return;
+      try { await api.adminSetStockKey(id, key); input.value = ''; showToast(t('stock.admin.saved_toast'), 'success'); loadStockKeys(); }
+      catch (err) { result.textContent = err.message; }
+    });
+    row.querySelector('[data-stock-remove]')?.addEventListener('click', async () => {
+      try { await api.adminSetStockKey(id, ''); loadStockKeys(); }
+      catch (err) { result.textContent = err.message; }
+    });
+    row.querySelector('[data-stock-test]')?.addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      result.textContent = t('stock.admin.testing');
+      try {
+        const r = await api.adminTestStockKey(id);
+        result.textContent = r.ok ? t('stock.admin.test_ok') : (r.error || t('stock.admin.test_failed'));
+      } catch (err) { result.textContent = err.message; }
+      finally { e.target.disabled = false; }
+    });
+  });
+}
+
 async function loadPlans() {
   const el = document.getElementById('plansTable');
   try {
@@ -1006,7 +1281,7 @@ function watchUpdate(el, jobId) {
   tick();
 }
 
-export function cleanup() { clearTimeout(updatePollTimer); }
+export function cleanup() { clearTimeout(updatePollTimer); clearTimeout(hostTimer); }
 
 
 /* ------------------------------------------------------------------ server diagnostics */

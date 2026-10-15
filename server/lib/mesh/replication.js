@@ -86,6 +86,9 @@ const { SECRET_NAME_RE } = require('../secret-names');
 /** Columns the regex catches that are NOT secrets, each with the reason. */
 const NOT_A_SECRET = Object.freeze({
   'revisions.state_hash': 'content fingerprint of the revision body, not a credential',
+  // 3.0: a counter, not a credential. It SHOULD reach a replica: that is what makes a password change
+  // on the primary end sessions there too (middleware/auth.js compares the JWT's tv against it).
+  'users.token_version': 'session revocation counter (an integer), not a credential',
 });
 
 /*

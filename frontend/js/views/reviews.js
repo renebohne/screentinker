@@ -32,7 +32,7 @@ export async function render(container) {
     list.innerHTML = rows.map((r) => `
       <div data-id="${esc(r.id)}" style="padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer;${selected === r.id ? 'background:var(--bg-secondary)' : ''}">
         <div style="display:flex;justify-content:space-between;gap:8px"><strong>${esc(r.resource_name || r.resource_id)}</strong><span class="pill" style="font-size:11px;padding:2px 8px;border-radius:10px;background:var(--bg-secondary)">${esc(t('review.status.' + r.status))}</span></div>
-        <div style="font-size:12px;color:var(--text-muted)">${esc(t(TYPE_LABEL[r.resource_type] || r.resource_type))} · ${esc(r.submitter_name || r.submitter_email || '')} · ${esc(when(r.submitted_at))}${r.affected_devices ? ` · ${esc(t('review.affects', { n: r.affected_devices }))}` : ''}</div>
+        <div style="font-size:12px;color:var(--text-muted)">${esc(t(TYPE_LABEL[r.resource_type] || r.resource_type))} · ${esc(r.request_ref ? t('review.request_from', { name: r.request_name || '', email: r.request_email || '' }) : (r.submitter_name || r.submitter_email || ''))} · ${esc(when(r.submitted_at))}${r.affected_devices ? ` · ${esc(t('review.affects', { n: r.affected_devices }))}` : ''}</div>
       </div>`).join('') || `<div style="padding:12px;color:var(--text-muted)">${esc(t('review.empty'))}</div>`;
   }
 
@@ -56,11 +56,17 @@ export async function render(container) {
     let sub;
     try { sub = await api.getSubmission(id); } catch (e) { detail.innerHTML = `<div class="corp-notice corp-notice-danger">${esc(e.message)}</div>`; return; }
     const st = sub.revision && sub.revision.state || {};
-    const canDecide = sub.is_reviewer && sub.status === 'submitted' && !(sub.authors || []).includes(currentUserId());
+    // A content request (views/requests.js) says itself who may decide it: with approval off, any editor.
+    const rq = sub.request || null;
+    const canDecide = rq ? !!rq.can_decide : (sub.is_reviewer && sub.status === 'submitted' && !(sub.authors || []).includes(currentUserId()));
     detail.innerHTML = `
       <h3 style="margin:0">${esc(sub.resource_name || sub.resource_id)} <span style="font-size:12px;color:var(--text-muted)">${esc(t(TYPE_LABEL[sub.resource_type] || sub.resource_type))} · #${sub.rev_no}</span></h3>
       <div style="font-size:13px;margin:6px 0;color:var(--text-muted)">${esc(t('review.submitted_by', { who: sub.submitter_name || sub.submitter_email || '', when: when(sub.submitted_at) }))}${sub.note ? `<br>“${esc(sub.note)}”` : ''}</div>
       <div style="font-size:13px;margin:6px 0">${esc(t('review.status_line', { status: t('review.status.' + sub.status) }))}${sub.reviewer_email ? ` · ${esc(sub.reviewer_name || sub.reviewer_email)} · ${esc(when(sub.decided_at))}` : ''}${sub.comment ? `<br>${esc(t('review.comment_label'))}: “${esc(sub.comment)}”` : ''}</div>
+      ${rq ? `<div class="corp-notice" style="margin:8px 0;font-size:13px"><strong>${esc(t('review.request_from', { name: rq.requester_name, email: rq.requester_email }))}</strong> · ${esc(rq.ref)}<br>
+        ${esc(t('review.request_when', { start: rq.start_date, end: rq.end_date }))}<br>
+        ${esc(t('review.request_where', { where: rq.targets.map((x) => `${x.label} (${x.playlist_name || '?'})`).join(', ') }))}
+        ${rq.targets.filter((x) => x.problem && rq.status === 'pending').map((x) => `<div style="color:#fbbf24">${esc(x.label)}: ${esc(x.problem.message)}</div>`).join('')}</div>` : ''}
       <div style="font-size:13px;margin:6px 0">${esc(t('review.affects', { n: sub.affected_devices || 0 }))}</div>
       <h4 style="margin:12px 0 4px">${esc(t('review.changes_since_live'))}</h4>${diffHtml(sub.diff_from_live)}
       <h4 style="margin:12px 0 4px">${esc(t('common.preview'))}</h4><div id="reviewPreview" style="font-size:12px"></div>
@@ -85,7 +91,8 @@ export async function render(container) {
     const actions = detail.querySelector('#reviewActions');
     const btn = (attr, label, cls = 'btn-secondary') => `<button class="btn ${cls} btn-sm" ${attr}>${esc(label)}</button>`;
     let a = '';
-    if (canDecide) a += btn('data-approve', t('review.approve'), 'btn-primary') + btn('data-changes', t('review.request_changes'));
+    if (canDecide && rq) a += btn('data-approve', t('review.request_approve'), 'btn-primary') + btn('data-changes', t('review.request_decline'));
+    else if (canDecide) a += btn('data-approve', t('review.approve'), 'btn-primary') + btn('data-changes', t('review.request_changes'));
     else if (sub.is_reviewer && sub.status === 'submitted') a += `<span style="font-size:12px;color:#fbbf24">${esc(t('review.self_approval_note'))}</span>`;
     if (sub.status === 'approved' && sub.can_publish) a += btn('data-publish', t('review.publish_approved'), 'btn-primary');
     // Head office: approving a corporate playlist is a reviewer's call, publishing it an admin's (R11).
@@ -96,7 +103,7 @@ export async function render(container) {
       const b = e.target.closest('button'); if (!b) return;
       try {
         if (b.hasAttribute('data-approve')) { const c = prompt(t('review.approve_comment_prompt')) ?? ''; await api.approveSubmission(sub.id, c, sub.version); showToast(t('review.toast.approved'), 'success'); }
-        if (b.hasAttribute('data-changes')) { const c = prompt(t('review.changes_comment_prompt')); if (!c) return; await api.requestChanges(sub.id, c, sub.version); showToast(t('review.toast.changes_requested')); }
+        if (b.hasAttribute('data-changes')) { const c = prompt(t(rq ? 'creq.reject_prompt' : 'review.changes_comment_prompt')); if (!c) return; await api.requestChanges(sub.id, c, sub.version); showToast(t('review.toast.changes_requested')); }
         if (b.hasAttribute('data-publish')) { await api.publishSubmission(sub.id); showToast(t('review.toast.published'), 'success'); }
         if (b.hasAttribute('data-withdraw')) { await api.withdrawSubmission(sub.id); showToast(t('review.toast.withdrawn')); }
         await show(sub.id);

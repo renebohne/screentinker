@@ -288,6 +288,7 @@
       <p>Pairing Code</p>
       <div class="pairing-code" id="pairingCode">------</div>
       <p class="pairing-hint">Enter this code in the dashboard to pair this display</p>
+      <p class="pairing-hint" id="enrolKeyNotice" style="display:none;color:#fbbf24;max-width:40rem;margin:1.2rem auto 0"></p>
     </div>
     <div class="spinner" id="setupSpinner" style="display:none"></div>
     <div class="status-msg" id="setupStatus"></div>
@@ -326,6 +327,8 @@
   <script src="/player/offline-play-queue.js"></script>
   <script src="/player/live-publish.js"></script>
   <script src="/player/talk.js"></script>
+  <!-- 3.0: screen share receiver (lib/screen-share-player.js), window.STScreenShare -->
+  <script src="/player/screen-share.js"></script>
   <script src="/player/trigger-resolve.js"></script>
   <script src="/player/media-mute.js"></script>
   <script src="/player/orientation-style.js"></script>
@@ -369,18 +372,38 @@
         info_sw: 'Service Worker',
         nothing_scheduled: 'Nothing scheduled right now',
         preview_webpage_blocked: 'If this area is blank, the site blocks being embedded and won’t display on the device either. Try a page that allows embedding.',
+        enrol_key_refused: 'This screen was opened with a display link (the k= code in its address) that this server does not recognise. The display may have been deleted, its link replaced, or the link made on a different server. Pair with the code above, or open the display’s current link from the dashboard.',
+        mirror_removed_title: 'This mirror was removed',
+        mirror_removed_body: 'This screen was showing a display link that is also open somewhere else, and it was removed from the dashboard. Open the display link again to show it here.',
+        mirror_refused_title: 'This display is already showing somewhere else',
+        mirror_show_again: 'Show it here again',
+        mirror_try_again: 'Try again',
+        // 3.0: screen share (other languages fall back to these until translated)
+        share_shared_by: 'Shared by {name}',
+        share_guest: 'guest',
+        share_connecting: 'Connecting to {name}…',
+        share_code_title: 'Share your screen here',
+        share_code_hint: 'Go to {url} and enter',
       },
       es: {
         web_player: 'Reproductor web', server_url: 'URL del servidor', server_url_placeholder: 'https://signage.tudominio.com', connect: 'Conectar', pairing_code: 'Código de vinculación', pairing_hint: 'Ingresa este código en el panel para vincular esta pantalla', connecting: 'Conectando...', connecting_muted: 'Conectando (audio silenciado)...', info_title: 'Reproductor web ScreenTinker', info_close_hint: 'Presiona Atrás de nuevo o haz clic para cerrar', info_device_id: 'ID del dispositivo', info_device_name: 'Nombre del dispositivo', info_server: 'Servidor', info_status: 'Estado', info_now_playing: 'Reproduciendo', info_resolution: 'Resolución', info_uptime: 'Tiempo activo', info_platform: 'Plataforma', info_cache: 'Caché', info_connected: 'Conectado', info_disconnected: 'Desconectado', info_active: 'Activo', info_inactive: 'Inactivo', info_nothing: 'Nada', info_na: 'N/D', info_sw: 'Service Worker', nothing_scheduled: 'No hay nada programado en este momento', preview_webpage_blocked: 'Si esta área está en blanco, el sitio bloquea la inserción y tampoco se mostrará en el dispositivo. Prueba con una página que permita la inserción.',
+        // 3.0: display link refused, screen share
+        enrol_key_refused: 'Esta pantalla se abrió con un enlace de pantalla (el código k= de su dirección) que este servidor no reconoce. Puede que la pantalla se haya eliminado, que su enlace se haya cambiado o que el enlace se creara en otro servidor. Vincúlela con el código de arriba o abra el enlace actual de la pantalla desde el panel.', share_shared_by: 'Compartido por {name}', share_guest: 'invitado', share_connecting: 'Conectando con {name}…', share_code_title: 'Comparta su pantalla aquí', share_code_hint: 'Vaya a {url} e introduzca',
       },
       fr: {
         web_player: 'Lecteur web', server_url: 'URL du serveur', server_url_placeholder: 'https://signage.votredomaine.com', connect: 'Connecter', pairing_code: 'Code d’appairage', pairing_hint: 'Saisissez ce code dans le tableau de bord pour apparier cet écran', connecting: 'Connexion...', connecting_muted: 'Connexion (audio coupé)...', info_title: 'Lecteur web ScreenTinker', info_close_hint: 'Appuyez à nouveau sur Retour ou cliquez pour fermer', info_device_id: 'ID de l’appareil', info_device_name: 'Nom de l’appareil', info_server: 'Serveur', info_status: 'État', info_now_playing: 'En lecture', info_resolution: 'Résolution', info_uptime: 'Disponibilité', info_platform: 'Plateforme', info_cache: 'Cache', info_connected: 'Connecté', info_disconnected: 'Déconnecté', info_active: 'Actif', info_inactive: 'Inactif', info_nothing: 'Rien', info_na: 'N/D', info_sw: 'Service Worker', nothing_scheduled: 'Rien de programmé pour le moment', preview_webpage_blocked: 'Si cette zone est vide, le site bloque l’intégration et ne s’affichera pas non plus sur l’appareil. Essayez une page qui l’autorise.',
+        // 3.0: display link refused, screen share
+        enrol_key_refused: 'Cet écran a été ouvert avec un lien d’affichage (le code k= de son adresse) que ce serveur ne reconnaît pas. L’écran a peut-être été supprimé, son lien remplacé, ou le lien créé sur un autre serveur. Associez-le avec le code ci-dessus, ou ouvrez le lien actuel de l’écran depuis le tableau de bord.', share_shared_by: 'Partagé par {name}', share_guest: 'invité', share_connecting: 'Connexion à {name}…', share_code_title: 'Partagez votre écran ici', share_code_hint: 'Allez sur {url} et saisissez',
       },
       de: {
         web_player: 'Web-Player', server_url: 'Server-URL', server_url_placeholder: 'https://signage.ihredomain.com', connect: 'Verbinden', pairing_code: 'Kopplungscode', pairing_hint: 'Geben Sie diesen Code im Dashboard ein, um diesen Bildschirm zu koppeln', connecting: 'Verbindung wird hergestellt...', connecting_muted: 'Verbindung (Audio stummgeschaltet)...', info_title: 'ScreenTinker Web-Player', info_close_hint: 'Erneut Zurück drücken oder klicken zum Schließen', info_device_id: 'Geräte-ID', info_device_name: 'Gerätename', info_server: 'Server', info_status: 'Status', info_now_playing: 'Aktuelle Wiedergabe', info_resolution: 'Auflösung', info_uptime: 'Betriebszeit', info_platform: 'Plattform', info_cache: 'Cache', info_connected: 'Verbunden', info_disconnected: 'Getrennt', info_active: 'Aktiv', info_inactive: 'Inaktiv', info_nothing: 'Nichts', info_na: 'N/V', info_sw: 'Service Worker', nothing_scheduled: 'Derzeit ist nichts geplant', preview_webpage_blocked: 'Wenn dieser Bereich leer ist, blockiert die Website die Einbettung und wird auch auf dem Gerät nicht angezeigt. Verwenden Sie eine Seite, die dies erlaubt.',
+        // 3.0: display link refused, screen share
+        enrol_key_refused: 'Dieser Bildschirm wurde mit einem Anzeige-Link (dem k=-Code in der Adresse) geöffnet, den dieser Server nicht kennt. Der Bildschirm wurde vielleicht gelöscht, sein Link ersetzt oder der Link auf einem anderen Server erstellt. Koppeln Sie ihn mit dem Code oben oder öffnen Sie den aktuellen Link des Bildschirms im Dashboard.', share_shared_by: 'Geteilt von {name}', share_guest: 'Gast', share_connecting: 'Verbindung mit {name} wird hergestellt…', share_code_title: 'Teilen Sie hier Ihren Bildschirm', share_code_hint: 'Öffnen Sie {url} und geben Sie ein',
       },
       pt: {
         web_player: 'Player web', server_url: 'URL do servidor', server_url_placeholder: 'https://sign.seudominio.com', connect: 'Conectar', pairing_code: 'Código de pareamento', pairing_hint: 'Digite este código no painel para parear esta tela', connecting: 'Conectando...', connecting_muted: 'Conectando (áudio mudo)...', info_title: 'Player web ScreenTinker', info_close_hint: 'Pressione Voltar novamente ou clique para fechar', info_device_id: 'ID do dispositivo', info_device_name: 'Nome do dispositivo', info_server: 'Servidor', info_status: 'Status', info_now_playing: 'Reproduzindo', info_resolution: 'Resolução', info_uptime: 'Tempo ativo', info_platform: 'Plataforma', info_cache: 'Cache', info_connected: 'Conectado', info_disconnected: 'Desconectado', info_active: 'Ativo', info_inactive: 'Inativo', info_nothing: 'Nada', info_na: 'N/D', info_sw: 'Service Worker', nothing_scheduled: 'Nada programado no momento', preview_webpage_blocked: 'Se esta área estiver em branco, o site bloqueia a incorporação e também não será exibido no dispositivo. Tente uma página que a permita.',
+        // 3.0: display link refused, screen share
+        enrol_key_refused: 'Esta tela foi aberta com um link de tela (o código k= no endereço) que este servidor não reconhece. A tela pode ter sido excluída, o link substituído ou o link criado em outro servidor. Pareie com o código acima ou abra o link atual da tela pelo painel.', share_shared_by: 'Compartilhado por {name}', share_guest: 'convidado', share_connecting: 'Conectando a {name}…', share_code_title: 'Compartilhe sua tela aqui', share_code_hint: 'Acesse {url} e digite',
       },
     };
     const PLAYER_LANG = (() => {
@@ -550,9 +573,126 @@
     let viewerEnded = false;
     let viewerLastAnchor = null;
     let viewerJoin = null;          // one-shot { index, offsetMs, until } consumed by scheduleAdvance
+    /*
+     * 3.0 — PER-LINK STORAGE NAMESPACE (docs/web-player.md).
+     *
+     * Two different display links opened in tabs of one browser share this origin's localStorage.
+     * With one set of keys the tabs overwrote each other's identity, install id, playlist cache and
+     * sync config: the stored identity ping-ponged between them, both registered with the SAME
+     * per-install fingerprint, and a reload or an offline cold start could come back as the other
+     * display. So a page opened with ?k= keeps everything per-display under keys suffixed with a
+     * short hash of its link. Plain /player (no k) has an empty suffix and keeps today's keys
+     * exactly, so no existing install loses its identity.
+     *
+     * The hash only names a namespace (the key itself is stored in the config, as before); it is
+     * FNV-1a over two seeds, 64 bits, which is plenty to keep one browser's handful of links apart.
+     */
+    function linkStorageSuffix(k) {
+      if (!k) return '';
+      const h = (seed) => {
+        let x = seed >>> 0;
+        for (let i = 0; i < k.length; i++) { x ^= k.charCodeAt(i); x = Math.imul(x, 16777619) >>> 0; }
+        return ('0000000' + x.toString(16)).slice(-8);
+      };
+      return '::' + h(2166136261) + h(0x9747b28c);
+    }
+    const LINK_SUFFIX = VIEWER_MODE ? '' : linkStorageSuffix(urlEnrolKey());
     const SCREEN_SUFFIX = VIEWER_MODE ? '__view' : (() => {
       try { return BS ? (BS.storageSuffix() || '') : ''; } catch (e) { return ''; }
+    })() + LINK_SUFFIX;
+    /*
+     * Migration for a link opened before this namespace existed: its identity is in the
+     * un-namespaced keys, recognisable because the config there carries THIS link's key (every
+     * ?k= page stores it). Move that identity and its caches across once, so the screen keeps its
+     * install id (its fingerprint) and can still cold-start offline. Anything else in the old keys
+     * belongs to another display — or to plain /player — and is left exactly where it is.
+     */
+    (function migrateLinkStorage() {
+      if (!LINK_SUFFIX) return;
+      try {
+        const base = SCREEN_SUFFIX.slice(0, SCREEN_SUFFIX.length - LINK_SUFFIX.length);
+        if (localStorage.getItem('rd_web_player' + SCREEN_SUFFIX) !== null) return;   // already ours
+        let old = null;
+        try { old = JSON.parse(localStorage.getItem('rd_web_player' + base) || 'null'); } catch (e) { old = null; }
+        if (!old || !old.deviceId || old.enrolKey !== urlEnrolKey()) return;
+        const moved = [];
+        for (const name of ['rd_web_player', 'st_install_id', 'rd_playlist_cache', 'rd_layout_cache', 'rd_site_cache',
+                            'rd_trigger_cfg', 'rd_triggers_cache', 'st_kiosk_sessions']) {
+          const v = localStorage.getItem(name + base);
+          if (v === null) continue;
+          localStorage.setItem(name + SCREEN_SUFFIX, v);
+          moved.push(name);
+        }
+        for (const name of ['st_wall_config', 'st_group_sync', 'st_offline_plays']) {
+          const v = localStorage.getItem(name);
+          if (v !== null) { localStorage.setItem(name + LINK_SUFFIX, v); moved.push(name); }
+        }
+        // The identity MOVES (a second tab on another link must not find it and register as us);
+        // the caches are copies, harmless to leave.
+        localStorage.removeItem('rd_web_player' + base);
+        localStorage.removeItem('st_install_id' + base);
+        localStorage.removeItem('st_offline_plays');   // or the backlog would be reported twice
+        console.log('[storage] moved this display link\'s identity into its own namespace:', moved.join(', '));
+      } catch (e) { /* storage unavailable: the key in the URL is still an identity */ }
     })();
+
+    /*
+     * 3.0 display-link MIRRORS (docs/web-player.md). When a display link is open in more than one
+     * place, the server makes each extra opening a MIRROR of the display. Two things the server
+     * can say to one, and both STOP this opening until a person acts:
+     *   - device:mirror-removed — someone removed this mirror on the dashboard. Reconnecting would
+     *     present the link again and simply recreate it, so we hold instead; only opening the link
+     *     afresh (a new tab, or the button) brings it back;
+     *   - device:mirror-refused — no mirror could be made (the plan has no screen to spare). Said
+     *     plainly on the screen rather than as "Waiting for content".
+     * The hold lives in sessionStorage: per tab, survives this tab's reloads, gone in a new tab.
+     */
+    const MIRROR_HOLD_KEY = 'st_mirror_hold' + SCREEN_SUFFIX;
+    let mirrorHold = (function () {
+      try { return JSON.parse(sessionStorage.getItem(MIRROR_HOLD_KEY) || 'null'); } catch (e) { return null; }
+    })();
+    function showMirrorHold(hold) {
+      try {
+        let el = document.getElementById('st-mirror-hold');
+        if (!el) {
+          el = document.createElement('div');
+          el.id = 'st-mirror-hold';
+          el.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:2147483646;background:#111827;color:#e5e7eb;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:5vw;font-family:sans-serif';
+          document.body.appendChild(el);
+        }
+        const removed = hold && hold.kind === 'removed';
+        el.innerHTML = '';
+        const h = document.createElement('h1');
+        h.style.cssText = 'font-size:2.6rem;margin:0 0 1.2rem;color:#f9fafb';
+        h.textContent = _t(removed ? 'mirror_removed_title' : 'mirror_refused_title');
+        const p = document.createElement('p');
+        p.style.cssText = 'font-size:1.4rem;max-width:46rem;line-height:1.5;color:#94a3b8;margin:0 0 2rem';
+        p.textContent = removed ? _t('mirror_removed_body') : String((hold && hold.error) || '');
+        const b = document.createElement('button');
+        b.id = 'st-mirror-again';
+        b.style.cssText = 'font-size:1.2rem;padding:.8rem 1.6rem;border-radius:.5rem;border:0;background:#3b82f6;color:#fff;cursor:pointer';
+        b.textContent = _t(removed ? 'mirror_show_again' : 'mirror_try_again');
+        b.onclick = () => { try { sessionStorage.removeItem(MIRROR_HOLD_KEY); } catch (e) {} location.reload(); };
+        el.appendChild(h); el.appendChild(p); el.appendChild(b);
+      } catch (e) { /* a missing body must not throw out of a socket handler */ }
+    }
+    function enterMirrorHold(hold) {
+      mirrorHold = hold;
+      // A held mirror is not showing the display any more: drop its share code and any live share.
+      try { if (window.STScreenShare) { window.STScreenShare.showCode({ code: null }); window.STScreenShare.stop(null, 'unpaired'); } } catch (e) {}
+      console.warn('[mirror] holding: ' + hold.kind + (hold.error ? ' — ' + hold.error : ''));
+      try { if (socket) { socket.io.reconnection(false); socket.disconnect(); } } catch (e) {}
+      try { stopReconnectSupervisor(); } catch (e) {}
+      try { if (throttleHoldTimer) { clearTimeout(throttleHoldTimer); throttleHoldTimer = null; } } catch (e) {}
+      let stored = false;
+      try { sessionStorage.setItem(MIRROR_HOLD_KEY, JSON.stringify(hold)); stored = true; } catch (e) {}
+      // A reload is the clean way to stop everything that is playing; the boot path then shows the
+      // message without connecting. BrightSign does not reliably come back from a page reload, so
+      // there (and without sessionStorage) the message covers the page and the media is paused.
+      if (stored && !ON_BRIGHTSIGN) { location.reload(); return; }
+      try { document.querySelectorAll('video,audio').forEach((m) => { try { m.muted = true; m.pause(); } catch (e) {} }); } catch (e) {}
+      showMirrorHold(hold);
+    }
 
     const STORAGE_KEY = 'rd_web_player' + SCREEN_SUFFIX;
     const HEARTBEAT_INTERVAL = 15000;
@@ -588,7 +728,7 @@
       // not also reload here; its reload tears this document down.
       try {
         if ((onVega() || onIOS()) && HOST && HOST.command('restart')) {
-          console.log('[' + HOST.platform + '] restart delegated to shell:', reason);
+          console.log('[%s] restart delegated to shell:', HOST.platform, reason);
           return;
         }
       } catch (e) { /* a missing shell must not strand the refresh */ }
@@ -682,6 +822,16 @@
       return false;
     }
 
+    // #630: shown under the pairing code when the server refused this page's ?k= key.
+    function showEnrolKeyRefused() {
+      try {
+        const el = document.getElementById('enrolKeyNotice');
+        if (!el) return;
+        el.textContent = _t('enrol_key_refused');
+        el.style.display = 'block';
+      } catch (e) { /* a missing notice must never block re-pairing */ }
+    }
+
     function getConfig() {
       let cfg = {};
       try { cfg = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch { cfg = {}; }
@@ -714,15 +864,23 @@
         }
       }
       /*
-       * ⚠️ STORED CREDENTIALS ALWAYS WIN. The key is only carried when this player has no deviceId
-       * of its own, so a screen whose storage IS working is completely unaffected by a key sitting
-       * in its URL — it keeps using the identity it already has, and the server never sees the key.
-       * That also means a working display cannot be quietly re-pointed by editing its URL.
+       * #630 — THE KEY IN THE URL IS CARRIED EVEN WHEN STORAGE HAS AN IDENTITY.
+       *
+       * It used to be carried only when there was no stored deviceId ("stored credentials always
+       * win"). That broke the other half of the feature: a browser that KEEPS its storage and is
+       * then given a NEW link. A UniFi Cast that had been a display on a server that was rebuilt
+       * from scratch opened its freshly made link, presented the dead id from its storage, was
+       * told "not found", re-paired — and showed a pairing code, becoming a new display, while the
+       * display the link was made for stayed offline. Only a browser with clean storage worked.
+       *
+       * Now the URL's key is always carried and the SERVER decides (ws/deviceSocket.js): a key that
+       * names this same display changes nothing, a key that names another display wins (the link is
+       * the operator's latest instruction), and a key it does not know is ignored in favour of the
+       * stored identity. A stored key from an OLD url is not sent alongside a stored id — see the
+       * register emitter.
        */
-      if (!cfg.deviceId) {
-        const k = urlEnrolKey();
-        if (k) { cfg.enrolKey = k; cfg.paired = true; }   // paired: we know who we are, so skip the code screen
-      }
+      const k = urlEnrolKey();
+      if (k) { cfg.enrolKey = k; cfg.paired = true; }   // paired: we know who we are, so skip the code screen
       return cfg;
     }
     function saveConfig(cfg) {
@@ -803,8 +961,53 @@
         const keep = triggerItems(triggers)
           .filter((it) => it && it.filepath && !it.remote_url)
           .map((it) => mediaUrl(it));
-        sw.postMessage({ type: 'st-device-deleted', keep });
+        sw.postMessage({ type: 'st-device-deleted', keep, scope: SCREEN_SUFFIX });
       } catch (e) { /* best effort */ }
+    }
+    /*
+     * 3.0 SITE CACHE (docs/site-cache.md). A screen assigned to a cache box on its LAN gets, in its
+     * payload, the box's address, a token for this screen, and the sha256 of each asset. The service
+     * worker tries the box first, VERIFIES the bytes against that digest, and falls back to this
+     * server on any failure — so a dead, slow or wrong box costs bandwidth, never a dark screen.
+     * Handed to the worker keyed by media PATH, because that is all a fetch event carries.
+     */
+    /*
+     * ⚠️ PERSISTED, like the playlist. The boot pin hands the worker the cached playlist before the
+     * socket has delivered anything, and without the last known cache config it would fetch every
+     * missing asset from the origin first. It is also what lets a screen that reboots while the WAN
+     * is down still reach the box on its LAN.
+     */
+    const SITE_CACHE_CFG_KEY = 'rd_site_cache' + SCREEN_SUFFIX;
+    let siteCacheCfg = (function () {
+      try { const v = JSON.parse(localStorage.getItem(SITE_CACHE_CFG_KEY) || 'null'); return v && typeof v === 'object' ? v : null; }
+      catch (e) { return null; }
+    })();
+    function saveSiteCacheCfg(sc) {
+      try { if (sc) localStorage.setItem(SITE_CACHE_CFG_KEY, JSON.stringify(sc)); else localStorage.removeItem(SITE_CACHE_CFG_KEY); } catch (e) {}
+    }
+    function siteCacheSig(sc) {
+      if (!sc || typeof sc !== 'object') return '';
+      const files = sc.files && typeof sc.files === 'object' ? sc.files : {};
+      return [sc.url || '', sc.token || '', Object.keys(files).sort().map((k) => k + ':' + ((files[k] && files[k].sha256) || '')).join(',')].join('|');
+    }
+    function postSiteCache(items) {
+      try {
+        const sw = navigator.serviceWorker && navigator.serviceWorker.controller;
+        if (!sw) return;
+        const sc = siteCacheCfg;
+        let cfg = null;
+        if (sc && typeof sc.url === 'string' && typeof sc.token === 'string' && sc.files && typeof sc.files === 'object') {
+          const files = {};
+          for (const it of items || []) {
+            if (!it || !it.content_id || !it.filepath || it.remote_url) continue;
+            const f = sc.files[it.content_id];
+            if (!f || typeof f.sha256 !== 'string') continue;
+            try { files[new URL(mediaUrl(it), location.href).pathname] = { sha256: f.sha256, size: Number(f.size) || 0 }; } catch (e) { /* skip */ }
+          }
+          cfg = { url: sc.url, token: sc.token, expires_at: Number(sc.expires_at) || 0, files };
+        }
+        sw.postMessage({ type: 'st-site-cache', config: cfg, scope: SCREEN_SUFFIX });
+      } catch (e) { /* never let the cache hint break playback */ }
     }
     function requestOfflineCache(items, extraItems) {
       try {
@@ -817,11 +1020,13 @@
         const urls = all
           .filter((it) => it && it.filepath && !it.remote_url)
           .map((it) => mediaUrl(it));
+        // The site cache first: the worker must know where the LAN copy is before it starts fetching.
+        postSiteCache(all);
         // `urls` is the COMPLETE set for this display, so the worker may treat anything else in
         // the content cache as superseded. That is what reclaims a replaced asset: a replace writes
         // a new randomly-named file, so the old copy is not merely a different revision of the same
         // URL — it is a different URL entirely, and nothing keyed on the asset path can find it.
-        sw.postMessage({ type: 'st-cache-playlist', urls, prune: true });
+        sw.postMessage({ type: 'st-cache-playlist', urls, prune: true, scope: SCREEN_SUFFIX });
 
         /*
          * ⚠️ AND WARM EACH BUNDLE'S RENDER, because the archive alone is not playable.
@@ -863,6 +1068,8 @@
     // Set from the payload's top-level default_content; null = none (keep the idle text). Declared
     // with the top-level state because a cold-start idle path can read it before Boot finishes.
     let defaultContent = null;
+    // 3.0 TV-safe video: 90 / 270 while #playerContainer is CSS-rotated for a portrait screen, else 0.
+    let cssQuarterTurn = 0;
     let _defaultShownRev = null;   // content_rev currently mounted as the default image, or null
     /*
      * Listener settings, cached for the same reason the definitions are: a player that has to reach
@@ -947,7 +1154,7 @@
       try { token = new URLSearchParams(location.search).get('reset'); } catch (e) { return; }
       if (!token) return;
       try {
-        if (localStorage.getItem('st_reset_applied') === token) return;   // already honoured
+        if (localStorage.getItem('st_reset_applied' + LINK_SUFFIX) === token) return;   // already honoured
         const cfg = getConfig();
         delete cfg.deviceId; delete cfg.deviceToken; delete cfg.pairingCode;
         cfg.paired = false;
@@ -955,8 +1162,8 @@
         localStorage.removeItem('st_install_id' + SCREEN_SUFFIX);      // mint a NEW identity, not the old one
         localStorage.removeItem(PLAYLIST_CACHE_KEY);
         localStorage.removeItem(LAYOUT_CACHE_KEY);
-        localStorage.removeItem('st_group_sync');
-        localStorage.setItem('st_reset_applied', token);
+        localStorage.removeItem('st_group_sync' + LINK_SUFFIX);
+        localStorage.setItem('st_reset_applied' + LINK_SUFFIX, token);
         console.warn('[reset] identity cleared by ?reset=' + token + ' — this panel will pair as a new device');
         // The shell's copy outlives localStorage. Without this, the next host:ready adopts the
         // identity this reset just dropped. typeof: this IIFE is extracted and run on its own.
@@ -1561,6 +1768,28 @@
       return advanceTimer;
     }
 
+    /*
+     * Every <video> the player creates comes from here, with an empty poster.
+     *
+     * Without a poster, Android WebView (Fully Kiosk and other kiosk shells, Chromium-based WebViews
+     * at least through 119/138) fetches its built-in default poster,
+     * `android-webview-video-poster:default_video_poster/…`. Our clips are crossOrigin='anonymous', so
+     * that fetch fails CORS and the element raises `error` with NO MediaError. A small, cached clip
+     * is usually at readyState >= 3 by then and mediaFailureSkip ignores it; a large clip still
+     * buffering is not, so it is skipped ~3 s in as "failed (no MediaError)" and never plays.
+     * Seen on an Android 7.1 RK3368 and Android 8.1 RK3288 kiosk: 12–23 MB clips stopped at 3–4 s,
+     * every time. With a poster set, the same clips played to the end.
+     *
+     * A 1×1 transparent GIF is enough: the WebView then has a poster and never asks for its own.
+     * Desktop browsers and other platforms are unaffected (the poster is invisible and replaced by
+     * the first frame). A function declaration, so it is hoisted and safe to call during boot.
+     */
+    function newVideoElement() {
+      const v = document.createElement('video');
+      v.poster = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+      return v;
+    }
+
     const MEDIA_ERR_NAME = { 1: 'ABORTED', 2: 'NETWORK', 3: 'DECODE', 4: 'SRC_NOT_SUPPORTED' };
 
     /*
@@ -1641,6 +1870,13 @@
     // Per-zone rotation timers (multi-zone). Each zone advances independently on
     // its own interval, decoupled from the fullscreen advanceTimer/nextItem.
     let zoneTimers = {};
+    // 3.0 campaigns (see Campaigns below).
+    let campaign = null;          // { steps, sig } — the structure being played
+    let campaignRun = null;       // { idx, stage, timers, timer, gen }
+    let campaignPreloads = [];
+    // Per display, like the playlist cache: two display links in one browser keep separate campaigns.
+    const CAMPAIGN_CACHE_KEY = 'st_campaign_cache' + SCREEN_SUFFIX;
+    const CAMPAIGN_FADE_MS = 400;
     // #zone-orphan: parts of the operator-only PREVIEW banner (never shown on a live
     // player). 'layout' = dominant-layout note when items span >1 layout; 'orphans' =
     // the list of items whose zone isn't in the active layout. renderPreviewBanner()
@@ -1769,6 +2005,8 @@
     let ytApiReady = false;
     let ytApiCallbacks = [];
     let activeYtPlayer = null;
+    let playbackResumeTimer = null;
+    let suspendedPlayback = null;
     // The item currently mounted, so a live mute toggle can re-resolve without waiting for the
     // next advance, and #129's per-item flag survives a remote override being cleared.
     let activeMuteItem = null;
@@ -2098,6 +2336,66 @@
       } catch (e) { /* harmless */ }
     }
 
+    /*
+     * #627 — `?autoplay_audio=1`: start with sound on a kiosk browser that allows it.
+     *
+     * Kiosk shells such as Fully Kiosk Browser ("Autoplay Audio") lift the WebView's user-gesture
+     * requirement for media, but the player cannot know that, so it showed the tap screen and then
+     * carried on MUTED — an unattended screen stayed silent after every reboot or power cut until
+     * someone walked up and tapped it. The operator opts in with this parameter in the kiosk's start
+     * URL; a normal browser opening /player behaves exactly as before.
+     *
+     * The parameter is a request, not a promise: autoplayAudioAllowed() asks the browser by actually
+     * starting a short silent clip UNMUTED. Only a resolved play() counts. Refused (the kiosk setting
+     * is off, or this is an ordinary browser) and the tap screen stays, exactly as without it.
+     */
+    function autoplayAudioRequested() {
+      try {
+        const v = new URLSearchParams(location.search).get('autoplay_audio');
+        return v === '1' || v === 'true';
+      } catch (e) { return false; }
+    }
+    function autoplayAudioAllowed(timeoutMs) {
+      return new Promise((resolve) => {
+        let settled = false;
+        let url = null;
+        let el = null;
+        const finish = (ok) => {
+          if (settled) return;
+          settled = true;
+          try { if (el) { el.pause(); el.removeAttribute('src'); el.load(); } } catch (e) {}
+          try { if (url) URL.revokeObjectURL(url); } catch (e) {}
+          resolve(!!ok);
+        };
+        try {
+          // Firefox can answer without playing anything. 'allowed-muted' is a refusal for this purpose.
+          if (navigator.getAutoplayPolicy) {
+            const policy = navigator.getAutoplayPolicy('mediaelement');
+            if (policy !== 'allowed') return finish(false);
+          }
+          // A tenth of a second of 8-bit silence, built here so the probe needs no file and no network.
+          const n = 800;
+          const buf = new ArrayBuffer(44 + n);
+          const dv = new DataView(buf);
+          const str = (o, t) => { for (let i = 0; i < t.length; i++) dv.setUint8(o + i, t.charCodeAt(i)); };
+          str(0, 'RIFF'); dv.setUint32(4, 36 + n, true); str(8, 'WAVE'); str(12, 'fmt ');
+          dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+          dv.setUint32(24, 8000, true); dv.setUint32(28, 8000, true); dv.setUint16(32, 1, true);
+          dv.setUint16(34, 8, true); str(36, 'data'); dv.setUint32(40, n, true);
+          for (let i = 0; i < n; i++) dv.setUint8(44 + i, 128);
+          url = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+          el = document.createElement('audio');
+          el.muted = false;
+          el.src = url;
+          const p = el.play();
+          if (!p || typeof p.then !== 'function') return finish(false);   // no promise: cannot tell, so no
+          p.then(() => finish(!el.muted), () => finish(false));
+          // A WebView that never settles the promise is a refusal, not a hang on the tap screen.
+          setTimeout(() => finish(false), timeoutMs || 2000);
+        } catch (e) { finish(false); }
+      });
+    }
+
     // Try to unmute and play the leader video. MUST be called synchronously
     // from inside a real user-gesture handler — any preceding await would
     // throw away the gesture's user-activation in stricter browsers (Firefox).
@@ -2254,7 +2552,7 @@
      */
     let offlinePlayOpen = null;
     let offlinePlayFlushing = false;
-    const OFFLINE_PLAY_KEY = 'st_offline_plays';
+    const OFFLINE_PLAY_KEY = 'st_offline_plays' + LINK_SUFFIX;   // per display link (3.0), '' for plain /player
     /*
      * ⚠️ GUARDED, BECAUSE THIS NOW RUNS AS THE PAGE LOADS (#460), not inside connect(). If
      * offline-play-queue.js ever failed to load — and a missing script on this server answers 200
@@ -2370,6 +2668,9 @@
       bootViewer(VIEWER);
     } else if (_previewQS.get('preview') === '1' && (_previewQS.get('playlist') || _previewQS.get('device'))) {
       bootPreview(_previewQS);
+    } else if (mirrorHold) {
+      // 3.0 mirrors: this tab was told its mirror is gone (or could not be made). Say so; do not connect.
+      showMirrorHold(mirrorHold);
     } else {
 
     // Auto-detect server URL from origin since player is served from the same server
@@ -2405,7 +2706,13 @@
          * connection that makes the player fixable. Whatever goes wrong in here, we still boot.
          */
         // A wall panel resumes as its slice of the wall (see applyWallMode), BEFORE the first render.
-        try { const cw = localStorage.getItem('st_wall_config'); if (cw) applyWallMode(JSON.parse(cw)); } catch (e) {}
+        try { const cw = localStorage.getItem('st_wall_config' + LINK_SUFFIX); if (cw) applyWallMode(JSON.parse(cw)); } catch (e) {}
+        // 3.0: a screen that was playing a campaign resumes it, offline too. Guarded on its own: a
+        // campaign that cannot start leaves the ordinary cold start below to do its job.
+        try {
+          const cachedCampaign = campaignSupported() ? loadCampaignCache() : null;
+          if (cachedCampaign && !localStorage.getItem('st_wall_config' + LINK_SUFFIX)) startCampaign(cachedCampaign);
+        } catch (e) { console.warn('[campaign] cached campaign did not start:', e && e.message); try { stopCampaign(); } catch (e2) {} }
         try {
           startPlaybackAt(0); // #74/#75: honour schedules from the first frame on cold-start
         } catch (e) {
@@ -2414,7 +2721,7 @@
         }
         // #group-sync: if this device was in a sync group, resume the schedule immediately from the
         // cached clock offset — so a reboot mid-outage comes back aligned WITHOUT waiting for a server.
-        try { const cg = localStorage.getItem('st_group_sync'); if (cg) applyGroupSync(JSON.parse(cg)); } catch (e) {}
+        try { const cg = localStorage.getItem('st_group_sync' + LINK_SUFFIX); if (cg) applyGroupSync(JSON.parse(cg)); } catch (e) {}
       }
 
       // Always show the tap overlay on cold load. Browser autoplay policy is
@@ -2445,6 +2752,36 @@
             connect(config.serverUrl);
           }
         }, 5000);
+
+        /*
+         * #627: ?autoplay_audio=1 — take the tap ourselves when the browser allows sound.
+         *
+         * ⚠️ DEFERRED, AND THAT IS LOAD-BEARING. This block runs during the initial script pass, and
+         * the tap handler reaches connect() and the socket/playback state behind it, much of which
+         * is `let` declared further down this script. Called synchronously from here it reads those
+         * bindings in their temporal dead zone: a ReferenceError, and the screen never connects
+         * (seen in the field on the first version of this). setTimeout(…, 0) runs it after the
+         * whole script has executed. test/web-player-autoplay-audio.test.js guards both the
+         * deferral and the behaviour in a real browser.
+         *
+         * Same path as a person tapping, so there is one way in. If the probe says no, nothing
+         * happens: the tap screen and its 5-second muted fallback carry on exactly as without the
+         * parameter.
+         */
+        if (autoplayAudioRequested()) {
+          setTimeout(() => {
+            autoplayAudioAllowed(2000).then((allowed) => {
+              if (!allowed) {
+                console.warn('[audio] autoplay_audio=1, but this browser refused unmuted playback — keeping the tap screen (enable autoplay with sound in the kiosk browser)');
+                return;
+              }
+              // Tapped, or the 5s muted fallback already connected: just let the sound through.
+              if (!tapOverlay.parentNode) { unlockAudio(); return; }
+              console.log('[audio] autoplay_audio=1 and the browser allows sound — starting unmuted');
+              tapOverlay.onclick();
+            });
+          }, 0);
+        }
       }
     } else {
       // Auto-Continue after 5s if not configured. If user interacts with form (typing in the box), stop the timer.
@@ -2513,6 +2850,13 @@
         const orientation = qs.get('orientation');
         const q = orientation ? ('?orientation=' + encodeURIComponent(orientation)) : '';
         url = '/api/playlists/' + encodeURIComponent(playlistId) + '/preview-payload' + q;
+      } else if (qs.get('at')) {
+        // "What will this screen show at…?" (docs/preview-at-time.md): the payload the server
+        // resolves for THAT instant, already filtered to what plays then and with the time gates
+        // taken off, so this player's own clock cannot re-filter a Monday-9am loop against today.
+        url = '/api/devices/' + encodeURIComponent(deviceId) + '/simulate/payload?at=' + encodeURIComponent(qs.get('at'));
+        var wq = qs.get('weather');
+        if (wq) url += '&weather=' + encodeURIComponent(wq);
       } else {
         // Device preview: the device's own layout/orientation come from the server; no
         // orientation override (we show what the device actually shows).
@@ -2859,7 +3203,7 @@
     }
 
     function startReconnectSupervisor() {
-      if (reconnectSupervisorTimer) return;
+      if (reconnectSupervisorTimer || mirrorHold) return;
       reconnectSupervisorTimer = setInterval(() => {
         if (PREVIEW_MODE) return;
         if (socket && socket.connected) { stopReconnectSupervisor(); return; }
@@ -2884,6 +3228,8 @@
 
     // ==================== Socket Connection ====================
     function connect(serverUrl) {
+      // 3.0 mirrors: a removed or refused mirror stays down until a person opens it again.
+      if (mirrorHold) { console.log('[mirror] not connecting: ' + mirrorHold.kind); return; }
       // BrightSign's registry is ASYNCHRONOUS (registry.read returns a Promise), so on a cold
       // boot the identity is not in hand yet when this first runs. Registering before it lands
       // would pair the panel as a NEW display and strand its real row — so wait once, then adopt
@@ -2974,6 +3320,7 @@
        * and a zero must not turn this into a busy loop.
        */
       socket.on('device:throttled', (d) => {
+        if (mirrorHold) return;   // a refused mirror waits for a person, not a timer
         const asked = Number(d && d.retry_after_ms);
         const waitMs = Math.min(Math.max(Number.isFinite(asked) ? asked : 0, 1000), 5 * 60 * 1000);
         console.warn('[throttle] server asked us to wait ' + waitMs + 'ms (' + ((d && d.reason) || 'unspecified') + ')');
@@ -3076,7 +3423,8 @@
         }
 
         if (!config.paired) {
-          // Show pairing code
+          // Show pairing code. Nothing of a display's screen share belongs on a pairing screen.
+          clearShareForUnpaired();
           document.getElementById('urlForm').style.display = 'none';
           document.getElementById('setupSpinner').style.display = 'none';
           document.getElementById('pairingSection').style.display = 'block';
@@ -3137,7 +3485,24 @@
       // typing that cannot happen, and hides the one thing that would rescue it. Recovery
       // then needed a physical reload. The Android player already does this correctly
       // (ProvisioningActivity "repair mode"); this brings the web player in line.
+      /*
+       * A screen that is no longer this display (re-pairing, a removed or refused mirror, a pairing
+       * code on screen) must not keep the display's meeting-room code or a live share: the code would
+       * let anyone in front of THIS screen present to the display it used to be. The server only
+       * sends codes to the display's own sockets, but the badge is drawn once and stays, and the old
+       * socket lives on through the reconnect countdown.
+       */
+      function clearShareForUnpaired() {
+        try {
+          if (window.STScreenShare) {
+            window.STScreenShare.showCode({ code: null });
+            window.STScreenShare.stop(null, 'unpaired');
+          }
+        } catch (e) { /* the share module is optional */ }
+      }
+
       function enterRepairMode(message) {
+        clearShareForUnpaired();
         delete config.deviceId;
         delete config.deviceToken;
         config.paired = false;
@@ -3165,7 +3530,13 @@
         }
       });
 
+      // 3.0 mirrors (see enterMirrorHold). Arrives just before the device:unpaired a removal also
+      // sends, which is then ignored: re-pairing is exactly what a removed mirror must not do.
+      socket.on('device:mirror-removed', () => enterMirrorHold({ kind: 'removed' }));
+      socket.on('device:mirror-refused', (d) => enterMirrorHold({ kind: 'refused', reason: (d && d.reason) || null, error: (d && d.error) || '' }));
+
       socket.on('device:unpaired', (data) => {
+        if (mirrorHold) return;
         console.warn('Device not found on server — clearing credentials');
         savePlaylistCache([]);
         if (data && data.reason === 'deleted') dropCacheForDeletedDisplay();
@@ -3195,6 +3566,9 @@
           console.warn('[enrol] this player URL key is no longer valid — falling back to pairing');
           config.enrolKey = null;
           config.paired = false;
+          // #630: say WHY a screen opened from a display link is asking for a code. Without it the
+          // operator sees an ordinary pairing screen and reasonably assumes the link never applied.
+          showEnrolKeyRefused();
         }
 
         console.warn('Device auth rejected:', data?.error || 'unknown');
@@ -3534,6 +3908,51 @@
         try { setTalkDucking(false); } catch (_) {}   // restore playlist audio + resume video
       });
 
+      /*
+       * 3.0 screen share (docs/screen-share.md): a person's screen, shown fullscreen over the
+       * playlist. STScreenShare opens the screen's own signalling leg with this player's device_token
+       * and receives the stream peer to peer. The playlist keeps running underneath (ducked, like
+       * talk), so ending the share — however it ends — simply shows it again.
+       */
+      const shareLabels = () => ({
+        sharedBy: _t('share_shared_by'), guest: _t('share_guest'), connecting: _t('share_connecting'),
+        codeTitle: _t('share_code_title'), codeHint: _t('share_code_hint'),
+      });
+      socket.on('device:screenshare-start', (data) => {
+        const SS = window.STScreenShare;
+        if (!SS || !data || typeof data.session_id !== 'string') return;
+        if (!config || !config.deviceId || !config.deviceToken) return;
+        try {
+          setShareDucking(true);
+          SS.start({
+            deviceId: config.deviceId,
+            deviceToken: config.deviceToken,
+            serverUrl: config.serverUrl || '',
+            sessionId: data.session_id,
+            sharedBy: typeof data.shared_by === 'string' ? data.shared_by : '',
+            guest: !!data.guest,
+            maxSeconds: data.max_seconds,
+            iceServers: Array.isArray(data.ice_servers) ? data.ice_servers : [],
+            labels: shareLabels(),
+            onState: (st, reason) => {
+              console.log('[share]', st, reason || '');
+              // Several presenters can be on screen: the playlist comes back with the LAST one gone.
+              if ((st === 'stopped' || st === 'unsupported') && !SS.active()) { try { setShareDucking(false); } catch (_) {} }
+            },
+          });
+        } catch (_) { try { setShareDucking(false); } catch (e) {} }   // a share never breaks playback
+      });
+      socket.on('device:screenshare-stop', (data) => {
+        try { window.STScreenShare && window.STScreenShare.stop(data && data.session_id, data && data.reason); } catch (_) {}
+      });
+      socket.on('device:screenshare-code', (data) => {
+        try { window.STScreenShare && window.STScreenShare.showCode(data, shareLabels()); } catch (_) {}
+      });
+      // Several presenters at once: which share fills the screen (spotlight) and whose sound plays.
+      socket.on('device:screenshare-layout', (data) => {
+        try { window.STScreenShare && window.STScreenShare.layout && window.STScreenShare.layout(data); } catch (_) {}
+      });
+
       socket.on('device:pip-show', (data) => pipShow(data));
       socket.on('device:pip-clear', (data) => pipClear(data && data.pip_id));
     }
@@ -3720,19 +4139,32 @@
       if (typeof setBaseAudioSuppressed !== 'function') return;
       // Base audio is ducked when a trigger covers the screen OR a voice call/PA is active
       // (talkDucking) — combined here so neither source clobbers the other.
-      try { setBaseAudioSuppressed(!!(triggerActive && triggerActive.coversBase) || talkDucking); } catch (e) {}
+      // 3.0: a screen share ducks the playlist the same way (typeof: tests compile this alone).
+      const sharing = typeof shareDucking !== 'undefined' && shareDucking;
+      try { setBaseAudioSuppressed(!!(triggerActive && triggerActive.coversBase) || talkDucking || sharing); } catch (e) {}
     }
 
     // #talk: while a voice call / PA announcement is active on this device, duck the playlist so the
     // announcement is heard — mute the base audio AND pause the current video (frozen, silent). The
     // announcement's own <audio> is __stOverlay, so setBaseAudioSuppressed leaves it alone.
     let talkDucking = false;
+    // 3.0 screen share: while a person's screen is shown over the playlist, mute and pause what is
+    // underneath — the same ducking talk uses, as a separate flag so ending one does not undo the other.
+    let shareDucking = false;
+    function setShareDucking(on) {
+      shareDucking = !!on;
+      triggerSyncAudio();
+      try {
+        if (on) { if (currentVideoEl) currentVideoEl.pause(); }
+        else if (!talkDucking && currentVideoEl && !currentVideoEl.__stOverlay) { const p = currentVideoEl.play(); if (p && p.catch) p.catch(() => {}); }
+      } catch (e) { /* torn down */ }
+    }
     function setTalkDucking(on) {
       talkDucking = !!on;
       triggerSyncAudio();   // re-evaluate the combined base-audio suppression
       try {
         if (on) { if (currentVideoEl) currentVideoEl.pause(); }
-        else if (currentVideoEl && !currentVideoEl.__stOverlay) { const p = currentVideoEl.play(); if (p && p.catch) p.catch(() => {}); }
+        else if (!shareDucking && currentVideoEl && !currentVideoEl.__stOverlay) { const p = currentVideoEl.play(); if (p && p.catch) p.catch(() => {}); }
       } catch (e) { /* torn down */ }
     }
 
@@ -4577,6 +5009,32 @@
       // (detectMic) put a media-permission prompt on top of the pairing code on a fresh Pi, so it is
       // not called. See register(). Until it is restored, every screen reports one-way Talk / PA.
       if (window.__stHasMic) caps.push('remote.mic');
+      /*
+       * 3.0 screen share: this page can RECEIVE a peer-to-peer WebRTC stream and show it fullscreen
+       * (window.STScreenShare). Claimed in a plain browser / desktop shell and in the iOS app
+       * (WKWebView has RTCPeerConnection from iOS 14.3; the app needs 16 and plays inline media
+       * without a gesture). NOT inside the BrightSign, webOS or Vega shells: BrightSign gates WebRTC
+       * behind a widget flag we do not set, LG says WebRTC is for contracted partner apps only, and
+       * Vega's WebView does not document it — a screen that claims it and then shows nothing is a
+       * guest presenting to a blank TV (docs/screen-share.md, "Which screens can show a share").
+       * typeof-guarded throughout because the capability tests run this function on its own.
+       */
+      try {
+        const SS = typeof window !== 'undefined' ? window.STScreenShare : null;
+        const rtc = !!(SS && typeof SS.isSupported === 'function' && SS.isSupported());
+        const ios = typeof onIOS === 'function' && onIOS();
+        const shell = (typeof ON_BRIGHTSIGN !== 'undefined' && ON_BRIGHTSIGN) || (typeof HOST !== 'undefined' && !!HOST && !ios);
+        if (rtc && !shell) caps.push('remote.screen_share');
+        // Up to four shares at once, tiled (several people presenting in one meeting room).
+        if (rtc && !shell && SS.tiles === true) caps.push('remote.screen_share_tiles');
+        /*
+         * 3.0 campaigns: whole layouts switching with full-screen items (see Campaigns). Plain
+         * browser / desktop shell only, like screen share: inside the BrightSign, webOS, Vega and iOS
+         * shells two overlapping stages with video during the fade are unverified, and those players
+         * play the documented fallback instead.
+         */
+        if (!shell) caps.push('layout.campaign');
+      } catch (e) { /* not declared */ }
       if (typeof triggerStats === 'object' && triggerStats.listeners && triggerStats.listeners.http) {
         caps.push('trigger.http');
       }
@@ -4617,6 +5075,9 @@
       try {
         if (!swRegistrationFailed && navigator.serviceWorker && navigator.serviceWorker.controller) {
           caps.push('offline.cache');
+          // 3.0 site cache: the LAN fetch lives in the same worker, and it verifies every byte with
+          // WebCrypto before keeping it. No digest, no claim: unverified bytes are never played.
+          if (typeof crypto !== 'undefined' && crypto && crypto.subtle) caps.push('net.site_cache');
         }
       } catch (e) { /* locked-down browser */ }
 
@@ -4863,6 +5324,9 @@
        * it, because getConfig() only carries it when there is no stored identity to prefer.
        */
       if (!data.device_id && config.enrolKey) data.enrol_key = config.enrolKey;
+      // #630: with a stored identity, only the key in THIS page's URL goes along (never one left in
+      // storage by an older URL), and not after the server has said it does not know it.
+      else if (data.device_id && config.enrolKey && config.enrolKey === urlEnrolKey()) data.enrol_key = config.enrolKey;
       console.log(`[register] device_id=${data.device_id || 'none'}, has_token=${!!data.device_token}, token_len=${data.device_token?.length || 0}, paired=${config.paired}, pairing_code=${data.pairing_code || 'none'}, enrol_key=${data.enrol_key ? 'yes' : 'no'}`);
       socket.emit('device:register', data);
     }
@@ -5050,7 +5514,7 @@
       // Cached like st_group_sync, so a panel that reboots with no server comes back as ITS SLICE of
       // the wall. Without it a cold boot played the cached playlist uncropped across one panel — and
       // with a wall layout, drew the wall's zones squeezed onto this one screen.
-      try { if (config) localStorage.setItem('st_wall_config', JSON.stringify(config)); else localStorage.removeItem('st_wall_config'); } catch (e) {}
+      try { if (config) localStorage.setItem('st_wall_config' + LINK_SUFFIX, JSON.stringify(config)); else localStorage.removeItem('st_wall_config' + LINK_SUFFIX); } catch (e) {}
       if (!config) {
         wallConfig = null;
         container.classList.remove('wall-mode');
@@ -5226,7 +5690,7 @@
       const url = mediaUrl(item);
       try {
         if (groupPreloadEl) { try { groupPreloadEl.remove(); } catch (e) {} }
-        const v = document.createElement('video');
+        const v = newVideoElement();
         v.src = url; v.muted = true; v.playsInline = true; v.preload = 'auto';
         v.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px';
         v.load();
@@ -5290,7 +5754,7 @@
 
     function applyGroupSync(cfg) {
       if (groupSyncTimer) { clearInterval(groupSyncTimer); groupSyncTimer = null; }
-      try { if (cfg) localStorage.setItem('st_group_sync', JSON.stringify(cfg)); else localStorage.removeItem('st_group_sync'); } catch (e) {}
+      try { if (cfg) localStorage.setItem('st_group_sync' + LINK_SUFFIX, JSON.stringify(cfg)); else localStorage.removeItem('st_group_sync' + LINK_SUFFIX); } catch (e) {}
       if (!cfg) {
         applyNativeSync(null);
         if (groupSync) groupReport('info', 'group-sync exited'); groupSync = null; console.log('[group-sync] exited');
@@ -5469,6 +5933,7 @@
                 el.style.width = '';
                 el.style.height = '';
               });
+            cssQuarterTurn = 0;   // 3.0: nothing CSS-rotated left to undo for a pre-rotated video
             console.log('[bs] output rotated by host; CSS transform cleared');
           });
         }
@@ -5479,6 +5944,10 @@
         const st = window.OrientationStyle
           ? window.OrientationStyle.orientationStyle(effectiveOrientation)
           : null;
+        // 3.0 TV-safe video: remember the quarter-turn the container now carries, so a video the
+        // operator marked "already rotated for portrait screens" can be turned back (see below).
+        const quarter = st && /rotate\((90|270)deg\)/.exec(st.transform);
+        cssQuarterTurn = quarter ? Number(quarter[1]) : 0;
         if (st) {
           [document.getElementById('playerContainer'), document.getElementById('pipContainer')]
             .forEach((el) => {
@@ -5566,6 +6035,15 @@
           triggerLog('warn', 'HTTP triggers disabled — the listener stops at the next restart');
         }
       }
+      /*
+       * 3.0 site cache (docs/site-cache.md). Top-level like triggers, so it never enters the
+       * fingerprint. A change (a cache assigned, a new token, a new digest) re-pins below even when
+       * the playlist did not change, so media the screen does not hold yet is tried from the cache.
+       */
+      const siteSigBefore = siteCacheSig(siteCacheCfg);
+      siteCacheCfg = data && data.site_cache && typeof data.site_cache === 'object' ? data.site_cache : null;
+      const siteCacheChanged = siteCacheSig(siteCacheCfg) !== siteSigBefore;
+      if (siteCacheChanged) saveSiteCacheCfg(siteCacheCfg);
       let triggersRepin = false;
       if (Array.isArray(data.triggers)) {
         const sig = triggersSig(data.triggers);
@@ -5576,6 +6054,13 @@
           console.log('[trigger] ' + triggers.length + ' definition(s) synced');
         }
       }
+
+      // A new site cache (or token, or digest) re-pins through the same path as a trigger change, so
+      // media this screen does not hold yet is tried from the cache without waiting for a new playlist.
+      if (siteCacheChanged) triggersRepin = true;
+
+      // 3.0 campaigns: a payload carrying `campaign` is played by the campaign engine instead.
+      if (adoptCampaign(data)) return;
 
       if (newFp === oldFp && playlist.length > 0 && !wallChanged && !layoutChanged) {
         console.log('Playlist unchanged');
@@ -5744,7 +6229,12 @@
           if (newItem && newItem.widget_id && oldItem && (oldItem.widget_rev || 0) !== (newItem.widget_rev || 0)) {
             console.log('Widget edited - re-rendering in place');
             renderContent(newItem);
+            return;
           }
+          // #632: a one-item playlist that just gained items. The item on screen was rendered to
+          // HOLD (a video loops, a YouTube embed loops), so "advance naturally" never comes — the
+          // added item never played, for an hour in the report, until the browser was restarted.
+          if (oldPlaylist.length <= 1 && playlist.length > 1) releaseSingleItemHold(newItem);
           return;
         }
       }
@@ -5894,6 +6384,7 @@
       }, 30000);
     }
     function startPlaybackAt(idx) {
+      if (typeof campaignActive === 'function' && campaignActive()) return;   // 3.0: the campaign engine owns the stage
       clearTimeout(scheduleRetryTimer);
       if (scheduleAllows(playlist[idx])) { currentIndex = idx; isPlaying = true; playCurrentItem(); return; }
       const a = nextActiveIndex(idx);
@@ -5902,6 +6393,7 @@
     }
 
     function playCurrentItem() {
+      if (typeof campaignActive === 'function' && campaignActive()) return;   // 3.0: the campaign engine owns the stage
       if (!playlist.length || !Number.isFinite(currentIndex)) {
         teardownCurrentMedia();
         // The bed survives an ADVANCE, not the playlist going away — otherwise a screen with
@@ -5969,6 +6461,7 @@
       // clears the hold before it advances.
       // typeof: playback tests extract this function on its own, without the kiosk state.
       if (typeof kioskHeld !== 'undefined' && kioskHeld) { console.log('[Kiosk] advance ignored — a visitor is using the interactive page'); return; }
+      if (typeof campaignActive === 'function' && campaignActive()) return;   // 3.0: the campaign engine owns the stage
       // #157: apply a deferred rotation-out — the removed-but-live item has finished, so rotate
       // into the (already-swapped) list at the preserved successor instead of interrupting.
       if (deferredRotation) {
@@ -6043,20 +6536,49 @@
       }
     }
 
-    function createYoutubeEmbed(src, item, container) {
+    /*
+     * opts.zone (#624): a layout zone's YouTube is its OWN. It used to share the fullscreen state: a
+     * second YouTube zone destroyed the first one's player, and a zone video that ended advanced the
+     * MAIN playlist (nextItem) instead of its zone. In zone mode the generation and the safety-net
+     * timer live on the zone's element, no other player is torn down, the end calls opts.onEnded
+     * (null = the zone's own timer moves it on), and opts.loop decides looping.
+     */
+    function createYoutubeEmbed(src, item, container, opts) {
+      const zoneMode = !!(opts && opts.zone);
+      const done = zoneMode ? (opts.onEnded || null) : nextItem;
       const videoId = extractVideoId(src);
       if (!videoId) {
         console.error('Could not extract YouTube video ID from:', src);
-        if (playlist.length > 1) setTimeout(nextItem, 2000);
+        if (zoneMode) { if (done) setTimeout(done, 2000); }
+        else if (playlist.length > 1) setTimeout(nextItem, 2000);
         return null;
       }
 
-      // Invalidate any previous player's callbacks
-      const myGeneration = ++ytGeneration;
+      let alive;
+      if (zoneMode) {
+        const token = (container.__stYtToken || 0) + 1;
+        container.__stYtToken = token;
+        if (container.__stYtSafety) { clearTimeout(container.__stYtSafety); container.__stYtSafety = null; }
+        alive = () => container.__stYtToken === token && document.contains(container);
+      } else {
+        // Invalidate any previous player's callbacks
+        const myGeneration = ++ytGeneration;
+        cancelPlaybackResume();
 
-      // Destroy old player without triggering side effects (callbacks check generation)
-      if (ytSafetyNet) { clearTimeout(ytSafetyNet); ytSafetyNet = null; }
-      if (activeYtPlayer) { try { activeYtPlayer.destroy(); } catch {} activeYtPlayer = null; }
+        // Destroy old player without triggering side effects (callbacks check generation)
+        if (ytSafetyNet) { clearTimeout(ytSafetyNet); ytSafetyNet = null; }
+        if (activeYtPlayer) { try { activeYtPlayer.destroy(); } catch {} activeYtPlayer = null; }
+        alive = () => myGeneration === ytGeneration;
+      }
+      const setSafety = (ms) => {
+        const fire = () => { if (!alive()) return; console.log('YouTube safety net fired for:', item.filename); done(); };
+        if (zoneMode) { clearTimeout(container.__stYtSafety); container.__stYtSafety = setTimeout(fire, ms); }
+        else { clearTimeout(ytSafetyNet); ytSafetyNet = setTimeout(fire, ms); }
+      };
+      const clearSafety = () => {
+        if (zoneMode) { clearTimeout(container.__stYtSafety); container.__stYtSafety = null; }
+        else { clearTimeout(ytSafetyNet); ytSafetyNet = null; }
+      };
 
       // Vertical (Shorts) content is tagged st_aspect=vertical at ingest. Render it
       // in a centered 9:16 box so it fills a portrait screen and pillarboxes cleanly
@@ -6103,9 +6625,9 @@
 
       loadYoutubeApi(() => {
         // Bail if a newer player was created while we waited for the API
-        if (myGeneration !== ytGeneration) return;
+        if (!alive()) return;
 
-        const shouldLoop = playlist.length <= 1;
+        const shouldLoop = zoneMode ? !!opts.loop : playlist.length <= 1;
         let playStartTime = 0;
         activeYtPlayer = new YT.Player(playerDiv.id, {
           videoId: videoId,
@@ -6131,7 +6653,7 @@
           },
           events: {
             onReady: (event) => {
-              if (myGeneration !== ytGeneration) return;
+              if (!alive()) return;
               console.log('YouTube player ready:', item.filename);
               event.target.playVideo();
               // Re-resolve here too: playerVars are read once at construction, and a mute toggle can
@@ -6146,17 +6668,13 @@
               // WebViews), advance from the reported duration + 3s slack. Cleared
               // on a real ENDED, on error, or on teardown. Skip when looping (a
               // single-item playlist intentionally loops forever).
-              if (!shouldLoop) {
+              if (!shouldLoop && done) {
                 let duration = 0;
                 try { duration = event.target.getDuration(); } catch {}
-                if (duration > 0) {
-                  clearTimeout(ytSafetyNet);
-                  ytSafetyNet = setTimeout(() => {
-                    if (myGeneration !== ytGeneration) return;
-                    console.log('YouTube safety net fired for:', item.filename);
-                    nextItem();
-                  }, (duration + 3) * 1000);
-                }
+                if (duration > 0) setSafety((duration + 3) * 1000);
+                // #624 play to end: with no length to go on, the item's duration is the fallback,
+                // so a video whose ENDED never comes cannot hold the screen forever.
+                else if (item.play_to_end) setSafety(Math.max(1, Number(item.duration_sec) || 10) * 1000);
               }
               // #217: best-effort quality cap for weak WiFi. setPlaybackQuality is a
               // hint (YouTube may still adapt), but combined with the vq playerVar it
@@ -6174,24 +6692,30 @@
               }
             },
             onError: (event) => {
-              if (myGeneration !== ytGeneration) return;
-              clearTimeout(ytSafetyNet); ytSafetyNet = null;
+              if (!alive()) return;
+              clearSafety();
               console.error('YouTube error', event.data, 'for:', item.filename);
-              if (playlist.length > 1) {
+              if (zoneMode) {
+                if (done) setTimeout(() => { if (alive()) done(); }, 2000);
+              } else if (playlist.length > 1) {
                 console.log('Skipping unplayable YouTube video');
                 setTimeout(nextItem, 2000);
               }
             },
+            onAutoplayBlocked: () => {
+              if (!alive()) return;
+              console.warn('YouTube autoplay blocked:', item.filename);
+            },
             onStateChange: (event) => {
-              if (myGeneration !== ytGeneration) return;
+              if (!alive()) return;
               // Track when video actually starts playing
               if (event.data === 1) playStartTime = Date.now();
               // YT.PlayerState.ENDED = 0 — advance to next video
               // Ignore ENDED if video played for less than 3 seconds (spurious during init)
-              if (event.data === 0 && !shouldLoop && (Date.now() - playStartTime) > 3000) {
-                clearTimeout(ytSafetyNet); ytSafetyNet = null;
+              if (event.data === 0 && !shouldLoop && done && (Date.now() - playStartTime) > 3000) {
+                clearSafety();
                 console.log('YouTube video ended:', item.filename);
-                nextItem();
+                done();
               }
             },
           },
@@ -6231,6 +6755,8 @@
       // #215: a stale YouTube safety-net timer must never fire into a torn-down/rotated
       // playlist and force a spurious advance.
       if (ytSafetyNet) { clearTimeout(ytSafetyNet); ytSafetyNet = null; }
+      cancelPlaybackResume();
+      suspendedPlayback = null;
       // Cancel any in-flight buffered widget swap so its deferred reveal can't fire after
       // we've torn down (which would drop the incoming content). reveal() nulls this before
       // calling teardownCurrentMedia(iframe), so preserving `keep` is safe.
@@ -6429,6 +6955,51 @@
         return;
       }
       nextItem();
+    }
+
+    /*
+     * #632 — A ONE-ITEM PLAYLIST HOLDS ITS ITEM, AND NOTHING USED TO LET GO WHEN ITEMS WERE ADDED.
+     *
+     * Single-item rendering never advances, deliberately: a video gets `loop = (playlist.length ===
+     * 1)` and so never fires `ended`, and a YouTube embed loops inside the IFrame player with its
+     * ENDED handler disabled. That decision is made ONCE, at render time. When the playlist then
+     * grows, the continuity branch of handlePlaylistUpdate keeps the surviving item playing and
+     * waits for its natural advance — which, for a held item, never comes. The report: an item
+     * added to the playlist, an hour later still not shown, a browser restart fixed it (because
+     * the restart rendered the clip with the NEW length and so without loop).
+     *
+     * Let go in place rather than restarting: the clip finishes its current pass and the playlist
+     * rotates on, exactly as if it had been rendered into a multi-item playlist. Same "never yank
+     * a live item mid-play" rule as #157.
+     *   - <video> (solo, or a wall leader): drop `loop`. Its onended was wired with the right
+     *     mayAdvance for its role, so it calls nextItem() at the end of this pass.
+     *   - YouTube: its loop is baked into the embed, so arm the advance for the end of this pass.
+     *   - A held widget re-checks every WIDGET_SOLO_REFRESH_MS and hands off on its own; arming its
+     *     ordinary dwell instead makes the new item show after the usual duration, not up to 60s.
+     *   - Images arm their dwell on every render already, and schedule-driven members (a wall
+     *     follower, a synced group) and zone layouts advance through their own clocks.
+     */
+    function releaseSingleItemHold(item) {
+      try {
+        if (!item || isWallFollower() || groupSync) return;
+        if (typeof kioskHeld !== 'undefined' && kioskHeld) return;   // kioskRelease() advances
+        if (layout && layout.zones && layout.zones.length > 1 && !wallConfig) return;
+        const v = currentVideoEl;
+        if (v && v.loop && document.contains(v)) {
+          v.loop = false;
+          console.log('[playlist] items added to a one-item playlist — the looping clip ends this pass, then rotates');
+          return;
+        }
+        if (item.mime_type === 'video/youtube' && activeYtPlayer) {
+          let remaining = 0;
+          try { remaining = activeYtPlayer.getDuration() - activeYtPlayer.getCurrentTime(); } catch (e) { remaining = 0; }
+          const ms = remaining > 0 ? (remaining + 0.5) * 1000 : Math.max(1, Number(item.duration_sec) || 10) * 1000;
+          scheduleAdvance(nextItem, ms);
+          console.log('[playlist] items added to a one-item playlist — the looping YouTube item rotates in ' + Math.round(ms / 1000) + 's');
+          return;
+        }
+        if (item.widget_id) scheduleAdvance(nextItem, Math.max(1, Number(item.duration_sec) || 30) * 1000);
+      } catch (e) { /* never let this break a playlist update; the held widget's own re-check still runs */ }
     }
 
     // feat/player-image-preload: warm the NEXT scheduled image (decoded) during the current dwell,
@@ -6833,7 +7404,7 @@
 
     function renderLiveStream(item, src, mount, opts) {
       const o = opts || {};
-      const video = document.createElement('video');
+      const video = newVideoElement();
       video.autoplay = true;
       video.muted = !!(o.forceMuted || !userHasInteracted || !!item.muted);
       if (!o.forceMuted) video.volume = 1.0;
@@ -7001,7 +7572,7 @@
           if (!wantsWipe || (typeof onVega === 'function' && onVega())) outgoing.pause();
         } catch (e) {}
       }
-      const video = document.createElement('video');
+      const video = newVideoElement();
       video.crossOrigin = 'anonymous';                  // texturable (CORS-clean) + matches the legacy branch
       video.playsInline = true;
       video.preload = 'auto';
@@ -7090,6 +7661,7 @@
     }
 
     function renderContent(item) {
+      if (typeof campaignActive === 'function' && campaignActive()) return;   // 3.0: the campaign engine owns the stage
       // New dispatch supersedes any in-flight buffered (async warm-play) render — see renderSeq.
       renderSeq++;
       // Cancel any pending advance/refresh timer up front so a prior item's timer (incl. a
@@ -7291,7 +7863,7 @@
           // Double buffer: reuse the pre-buffered element for this index if we warmed it (no black
           // hold). Its src is already set + buffered; a fresh element otherwise.
           const preloaded = scheduleDriven ? takeGroupPreload(currentIndex) : null;
-          const video = preloaded || document.createElement('video');
+          const video = preloaded || newVideoElement();
           if (!preloaded) video.src = src;
           video.autoplay = true;
           // Followers stay muted unconditionally (leader-only audio); leaders
@@ -7311,6 +7883,14 @@
             : 'width:100%;height:100%;object-fit:contain;background:transparent';   // #336: letterbox shows the device colour
           // Group members loop so a clip shorter than its schedule slot holds until the schedule
           // advances the index (and the tick seeks position % duration to stay aligned).
+          // 3.0 TV-safe video: a file the operator turned sideways themselves plays as-is on a
+          // portrait screen — counter-rotated inside the turned container, so the net turn is zero
+          // and the file fills the physical panel. (BrightSign rotates its output instead, which
+          // cssQuarterTurn reports as 0: there the flag has no effect.)
+          if (!wallConfig && Number(item.video_prerotated) === 1 && cssQuarterTurn) {
+            video.style.cssText = 'position:absolute;left:50%;top:50%;width:100vw;height:100vh;object-fit:contain;background:transparent;'
+              + 'transform:translate(-50%,-50%) rotate(-' + cssQuarterTurn + 'deg)';
+          }
           mount.appendChild(video);
           currentVideoEl = video;
           wireSoloVideoPlayback(video, item, src, {
@@ -7442,7 +8022,7 @@
         // Same as the legacy branch: the leader / a single screen drives an image's advance.
         if (!isFollower) scheduleAdvance(nextItem, (item.duration_sec || 10) * 1000);
       } else {
-        const video = document.createElement('video');
+        const video = newVideoElement();
         video.src = src;
         video.autoplay = true;
         attachSubtitleTrack(video, item);
@@ -7563,11 +8143,17 @@
      */
     function showZoneItem(zone, div, items, index, timers = zoneTimers) {
       if (timers[zone.id]) { clearTimeout(timers[zone.id]); delete timers[zone.id]; }
+      // #624: whatever this zone showed before is gone, so a YouTube player it held must not move
+      // the zone on later (its callbacks check this token; see createYoutubeEmbed's zone mode).
+      div.__stYtToken = (div.__stYtToken || 0) + 1;
+      if (div.__stYtSafety) { clearTimeout(div.__stYtSafety); div.__stYtSafety = null; }
       // #74/#75: skip items whose schedule excludes them now; idle the zone if none.
       const activeIdx = zoneNextActive(items, index, zone.id);
       if (activeIdx === -1) { showZoneEmpty(zone, div, items, timers); return; }
       index = activeIdx;
       const a = items[index % items.length];
+      // 3.0 campaigns: a campaign zone records proof-of-play for each item it shows.
+      if (div.__stOnShow) { try { div.__stOnShow(a); } catch (e) { /* never let logging stop a zone */ } }
       // Scheduled zones must cycle (even a lone active item) so windows re-evaluate
       // at each transition rather than a loop ignoring the window end.
       const multi = items.length > 1 || items.some(it => (it.schedules && it.schedules.length) || it.play_from || it.play_until || it.play_when);
@@ -7576,7 +8162,7 @@
       // not the HOLD_MIME helpers: showZoneItem is extracted + eval'd in isolation by a test.
       if (a.mime_type === 'application/x-st-hold') {
         if (a.remote_url === 'hold://freeze') {
-          div.querySelectorAll('video').forEach(v => { try { v.onended = null; v.onerror = null; v.pause(); } catch (e) {} });
+          div.querySelectorAll('video').forEach(v => { try { v.__stHoldFrozen = true; v.onended = null; v.onerror = null; v.pause(); } catch (e) {} });
         } else {
           div.querySelectorAll('video').forEach(v => { try { destroyHls(v); v.onended = null; v.pause(); v.removeAttribute('src'); v.load(); } catch (e) {} });
           div.innerHTML = '';
@@ -7608,15 +8194,19 @@
         if (PREVIEW_MODE && a.widget_type === 'webpage') addWebpageNote(div); // #104
         if (multi) timers[zone.id] = setTimeout(advance, dur);
       } else if (isYoutube) {
-        createYoutubeEmbed(src, a, div);
-        if (multi) timers[zone.id] = setTimeout(advance, dur);
+        // #624: play to end moves the ZONE on when the video ends (the embed's safety net covers a
+        // missing ENDED). Otherwise the zone's own timer does, and the clip loops until then. A
+        // single-item zone loops either way.
+        const toEnd = !!a.play_to_end && multi;
+        createYoutubeEmbed(src, a, div, { zone: true, loop: !toEnd, onEnded: toEnd ? advance : null });
+        if (multi && !toEnd) timers[zone.id] = setTimeout(advance, dur);
       } else if (isHls) {
         // IPTV in a zone: a live stream, native-HLS first with the vendored hls.js fallback (same as
         // the fullscreen path), per-zone so several zones can each run one. Duration is DWELL: a
         // rotating zone advances after duration_sec (>0); a dwell-0 (or sole-item) zone stays, and on
         // the slow re-check cadence only advances if this stops being the active pick (windows still
         // re-evaluate, without remounting the stream every minute).
-        const video = document.createElement('video');
+        const video = newVideoElement();
         video.autoplay = true;
         video.__stOverlay = !!div.__stOverlay;
         video.muted = div.__stOverlay ? false : (zone.sort_order > 0);
@@ -7640,7 +8230,7 @@
           }
         }
       } else if (isVideo) {
-        const video = document.createElement('video');
+        const video = newVideoElement();
         video.src = src;
         video.autoplay = true;
         // Propagate the overlay latch from the container: this same function renders BOTH real
@@ -7695,6 +8285,226 @@
         div.appendChild(img);
         if (multi) timers[zone.id] = setTimeout(advance, dur);
       }
+    }
+
+
+    // ==================== Campaigns (3.0) ====================
+    /*
+     * A playlist whose items can be WHOLE LAYOUTS (server/lib/campaign.js, docs/layouts-and-campaigns.md):
+     * layout A with its zones for 30 s -> a full-screen video -> layout B for 20 s -> loop. The server
+     * sends `campaign` only to a player that declares layout.campaign; `assignments` stays the plain
+     * fallback, so everything else in this file (offline cache, the idle screen, a player without
+     * this block) keeps working on ordinary items.
+     *
+     * Each step is drawn on its own stage over the last one and faded in, and the old stage is torn
+     * down after the fade — the outgoing frame is never blanked first. The next step's media is warmed
+     * while the current one plays. Zones reuse showZoneItem with a timer map of their own, so a zone in
+     * a campaign rotates, gates on dayparts and plays every media type exactly as a zone of a layout
+     * does. While a campaign runs, the single-item engine (playCurrentItem / nextItem / renderContent)
+     * stands down: two engines on one stage is how a screen ends up flickering between them.
+     */
+    // (Its state is declared beside zoneTimers, near the top: the cold-start restore runs before
+    // this point of the script, and a `let` read before its line is a ReferenceError.)
+    function campaignActive() { return !!(campaign && campaignRun); }
+    function campaignSupported() {
+      try { return typeof window !== 'undefined' && !(typeof ON_BRIGHTSIGN !== 'undefined' && ON_BRIGHTSIGN) && !(typeof HOST !== 'undefined' && !!HOST); }
+      catch (e) { return false; }
+    }
+    // Volatile per-payload fields (signed file URLs, data-source bags) are left out, so a refresh of
+    // the same campaign does not restart it.
+    function campaignSig(c) {
+      try {
+        return JSON.stringify(c.steps, (k, v) => (k === 'file_url' || k === '_ds' ? undefined : v));
+      } catch (e) { return String(Math.random()); }
+    }
+    function campaignItemsOf(c) {
+      const out = [];
+      for (const s of (c && c.steps) || []) {
+        if (s && s.type === 'item' && s.item) out.push(s.item);
+        if (s && s.type === 'layout' && s.zones) for (const k in s.zones) for (const it of s.zones[k] || []) out.push(it);
+      }
+      return out;
+    }
+    function saveCampaignCache(c) { try { localStorage.setItem(CAMPAIGN_CACHE_KEY, c ? JSON.stringify(c) : ''); } catch (e) {} }
+    function loadCampaignCache() {
+      try { const raw = localStorage.getItem(CAMPAIGN_CACHE_KEY); const c = raw ? JSON.parse(raw) : null; return c && Array.isArray(c.steps) && c.steps.length ? c : null; }
+      catch (e) { return null; }
+    }
+    function campaignStepAllowed(s) {
+      if (!s) return false;
+      if (s.type === 'layout') {
+        if (!s.layout || !Array.isArray(s.layout.zones) || s.empty) return false;
+        return scheduleAllows(s);
+      }
+      return !!s.item && scheduleAllows(s.item);
+    }
+    function campaignNextAllowed(from) {
+      const steps = campaign.steps;
+      for (let i = 0; i < steps.length; i++) {
+        const idx = (from + i) % steps.length;
+        if (campaignStepAllowed(steps[idx])) return idx;
+      }
+      return -1;
+    }
+    function campaignLogPlay(a, zoneId, layoutId) {
+      if (PREVIEW_MODE || !a || !shouldLogPlay(a) || !socket?.connected) return;
+      try {
+        socket.emit('device:play-event', {
+          device_id: config.deviceId, event: 'play_start',
+          content_id: a.content_id || null, widget_id: a.widget_id || null,
+          content_name: a.filename || a.widget_name || a.title || null,
+          duration_sec: a.duration_sec || null, zone_id: zoneId || null, layout_id: layoutId || null,
+        });
+      } catch (e) { /* proof-of-play is best effort */ }
+    }
+    function campaignLogLayout(s) {
+      if (PREVIEW_MODE || !s || s.log_play === 0 || !socket?.connected) return;
+      try {
+        socket.emit('device:play-event', {
+          device_id: config.deviceId, event: 'layout_start', layout_id: s.layout_id || (s.layout && s.layout.id) || null,
+          content_name: (s.layout && s.layout.name) || null, duration_sec: s.duration_sec || null,
+        });
+      } catch (e) { /* best effort */ }
+    }
+    function releaseStage(stage, timers) {
+      for (const k in timers || {}) { try { clearTimeout(timers[k]); } catch (e) {} }
+      if (!stage) return;
+      stage.querySelectorAll('video').forEach((v) => { try { destroyHls(v); v.onended = null; v.onerror = null; v.pause(); v.removeAttribute('src'); v.load(); } catch (e) {} });
+      stage.querySelectorAll('.zone').forEach((d) => { d.__stOnShow = null; d.__stYtToken = (d.__stYtToken || 0) + 1; });
+      try { stage.remove(); } catch (e) {}
+    }
+    // Warm the next step's media while this one plays: images decode, videos buffer.
+    function preloadCampaignStep(s) {
+      campaignPreloads.forEach((v) => { try { if (v && v.tagName === 'VIDEO') { v.removeAttribute('src'); v.load(); } } catch (e) {} });
+      campaignPreloads = [];
+      if (!s) return;
+      const items = s.type === 'item' ? [s.item] : Object.keys(s.zones || {}).map((k) => (s.zones[k] || [])[0]);
+      for (const a of items) {
+        if (!a || a.widget_id || !a.mime_type) continue;
+        const src = mediaUrl(a);
+        if (!src) continue;
+        if (a.mime_type.startsWith('image/')) { const img = new Image(); img.src = src; campaignPreloads.push(img); }
+        else if (a.mime_type.startsWith('video/') && a.mime_type !== 'video/youtube' && a.mime_type !== 'video/hls') {
+          const v = newVideoElement(); v.preload = 'auto'; v.muted = true; v.src = src; campaignPreloads.push(v);
+        }
+      }
+    }
+    function runCampaignStep(from) {
+      if (!campaign) return;
+      const container = document.getElementById('playerContainer');
+      if (!container) return;
+      const gen = (campaignRun && campaignRun.gen || 0) + 1;
+      const prev = campaignRun;
+      if (prev && prev.timer) clearTimeout(prev.timer);
+      const idx = campaignNextAllowed(from);
+      if (idx === -1) {
+        // Nothing allowed now (dayparts): the idle screen, and look again shortly.
+        if (prev) releaseStage(prev.stage, prev.timers);
+        campaignRun = { idx: from, stage: null, timers: {}, gen, timer: setTimeout(() => runCampaignStep(from), 30000) };
+        if (!renderDefaultContent()) showNothingScheduled();
+        return;
+      }
+      hideStatus();
+      container.style.display = 'block';
+      const s = campaign.steps[idx];
+      const stage = document.createElement('div');
+      stage.className = 'campaign-stage';
+      stage.dataset.step = String(idx);
+      stage.style.cssText = `position:absolute;top:0;right:0;bottom:0;left:0;overflow:hidden;opacity:0;transition:opacity ${CAMPAIGN_FADE_MS}ms ease;z-index:${10 + (gen % 2)}`;
+      container.appendChild(stage);
+      const timers = {};
+      const run = { idx, stage, timers, gen, timer: null };
+      campaignRun = run;
+      const advance = () => { if (campaignRun === run) runCampaignStep(idx + 1); };
+      let durMs;
+      if (s.type === 'layout') {
+        stage.dataset.layout = s.layout.id;
+        if (s.layout.variant) stage.dataset.variant = s.layout.variant;
+        const layoutId = s.layout_id || s.layout.id;
+        for (const zone of s.layout.zones) {
+          const items = (s.zones && s.zones[zone.id]) || [];
+          if (!items.length) continue;
+          const div = document.createElement('div');
+          div.className = 'zone';
+          div.dataset.zone = zone.id;
+          div.style.cssText = `position:absolute;left:${zone.x_percent}%;top:${zone.y_percent}%;width:${zone.width_percent}%;height:${zone.height_percent}%;z-index:${zone.z_index || 0};overflow:hidden`;
+          div.__stOnShow = (a) => campaignLogPlay(a, zone.id, layoutId);
+          stage.appendChild(div);
+          showZoneItem(zone, div, items, 0, timers);
+        }
+        campaignLogLayout(s);
+        durMs = Math.max(1, Number(s.duration_sec) || 10) * 1000;
+        run.timer = setTimeout(advance, durMs);
+      } else {
+        const a = s.item;
+        const zone = { id: '__campaign_full__', x_percent: 0, y_percent: 0, width_percent: 100, height_percent: 100, z_index: 0, sort_order: 0, fit_mode: a.fit_mode || 'contain' };
+        const div = document.createElement('div');
+        div.className = 'zone';
+        div.dataset.zone = zone.id;
+        div.style.cssText = 'position:absolute;top:0;right:0;bottom:0;left:0;overflow:hidden';
+        stage.appendChild(div);
+        showZoneItem(zone, div, [a], 0, timers);
+        campaignLogPlay(a, null, null);
+        const isVideo = typeof a.mime_type === 'string' && a.mime_type.startsWith('video/') && a.mime_type !== 'video/youtube' && a.mime_type !== 'video/hls';
+        durMs = Math.max(1, Number(a.duration_sec) || 10) * 1000;
+        const v = isVideo ? div.querySelector('video') : null;
+        if (v) {
+          // A clip plays to its end, as on every other player; the timer is only a safety net.
+          v.loop = false;
+          v.onended = advance;
+          v.onerror = advance;
+          run.timer = setTimeout(advance, Math.max(durMs * 3, 300000));
+        } else {
+          run.timer = setTimeout(advance, durMs);
+        }
+      }
+      // Fade the new stage in over the old one, then let the old one go.
+      requestAnimationFrame(() => requestAnimationFrame(() => { stage.style.opacity = '1'; }));
+      if (prev && prev.stage) setTimeout(() => releaseStage(prev.stage, prev.timers), CAMPAIGN_FADE_MS + 50);
+      else if (prev) releaseStage(null, prev.timers);
+      const nxt = campaignNextAllowed(idx + 1);
+      preloadCampaignStep(nxt === -1 ? null : campaign.steps[nxt]);
+      if (PREVIEW_MODE) { try { window.__stCampaignStep = { index: idx, type: s.type, layout_id: s.type === 'layout' ? s.layout.id : null }; } catch (e) {} }
+    }
+    function startCampaign(c) {
+      stopCampaign();
+      // The single-item engine stands down: its timers and its stage go.
+      if (advanceTimer) { clearTimeout(advanceTimer); advanceTimer = null; }
+      teardownCurrentMedia();
+      campaign = { steps: c.steps, sig: campaignSig(c) };
+      isPlaying = true;
+      document.getElementById('setupScreen').style.display = 'none';
+      console.log('[campaign] playing ' + c.steps.length + ' step(s)');
+      runCampaignStep(0);
+    }
+    function stopCampaign() {
+      if (campaignRun) { if (campaignRun.timer) clearTimeout(campaignRun.timer); releaseStage(campaignRun.stage, campaignRun.timers); }
+      document.querySelectorAll('#playerContainer > .campaign-stage').forEach((el) => releaseStage(el, null));
+      campaignPreloads = [];
+      campaignRun = null;
+      campaign = null;
+    }
+    /*
+     * Called from handlePlaylistUpdate. Returns true when the payload is a campaign this player
+     * plays (and has been adopted), false when the normal path should handle it. A campaign that
+     * stops being one hands the stage back by emptying `playlist`, so the normal path re-renders.
+     */
+    function adoptCampaign(data) {
+      const c = campaignSupported() && data && data.campaign && Array.isArray(data.campaign.steps) && data.campaign.steps.length
+        && !data.wall_config && !data.group_sync ? data.campaign : null;
+      if (!c) {
+        if (campaign) { console.log('[campaign] ended — back to the playlist'); stopCampaign(); saveCampaignCache(null); playlist = []; }
+        return false;
+      }
+      // The fallback stays the playlist of record (offline restore, the idle path), and the worker
+      // keeps every campaign asset: the list is declared complete, so anything left out is pruned.
+      playlist = Array.isArray(data.assignments) ? data.assignments : [];
+      if (playlist.length) savePlaylistCache(playlist);
+      saveCampaignCache(c);
+      requestOfflineCache((Array.isArray(data.assignments) ? data.assignments : []).concat(campaignItemsOf(c)), triggerItems(triggers));
+      if (campaign && campaign.sig === campaignSig(c)) { console.log('[campaign] unchanged'); return true; }
+      startCampaign(c);
+      return true;
     }
 
     // ==================== Wall zones ====================
@@ -7894,7 +8704,7 @@
         return { el: img, video: null };
       }
       if (typeof a.mime_type === 'string' && a.mime_type.startsWith('video/') && a.mime_type !== 'video/youtube') {
-        const video = document.createElement('video');
+        const video = newVideoElement();
         video.playsInline = true;
         video.crossOrigin = 'anonymous';
         video.style.cssText = `width:100%;height:100%;object-fit:${fit}`;
@@ -7908,6 +8718,7 @@
         video.src = src;
         video.loop = true;    // a clip shorter than its slot holds until the clock moves the zone on
         if (opts && opts.frozenAtEnd) {
+          video.__stHoldFrozen = true;
           video.autoplay = false;
           video.addEventListener('loadedmetadata', () => {
             try { video.currentTime = Math.max(0, (video.duration || 0) - 0.05); video.pause(); } catch (e) {}
@@ -7933,7 +8744,7 @@
       if (isHoldItem(a)) {
         if (holdMode(a) === 'freeze') {
           if (zs.div.firstChild) {
-            zs.div.querySelectorAll('video').forEach((v) => { try { v.pause(); } catch (e) {} });
+            zs.div.querySelectorAll('video').forEach((v) => { try { v.__stHoldFrozen = true; v.pause(); } catch (e) {} });
             zs.video = null;
             return;
           }
@@ -8215,6 +9026,55 @@
 
     // Build the screenshot/stream canvas and return it (caller encodes + sends). Exposed as
     // a plain function so a headless render pass can verify the composite without a socket.
+    /*
+     * The screen-share overlay (lib/screen-share-player.js: #st-share-overlay > #st-share-video,
+     * #st-share-wait, #st-share-badge) as the remote viewer should see it: the shared picture
+     * letterboxed on black, plus the "Shared by …" badge, or the "Connecting to …" line before the
+     * first frame. A WebRTC MediaStream video is same-origin for drawImage, so it is readable.
+     * Returns false when no share is on screen, so the normal capture runs.
+     */
+    function drawScreenShare(ctx, W, H) {
+      const overlay = document.getElementById('st-share-overlay');
+      if (!overlay || !overlay.isConnected || getComputedStyle(overlay).display === 'none') return false;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, W, H);
+      // Several presenters: every visible tile where it sits on screen, each with its own label.
+      const SS = window.STScreenShare;
+      const tiles = SS && typeof SS.tilesOnScreen === 'function' ? SS.tilesOnScreen() : null;
+      const parts = tiles && tiles.length ? tiles : [{
+        x: 0, y: 0, w: 1, h: 1, video: document.getElementById('st-share-video'),
+        label: (() => { const el = document.getElementById('st-share-badge'); return el && getComputedStyle(el).display !== 'none' ? (el.textContent || '').trim() : ''; })(),
+        waiting: (() => { const el = document.getElementById('st-share-wait'); return el && getComputedStyle(el).display !== 'none' ? (el.textContent || '').trim() : ''; })(),
+      }];
+      ctx.textBaseline = 'alphabetic';
+      for (const p of parts) {
+        const tx = Math.round(p.x * W), ty = Math.round(p.y * H), tw = Math.round(p.w * W), th = Math.round(p.h * H);
+        const video = p.video;
+        let drew = false;
+        if (video && video.readyState >= 2 && video.videoWidth > 0) {
+          try { drawMediaFit(ctx, video, video.videoWidth, video.videoHeight, tx, ty, tw, th, 'contain'); drew = true; } catch (e) { drew = false; }
+        }
+        if (!drew) {
+          ctx.fillStyle = '#cbd5e1';
+          ctx.font = '500 22px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(p.waiting || 'Screen share', tx + tw / 2, ty + th / 2, tw - 16);
+        }
+        ctx.textAlign = 'left';
+        const badge = String(p.label || '').trim();
+        if (badge) {
+          ctx.font = '500 14px sans-serif';
+          const pad = 8, x = tx + 12, h = 26;
+          const w = Math.min(tw * 0.8, ctx.measureText(badge).width + pad * 2);
+          ctx.fillStyle = 'rgba(15,23,42,0.72)';
+          ctx.fillRect(x, ty + th - 12 - h, w, h);
+          ctx.fillStyle = '#fff';
+          ctx.fillText(badge, x + pad, ty + th - 12 - 8, w - pad * 2);
+        }
+      }
+      return true;
+    }
+
     function renderCaptureCanvas() {
       const container = document.getElementById('playerContainer');
       const cr = container ? container.getBoundingClientRect() : null;
@@ -8234,8 +9094,14 @@
 
       try {
         const multiZone = !!(layout && Array.isArray(layout.zones) && layout.zones.length > 1 && !wallConfig);
-        const wallShot = wallConfig ? drawWallComposite(ctx, container, W, H) : null;
-        if (wallShot) {
+        // 3.0 screen share: a live share is a fullscreen overlay OUTSIDE #playerContainer
+        // (/player/screen-share.js), so the composites below would capture the paused playlist
+        // underneath. While a share is up, the screen IS the share: capture that.
+        const shareShot = drawScreenShare(ctx, W, H);
+        const wallShot = (!shareShot && wallConfig) ? drawWallComposite(ctx, container, W, H) : null;
+        if (shareShot) {
+          captured = true;
+        } else if (wallShot) {
           captured = wallShot.drawn;
           videoUncapturable = wallShot.uncapturable && !wallShot.drawn;
         } else if (multiZone && container) {
@@ -8307,7 +9173,9 @@
       // plane, so a DOM composite comes back with the content missing. It needs no host bridge at
       // all, which is what makes it work where the host route does not: page->host messaging is
       // dead after load on that platform, so a request relayed through BrightScript never arrives.
-      if (BS && typeof BS.captureScreen === 'function') {
+      // Only on real BrightSign hardware: the helper is loaded on every web player, so without the
+      // isBrightSign check a browser warned on every screenshot before taking the same canvas path.
+      if (BS && typeof BS.captureScreen === 'function' && typeof BS.isBrightSign === 'function' && BS.isBrightSign()) {
         BS.captureScreen({ width: 960, height: 540 })
           .then((dataUrl) => {
             const base64 = String(dataUrl).split(',')[1];
@@ -8627,6 +9495,69 @@
       } catch {}
     }
     requestWakeLock();
+    function cancelPlaybackResume() {
+      if (playbackResumeTimer !== null) { clearTimeout(playbackResumeTimer); playbackResumeTimer = null; }
+    }
+
+    function rememberPlayback() {
+      // A paused video may be a user pause, a frozen hold, or an outgoing buffer.
+      // Retain only visible videos that were running before suspension.
+      if (suspendedPlayback) return;
+      const videos = Array.from(document.querySelectorAll('video')).filter(video => {
+        if (video.paused || video.ended || video.error || video.__stHoldFrozen) return false;
+        for (let el = video; el; el = el.parentElement) {
+          const style = getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        }
+        return true;
+      });
+      suspendedPlayback = { seq: renderSeq, videos };
+    }
+
+    function resumePlayback() {
+      // pageshow and visibilitychange can describe the same foreground transition.
+      if (document.visibilityState !== 'visible' || playbackResumeTimer !== null) return;
+      const videos = suspendedPlayback && suspendedPlayback.seq === renderSeq ? suspendedPlayback.videos : [];
+      const player = activeYtPlayer;
+      const generation = ytGeneration;
+      const seq = renderSeq;
+      let attempts = 0;
+      function attempt() {
+        playbackResumeTimer = null;
+        if (document.visibilityState !== 'visible' || !isPlaying || screenIsOff
+            || seq !== renderSeq || (kiosk && kiosk.isShowing())) {
+          if (document.visibilityState === 'visible') suspendedPlayback = null;
+          return;
+        }
+        let pending = false;
+        for (const video of videos) {
+          if (!document.contains(video) || video.ended || video.error || video.__stHoldFrozen || !video.paused
+              || (talkDucking && !video.__stOverlay)) continue;
+          pending = true;
+          try {
+            const result = video.play();
+            if (result && result.catch) result.catch(() => {});
+          } catch (e) { /* retry after the WebView finishes resuming */ }
+        }
+        // YouTube lives in a cross-origin iframe; reuse its existing IFrame API handle.
+        if (player && player === activeYtPlayer && generation === ytGeneration && !talkDucking) {
+          try {
+            if (document.contains(player.getIframe())) {
+              const state = player.getPlayerState();
+              if (state !== 1 && state !== 0) {
+                pending = true;
+                if (state === 2 || state === -1 || state === 5) player.playVideo();
+              }
+            }
+          } catch (e) { pending = true; /* iframe may not be ready yet */ }
+        }
+        // WebView timers can resume before its media surfaces are ready.
+        if (pending && ++attempts < 3) playbackResumeTimer = setTimeout(attempt, attempts === 1 ? 250 : 1000);
+        else suspendedPlayback = null;
+      }
+      attempt();
+    }
+
     // v4 browser half-open triggers: tab foreground / bfcache resume / network change all drive the
     // SAME liveness check + #148 teardown-first reconnect (checkLiveness -> connect() only if the
     // socket is armed+connected+silent-past-window). checkLiveness no-ops on a healthy socket, so a
@@ -8635,8 +9566,12 @@
       // On becoming visible after a (possibly throttled/frozen) background stint, do the fresh
       // liveness check — reset the grace and reconnect ONLY if genuinely dead; never spuriously
       // tear down a live socket on the hidden->visible gap.
-      if (document.visibilityState === 'visible') { requestWakeLock(); verifyLivenessSoon(); }
-      else if (glTxAbort) { glTxAbort(); } // tab hidden mid-wipe: hard-cut NOW (before rAF freezes) so nothing sticks
+      if (document.visibilityState === 'visible') { requestWakeLock(); verifyLivenessSoon(); resumePlayback(); }
+      else {
+        rememberPlayback();
+        cancelPlaybackResume();
+        if (glTxAbort) { glTxAbort(); } // tab hidden mid-wipe: hard-cut NOW (before rAF freezes) so nothing sticks
+      }
     });
     // pairing-race fix: pageshow fires on EVERY load (persisted=false), not only bfcache restores.
     // Unfiltered it ran verifyLivenessSoon() on the initial cold load, which opened the socket EARLY
@@ -8645,7 +9580,10 @@
     // connect->register->disconnect->reconnect flap that collided with the server's offline grace and
     // produced the UNIQUE pairing_code collision). Only act on a REAL bfcache restore (persisted=true),
     // mirroring the pagehide guard above; the cold-boot connect is owned solely by the boot path.
-    window.addEventListener('pageshow', (ev) => { if (ev && ev.persisted) verifyLivenessSoon(); }); // sleep/resume via bfcache restore
+    window.addEventListener('pagehide', (ev) => { if (ev && ev.persisted) rememberPlayback(); });
+    window.addEventListener('pageshow', (ev) => {
+      if (ev && ev.persisted) { verifyLivenessSoon(); resumePlayback(); }
+    }); // sleep/resume via bfcache restore
     window.addEventListener('online', verifyLivenessSoon);     // network switch (wifi<->cellular)
 
     // feat/offline-cause-log: display sleep / backgrounding proxy — screen off/on on a TV.
@@ -8861,7 +9799,7 @@
           // The list is in the module (UnpairGate.storageKeys) with the reasoning for each entry —
           // above all for st_install_id, without which the next register is reclaimed onto the row
           // we just unpaired and the whole wipe is theatre.
-          UnpairGate.storageKeys(SCREEN_SUFFIX).forEach((k) => {
+          UnpairGate.storageKeys(SCREEN_SUFFIX, LINK_SUFFIX).forEach((k) => {
             try { localStorage.removeItem(k); } catch (e) { /* keep going: one failure is not all */ }
           });
         } catch (e) { /* storage gone: nothing to clear, nothing to break */ }

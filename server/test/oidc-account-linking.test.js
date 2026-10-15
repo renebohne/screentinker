@@ -50,7 +50,7 @@ test('the linked account is taken from the transaction, never from the returned 
   const cb = handler('get', '/oidc/:slug/callback');
   // The callback hands the transaction's link target to the shared post-login path
   // (completeFederatedLogin), which looks the account up by THAT, never by the returned email.
-  assert.match(cb, /completeFederatedLogin\(req, res, \{ provider, claims, link: tx\.link \|\| null \}\)/,
+  assert.match(cb, /completeFederatedLogin\(req, res, \{ provider, claims, link: tx\.link \|\| null[,}]/,
     'the callback passes tx.link (the session that started it) as the link target');
   assert.match(cb, /WHERE id = \?'\)\.get\(link\)/,
     'the target account is looked up by that link target');
@@ -88,8 +88,10 @@ test('both link and unlink are recorded in the activity log', () => {
 
 test('link failures return to Settings, not the login page', () => {
   const cb = handler('get', '/oidc/:slug/callback');
-  assert.match(cb, /const fail = linking \? backToSettings : backToApp/,
+  assert.match(cb, /const fail = linking \? backToSettings : \(forApp \? backToManagerApp : backToApp\)/,
     'an authenticated user must not be bounced to a login screen to be told the link failed');
+  // 3.0: link mode wins over the Manager app's hand-off (forApp is false while linking).
+  assert.match(cb, /const forApp = !linking && /, 'a link must never end in the app hand-off');
   assert.match(AUTH, /function backToSettings\(res, params\)[\s\S]{0,200}#\/settings/);
 });
 
@@ -119,6 +121,7 @@ test('login and link share one flow, so verification cannot drift between them',
   assert.match(AUTH, /async function beginOidc\(req, res, provider, extra = \{\}/);
   const login = handler('get', '/oidc/:slug/start');
   const link = handler('get', '/oidc/:slug/link/start');
-  assert.match(login, /beginOidc\(req, res, provider\)/);
+  // 3.0: the Manager app's challenge rides in the same transaction; it does not fork the flow.
+  assert.match(login, /beginOidc\(req, res, provider, app \? \{ app \} : \{\}\)/);
   assert.match(link, /beginOidc\(req, res, provider, \{ link: req\.user\.id \}/);
 });

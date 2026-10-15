@@ -48,8 +48,20 @@ function pruneDevice(deviceId) {
 // deviceNs.to(deviceId).emit('device:playlist-update', buildPlaylistPayload(deviceId));
 // directly. Now they call queueOrEmitPlaylistUpdate which checks room presence
 // first and queues only if the device is offline.
-function queueOrEmitPlaylistUpdate(deviceNs, deviceId, buildPayload) {
+function queueOrEmitPlaylistUpdate(deviceNs, deviceId, buildPayload, _mirrorHop) {
   if (!deviceNs || !deviceId || typeof buildPayload !== 'function') return { delivered: false };
+  /*
+   * 3.0 display-link mirrors (lib/mirrors.js): a mirror plays what its original plays, so every
+   * push to the original goes to each mirror as well — with the MIRROR's own payload (built per
+   * screen, which is what keeps its audience/site-cache fields its own). This is the one place all
+   * ~20 push paths meet, so no caller has to know mirrors exist. Lazy and guarded: a lookup failure
+   * costs the mirrors an update, never the original.
+   */
+  if (!_mirrorHop) {
+    try {
+      for (const m of require('./mirrors').mirrorsOf(deviceId)) queueOrEmitPlaylistUpdate(deviceNs, m.id, buildPayload, true);
+    } catch (e) { /* mirrors are best effort */ }
+  }
   const room = deviceNs.adapter.rooms.get(deviceId);
   if (room && room.size > 0) {
     deviceNs.to(deviceId).emit('device:playlist-update', buildPayload(deviceId));

@@ -31,7 +31,9 @@ const EXPIRE_TRIAL_SQL = `
 `;
 function expireTrial(userId) {
   if (!_expireTrialStmt) _expireTrialStmt = db.prepare(EXPIRE_TRIAL_SQL);
-  return _expireTrialStmt.run(userId).changes === 1;
+  const flipped = _expireTrialStmt.run(userId).changes === 1;
+  if (flipped) require('../lib/conversion-events').record(db, { userId, event: 'trial_expired' });
+  return flipped;
 }
 
 // Ids of every user whose trial has lapsed but who still sits on the trial plan. Same predicate
@@ -258,6 +260,41 @@ function storageRoomBytes(userId) {
   return (plan.max_storage_mb * 1024 * 1024) - Number(used.total || 0);
 }
 
+/*
+ * 3.0: a limit refusal names the plan that would have said yes, so the client can offer that one
+ * plan ("Starter covers 8 screens") instead of a generic "upgrade". Additive fields on the same 403
+ * body; nothing that read code/error before changes. Also records the hit in the funnel.
+ *
+ * `need` is what the request needed: { devices } | { storage_mb } | { feature }. Only plans that
+ * are active, paid and above the current one are considered; null when none fits (or self-hosted,
+ * where there is nothing to buy).
+ */
+function suggestPlan(current, need) {
+  if (require('../config').selfHosted) return null;
+  try {
+    const plans = db.prepare('SELECT id, name, display_name, max_devices, max_storage_mb, remote_url, price_monthly, price_yearly FROM plans WHERE active = 1 AND price_monthly > 0 ORDER BY sort_order ASC, price_monthly ASC').all();
+    const fits = (p) => {
+      if (current && p.id === current.plan_id) return false;
+      if (need.devices != null && !(p.max_devices === -1 || p.max_devices >= need.devices)) return false;
+      if (need.storage_mb != null && !(p.max_storage_mb === -1 || p.max_storage_mb > need.storage_mb)) return false;
+      if (need.feature === 'remote_url' && !p.remote_url) return false;
+      if (current && current.price_monthly != null && p.price_monthly <= current.price_monthly) return false;
+      return true;
+    };
+    const p = plans.find(fits);
+    return p ? { id: p.id, name: p.name, display_name: p.display_name, max_devices: p.max_devices,
+      max_storage_mb: p.max_storage_mb, price_monthly: p.price_monthly, price_yearly: p.price_yearly } : null;
+  } catch { return null; }
+}
+
+function noteLimitHit(req, code, extra) {
+  try {
+    require('../lib/conversion-events').record(db, {
+      userId: req.user && req.user.id, workspaceId: req.workspaceId || null, event: 'limit_hit', meta: { code, ...extra },
+    });
+  } catch { /* instrumentation never blocks */ }
+}
+
 // Check if user can add more devices
 function checkDeviceLimit(req, res, next) {
   const plan = getUserPlan(req.user.id);
@@ -283,12 +320,14 @@ function checkDeviceLimit(req, res, next) {
 
   const deviceCount = getUserDeviceCount(req.user.id);
   if (deviceCount >= plan.max_devices) {
+    noteLimitHit(req, 'DEVICE_LIMIT', { limit: plan.max_devices, plan: plan.plan_name });
     return res.status(403).json({
       error: `Device limit reached (${plan.max_devices} on ${plan.plan_display_name} plan). Upgrade to add more.`,
       code: 'DEVICE_LIMIT',
       current: deviceCount,
       limit: plan.max_devices,
-      plan: plan.plan_name
+      plan: plan.plan_name,
+      suggested_plan: suggestPlan(plan, { devices: deviceCount + 1 }),
     });
   }
   next();
@@ -319,12 +358,14 @@ function checkStorageLimit(req, res, next) {
 
   const usedMB = getUserStorageMB(req.user.id);
   if (usedMB >= plan.max_storage_mb) {
+    noteLimitHit(req, 'STORAGE_LIMIT', { limit_mb: plan.max_storage_mb, plan: plan.plan_name });
     return res.status(403).json({
       error: `Storage limit reached (${plan.max_storage_mb}MB on ${plan.plan_display_name} plan). Upgrade for more.`,
       code: 'STORAGE_LIMIT',
       current_mb: usedMB,
       limit_mb: plan.max_storage_mb,
-      plan: plan.plan_name
+      plan: plan.plan_name,
+      suggested_plan: suggestPlan(plan, { storage_mb: usedMB }),
     });
   }
   next();
@@ -347,10 +388,13 @@ function checkRemoteControl(req, res, next) {
 function checkRemoteUrl(req, res, next) {
   const plan = getUserPlan(req.user.id);
   if (!plan || !plan.remote_url) {
+    noteLimitHit(req, 'FEATURE_LOCKED', { feature: 'remote_url', plan: plan?.plan_name });
     return res.status(403).json({
       error: 'Remote URL content requires Pro plan or above.',
       code: 'FEATURE_LOCKED',
-      plan: plan?.plan_name
+      feature: 'remote_url',
+      plan: plan?.plan_name,
+      suggested_plan: suggestPlan(plan, { feature: 'remote_url' }),
     });
   }
   next();
@@ -385,6 +429,7 @@ function checkActiveSubscription(req, res, next) {
 }
 
 module.exports = {
+  suggestPlan,
   storageRoomBytes,
   TRIAL_DAYS,
   GRACE_DAYS,

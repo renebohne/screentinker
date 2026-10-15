@@ -12,7 +12,7 @@
 #   git clone https://github.com/screentinker/screentinker.git
 #   cd screentinker/scripts && sudo ./raspberry-pi-setup.sh
 #
-# Works on Raspberry Pi OS Lite or Desktop (Bookworm / Bullseye)
+# Works on Raspberry Pi OS Lite or Desktop (Trixie / Bookworm, 64-bit for the server)
 # Tested on Pi 3B+, Pi 4, Pi 5
 
 set -euo pipefail
@@ -245,8 +245,13 @@ if [ "$NATIVE" = true ]; then
     fi
     command -v curl >/dev/null || { apt-get update -qq; apt-get install -y -qq curl; }
     DEB=$(mktemp --suffix=.deb)
-    curl -fSL --retry 3 -o "$DEB" "$SERVER_URL/download/pi" \
-        || err "Could not download the native player from $SERVER_URL/download/pi (is the server 2.3 or later?)"
+    PI_HTTP=$(curl -sSL --retry 3 -o "$DEB" -w '%{http_code}' "$SERVER_URL/download/pi") || true
+    PI_HTTP=${PI_HTTP:-000}
+    if [ "$PI_HTTP" = 404 ]; then
+        err "$SERVER_URL does not host the native Raspberry Pi player (/download/pi answered 404). Upgrading the server to 3.0 or later builds it (scripts/upgrade.sh, or pull the new Docker image). Meanwhile, run this script without --native for the browser player."
+    elif [ "$PI_HTTP" != 200 ]; then
+        err "Could not download the native player from $SERVER_URL/download/pi (HTTP $PI_HTTP). Check the address and that the server is reachable."
+    fi
     chmod 0644 "$DEB"
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$DEB" || err "Package install failed (see $LOG_FILE)"
@@ -343,8 +348,14 @@ apt-get update -qq
 apt-get upgrade -y -qq
 
 log "Installing base dependencies..."
+# ⚠️ python3 make g++ are NOT optional. npm runs better-sqlite3's `node-gyp rebuild` install step
+# even though the package bundles its binaries (binding.gyp then just picks the prebuild), and
+# node-gyp cannot run without them: npm then silently drops the module as a failed optional
+# dependency and the server falls back to Node's experimental built-in SQLite. On a platform with
+# no prebuild (32-bit ARM) the same toolchain compiles it from source instead.
 apt-get install -y -qq \
     git curl wget unzip htop \
+    python3 make g++ \
     avahi-daemon \
     fonts-liberation fonts-noto-color-emoji \
     >> "$LOG_FILE" 2>&1
@@ -355,15 +366,27 @@ apt-get install -y -qq \
 if [ "$PLAYER_ONLY" = false ]; then
     NEED_NODE=true
     if command -v node &>/dev/null; then
-        CUR=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
-        if [ "$CUR" -ge "$NODE_MAJOR" ]; then
+        # 22.14 is the floor, not just 22: the database driver needs Node-API 10.
+        CUR=$(node -v | sed 's/^v//')
+        if [ "$(printf '%s\n' 22.14.0 "$CUR" | sort -V | head -n1)" = "22.14.0" ]; then
             log "Node.js $(node -v) already installed"
             NEED_NODE=false
         fi
     fi
     if [ "$NEED_NODE" = true ]; then
         log "Installing Node.js ${NODE_MAJOR}.x..."
-        curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - >> "$LOG_FILE" 2>&1
+        # NodeSource's apt repo added directly, rather than piping their setup script into a root
+        # shell: nothing downloaded is executed, and apt verifies every package against the repo's
+        # signing key (OpenSSF Scorecard: Pinned-Dependencies). It is what setup_${NODE_MAJOR}.x does.
+        apt-get install -y -qq ca-certificates curl gnupg >> "$LOG_FILE" 2>&1
+        install -d -m 0755 /etc/apt/keyrings
+        curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+            | gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+            > /etc/apt/sources.list.d/nodesource.list
+        # NodeSource's nodejs over the distribution's own (Debian 13 ships Node 20).
+        printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' > /etc/apt/preferences.d/nodejs
+        apt-get update -qq >> "$LOG_FILE" 2>&1
         apt-get install -y -qq nodejs >> "$LOG_FILE" 2>&1
         log "Node.js $(node -v) installed"
     fi
@@ -383,7 +406,8 @@ if [ "$PLAYER_ONLY" = false ]; then
 
     log "Installing Node.js dependencies..."
     cd "$SCREENTINKER_DIR/server"
-    npm install --production >> "$LOG_FILE" 2>&1
+    # From the lockfile, exactly: the versions CI tested, integrity-checked (`npm install` re-resolves).
+    npm ci --omit=dev --no-audit --no-fund >> "$LOG_FILE" 2>&1
 
     # Data directories
     mkdir -p "$SCREENTINKER_DIR/server/db"
@@ -417,6 +441,8 @@ WorkingDirectory=${SCREENTINKER_DIR}/server
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=5
+# 78 = refused to start: Node below engines.node (server/lib/node-guard.js). Do not loop on it.
+RestartPreventExitStatus=78
 StartLimitBurst=5
 StartLimitIntervalSec=60
 

@@ -26,6 +26,7 @@ function player({ connected = false, preview = false, storageBroken = false, que
   let id = 0;
   const scope = {
     OfflinePlayQueue, console: { log() {} },
+    LINK_SUFFIX: '',   // 3.0: plain /player (no ?k=) has no per-link namespace
     localStorage: {
       getItem: k => { if (storageBroken) throw new Error('storage unavailable'); return stored.get(k); },
       setItem: (k, v) => { if (storageBroken) throw new Error('storage unavailable'); stored.set(k, v); },

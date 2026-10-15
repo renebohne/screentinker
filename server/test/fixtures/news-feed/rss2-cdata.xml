@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Shaped like a TV station's local-news category feed: CDATA titles and descriptions, an
+     <image> block with its own <title>, atom:link self/hub, image enclosures typed "image/jpg". -->
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom">
+    <channel>
+        <title>Latest News | Channel 9 Test</title>
+        <link>https://news.example.test/local-news</link>
+        <description>Local headlines</description>
+        <image>
+            <url>https://news.example.test/logo.png</url>
+            <title>IMAGE TITLE MUST NOT WIN</title>
+            <link>https://news.example.test/</link>
+        </image>
+        <atom:link href="https://news.example.test/rss/category/local-news" rel="self" type="application/rss+xml"/>
+        <atom:link href="https://pubsubhubbub.example.test/" rel="hub"/>
+        <item>
+            <title><![CDATA[City Weather: Rainy, chilly Thursday]]></title>
+            <link>https://news.example.test/weather/forecast-101426</link>
+            <guid>https://news.example.test/weather/forecast-101426</guid>
+            <pubDate>Thu, 15 Oct 2026 01:34:03 GMT</pubDate>
+            <description><![CDATA[Cloudy skies overnight with temperatures in the 50s. Over 1" of rain is expected <b>in many areas</b>.]]></description>
+            <author>digital@example.test (Digital Team)</author>
+            <enclosure url="https://static.example.test/uploads/forecast_1280x720.jpg" length="0" type="image/jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[Police chase ends near 48th & Hadley; officer hurt]]></title>
+            <link>https://news.example.test/news/police-chase-officer-hurt</link>
+            <guid isPermaLink="false">abc-123</guid>
+            <pubDate>Thu, 15 Oct 2026 01:31:12 GMT</pubDate>
+            <description><![CDATA[A police chase on Wednesday ended in a crash.]]></description>
+            <enclosure url="/uploads/scene.jpg" length="0" type="image/jpg"/>
+        </item>
+        <item>
+            <link>https://news.example.test/news/school-board</link>
+            <title>School board votes &amp; budget &#8212; what&#x2019;s next</title>
+            <content:encoded>&lt;h2&gt;Heading&lt;/h2&gt;&lt;p&gt;The board met &amp;amp; voted.&lt;/p&gt;&lt;img src="https://static.example.test/board.jpg"&gt;</content:encoded>
+            <pubDate>Wed, 14 Oct 2026 20:44:21 -0500</pubDate>
+        </item>
+    </channel>
+</rss>

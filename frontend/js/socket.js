@@ -1,5 +1,30 @@
 let dashboardSocket = null;
 const listeners = new Map();
+let refusalRetryMs = 2000;
+
+async function recheckLoginAfterRefusal() {
+  let status = 0;
+  try {
+    const token = localStorage.getItem('token');
+    const res = await fetch('/api/auth/me', { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    status = res.status;
+  } catch (e) { /* offline: retry below */ }
+  if (status === 401) {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    window.location.hash = '#/login';
+    window.location.reload();
+    return;
+  }
+  // Still signed in (MFA/password step pending, a server restart mid-handshake, or offline): try again,
+  // backing off to a minute, with the token as it is now.
+  setTimeout(() => {
+    if (!dashboardSocket || dashboardSocket.connected || dashboardSocket.active) return;
+    dashboardSocket.auth = { token: localStorage.getItem('token') };
+    dashboardSocket.connect();
+  }, refusalRetryMs);
+  refusalRetryMs = Math.min(refusalRetryMs * 2, 60000);
+}
 
 export function connectSocket() {
   const token = localStorage.getItem('token');
@@ -13,12 +38,17 @@ export function connectSocket() {
 
   dashboardSocket.on('connect', () => {
     console.log('Dashboard connected, socket id:', dashboardSocket.id);
+    refusalRetryMs = 2000;
     updateConnectionStatus(true);
     emit('connected');
   });
 
   dashboardSocket.on('connect_error', (err) => {
     console.error('Dashboard socket connect error:', err.message);
+    // A refusal from the server's auth check (expired or revoked login) is final: Socket.IO does not
+    // retry it, so the page would sit on "Disconnected" forever while cached views still load. Ask the
+    // API whether the login is still good: a 401 signs out like any other request; otherwise retry.
+    if (!dashboardSocket.active) recheckLoginAfterRefusal();
   });
 
   dashboardSocket.on('disconnect', (reason) => {
@@ -33,6 +63,8 @@ export function connectSocket() {
   });
 
   // Screenshot ready
+  // Screen verification: a screen's verified/blank/frozen/... state changed (lib/screen-verify).
+  dashboardSocket.on('dashboard:verification-state', (data) => emit('verification-state', data));
   dashboardSocket.on('dashboard:screenshot-ready', (data) => {
     emit('screenshot-ready', data);
   });

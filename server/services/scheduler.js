@@ -19,45 +19,25 @@ function startScheduler(socketIo) {
 
 // ioOverride lets a test drive one evaluation without startScheduler's 60s setInterval, which keeps
 // the process alive and turns the test run into a hang rather than a failure.
-function evaluateSchedules(ioOverride) {
+function evaluateSchedules(ioOverride, nowOverride) {
   const deviceNs = (ioOverride || io)?.of('/device');
   if (!deviceNs) return;
 
-  const now = new Date();
+  // nowOverride is a TEST SEAM (the preview-at-time equivalence tests drive the live tick at a fixed
+  // instant and compare it with lib/device-simulate.js). The live timer never passes it.
+  const now = nowOverride instanceof Date ? nowOverride : new Date();
   const onlineDevices = db.prepare(`SELECT * FROM devices WHERE status = 'online' AND ${LOCAL_ROWS_SQL('devices')}`).all();
 
   for (const device of onlineDevices) {
     // #12 scheduled reboot — evaluated independently of playlist/layout overrides.
     maybeRebootDevice(device, now, deviceNs);
 
-    /*
-     * ⚠️ A WALL PANEL FOLLOWS ITS WALL'S SCHEDULES ONLY, in the wall's one timezone. A schedule on
-     * a single panel switched that panel alone and tore the picture across the wall, and panels
-     * reporting different zones would switch an hour apart. Every member reading the same rows on
-     * the same clock is what keeps the wall one picture. (A wall member is in no group: joining a
-     * wall removes it from its groups.)
-     */
-    const wallId = device.wall_id && hasWallSchedules() ? device.wall_id : null;
-    const schedules = wallId
-      ? db.prepare(`SELECT s.* FROM schedules s WHERE s.enabled = 1 AND s.wall_id = ?
-          ORDER BY s.priority DESC, s.created_at ASC`).all(wallId)
-      : db.prepare(`
-      SELECT s.*
-      FROM schedules s
-      WHERE s.enabled = 1
-        AND (
-          s.device_id = ?
-          OR s.group_id IN (
-            SELECT group_id FROM device_group_members WHERE device_id = ?
-          )
-        )
-      ORDER BY
-        CASE WHEN s.device_id IS NOT NULL THEN 1 ELSE 0 END DESC,
-        s.priority DESC,
-        s.created_at ASC
-    `).all(device.id, device.id);
-
-    const active = schedules.find(s => isScheduleActiveNow(s, now, wallId ? wallClockTz(wallId, device) : deviceTz(device)));
+    // Which schedules this screen follows and on whose clock: one definition, shared with the
+    // "what will this screen show at…" preview (lib/device-simulate.js), so the forecast and the
+    // tick can never disagree about which schedule wins.
+    const schedules = schedulesForDevice(device);
+    // The clock is only looked up when there is something to evaluate, as before the split.
+    const active = schedules.length ? pickActiveSchedule(schedules, now, scheduleClockTz(device)) : undefined;
 
     /*
      * ⚠️ A schedule writes its OWN columns and never touches devices.playlist_id or layout_id.
@@ -88,6 +68,49 @@ function evaluateSchedules(ioOverride) {
 
     if (changed) pushPlaylistToDevice(device.id, deviceNs);
   }
+}
+
+/*
+ * ⚠️ A WALL PANEL FOLLOWS ITS WALL'S SCHEDULES ONLY, in the wall's one timezone. A schedule on
+ * a single panel switched that panel alone and tore the picture across the wall, and panels
+ * reporting different zones would switch an hour apart. Every member reading the same rows on
+ * the same clock is what keeps the wall one picture. (A wall member is in no group: joining a
+ * wall removes it from its groups.)
+ *
+ * Returned in precedence order (device beats group, then priority, then oldest): the FIRST active
+ * one wins. `device` needs id and wall_id.
+ */
+function schedulesForDevice(device) {
+  const wallId = device.wall_id && hasWallSchedules() ? device.wall_id : null;
+  return wallId
+    ? db.prepare(`SELECT s.* FROM schedules s WHERE s.enabled = 1 AND s.wall_id = ?
+        ORDER BY s.priority DESC, s.created_at ASC`).all(wallId)
+    : db.prepare(`
+    SELECT s.*
+    FROM schedules s
+    WHERE s.enabled = 1
+      AND (
+        s.device_id = ?
+        OR s.group_id IN (
+          SELECT group_id FROM device_group_members WHERE device_id = ?
+        )
+      )
+    ORDER BY
+      CASE WHEN s.device_id IS NOT NULL THEN 1 ELSE 0 END DESC,
+      s.priority DESC,
+      s.created_at ASC
+  `).all(device.id, device.id);
+}
+
+/** The zone a device's schedules are evaluated in: its wall's clock on a wall, else its own. */
+function scheduleClockTz(device) {
+  const wallId = device.wall_id && hasWallSchedules() ? device.wall_id : null;
+  return wallId ? wallClockTz(wallId, device) : deviceTz(device);
+}
+
+/** The winning schedule at `now`, or undefined: the first active one in precedence order. */
+function pickActiveSchedule(schedules, now, tz) {
+  return schedules.find(s => isScheduleActiveNow(s, now, tz));
 }
 
 // #74/#75 Part B: device-level schedules are evaluated in the DEVICE's effective
@@ -185,7 +208,15 @@ function localStamp(parts) {
 }
 
 function isScheduleActiveNow(schedule, now, tz) {
-  const L = _localParts(now, tz);
+  return isScheduleActiveAt(schedule, _localParts(now, tz));
+}
+
+/*
+ * The same decision from already-resolved local parts. Split out so the preview timeline
+ * (lib/device-simulate.js) can sweep a fortnight minute by minute without a fresh Intl formatter
+ * per schedule per minute; isScheduleActiveNow above is exactly this after one _localParts.
+ */
+function isScheduleActiveAt(schedule, L) {
   const nowStamp = localStamp(L);                   // device-local "YYYY-MM-DDTHH:MM"
   const startStamp = String(schedule.start_time).slice(0, 16);
   const endStamp = String(schedule.end_time).slice(0, 16);
@@ -252,3 +283,9 @@ module.exports = { startScheduler, pushPlaylistToDevice, rebootDue, evaluateSche
 // Exported for testing: whether a schedule is live right now is the single decision this service
 // exists to make, and it should be checkable without a ticking timer.
 module.exports.isScheduleActiveNow = isScheduleActiveNow;
+// Shared with the preview-at-time simulator (lib/device-simulate.js) — see schedulesForDevice.
+module.exports.isScheduleActiveAt = isScheduleActiveAt;
+module.exports.schedulesForDevice = schedulesForDevice;
+module.exports.scheduleClockTz = scheduleClockTz;
+module.exports.pickActiveSchedule = pickActiveSchedule;
+module.exports.parseSimpleRRule = parseSimpleRRule;

@@ -395,3 +395,25 @@ test('⚠️ with no freeBytes supplied it measures the real disk rather than sk
   assert.equal(r.ok, false, 'the default free-space measurement must actually run');
   assert.match(r.reason, /does not have room/i);
 });
+
+test('⚠️ an existing file under the digest name is RE-HASHED: poisoned bytes are replaced, not reused', async () => {
+  const edge = mkEdge();
+  const bytes = 'the real bytes ' + id();
+  const staged = stage(bytes);
+  const entry = await entryFor(staged);
+  // Another writer (a pre-fix restore) left different bytes under this digest's name.
+  const poisoned = path.join(contentDir, `${entry.dg}.mp4`);
+  fs.writeFileSync(poisoned, 'someone else entirely');
+  const r = await commitStagedAsset(db, edge, entry, staged, { contentDir, sniff, workspaceId: wsA, userId });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(fs.readFileSync(poisoned, 'utf8'), bytes, 'the verified bytes must replace the impostor');
+  assert.equal(fs.existsSync(staged), false);
+
+  // And a genuine duplicate is still dropped rather than rewritten.
+  const again = stage(bytes);
+  const before = fs.statSync(poisoned).ino;
+  const r2 = await commitStagedAsset(db, edge, await entryFor(again), again, { contentDir, sniff, workspaceId: wsA, userId });
+  assert.equal(r2.ok, true, r2.reason);
+  assert.equal(fs.statSync(poisoned).ino, before);
+  assert.equal(fs.existsSync(again), false);
+});

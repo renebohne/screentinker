@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The dashboard's own palette (frontend/css/variables.css). -->
+    <color name="bg">#111827</color>
+    <color name="card">#1E293B</color>
+    <color name="input">#0F172A</color>
+    <color name="border">#334155</color>
+    <color name="accent">#3B82F6</color>
+    <color name="text">#F1F5F9</color>
+    <color name="text_secondary">#94A3B8</color>
+    <color name="danger">#EF4444</color>
+</resources>

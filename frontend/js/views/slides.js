@@ -4,6 +4,12 @@ import { showToast } from '../components/toast.js';
 import { t } from '../i18n.js';
 import { renderApprovalBar } from '../components/approval-actions.js';
 import { mountHostedPicker } from '../components/ai-hosted-picker.js';
+import { confirmAccessibility } from '../components/accessibility.js';
+import { snapMove, snapResize } from '../components/snap.js';
+import {
+  resizeRect, boundsOf, alignRects, distributeRects, reorder, repairSlots,
+  copyElements, pasteElements, createHistory,
+} from '../components/slide-arrange.js';
 
 /*
  * The slide deck editor.
@@ -70,7 +76,23 @@ const QR_LEVELS = [['L', 'L — smallest'], ['M', 'M — normal'], ['Q', 'Q — 
 const state = {
   decks: [], deck: null, si: 0, ei: 0, tab: 'content',
   dirty: false, saving: false, contentIndex: null,
+  // The multi-selection, as element indices. `ei` is its primary member (the one the inspector
+  // shows and the handles sit on); a `sel` that does not contain `ei` is stale and means [ei].
+  sel: [],
+  snap: true,
 };
+
+/* The renderer's cap (lib/slide-render.js MAX_ELEMENTS): a paste past it would be cut on save. */
+const MAX_ELEMENTS = 40;
+
+/*
+ * Undo/redo: bounded snapshots of the whole document, taken by touch()/touchValue() — the two
+ * places every edit already goes through — so no individual control has to remember to record.
+ * A deck is small (40 elements a slide at most), and a string snapshot can never be mutated
+ * after the fact, which is the bug a history of live objects always grows.
+ */
+const undoHistory = createHistory(100);
+const snapshot = () => (state.deck ? JSON.stringify(state.deck.doc) : null);
 
 const slide = () => state.deck && state.deck.doc.slides[state.si];
 
@@ -159,7 +181,33 @@ function ensureEditorStyles() {
     .sl-seg button:first-child { border-radius:3px 0 0 3px; }
     .sl-seg button:last-child { border-radius:0 3px 3px 0; }
     .sl-seg button + button { border-left:0; }
-    .sl-seg button[aria-pressed="true"] { background:var(--primary); border-color:var(--primary); color:#fff; }`;
+    .sl-seg button[aria-pressed="true"] { background:var(--primary); border-color:var(--primary); color:#fff; }
+    /* 3.0: the canvas selection — handles, guides, marquee, arrange bar and context menu. */
+    #stage > [data-ei] { touch-action:none; user-select:none; -webkit-user-select:none; }
+    #stage > [data-ei][data-editing] { user-select:text; -webkit-user-select:text; cursor:text; }
+    .sl-overlay { position:absolute; inset:0; pointer-events:none; z-index:5; }
+    .sl-handle { position:absolute; width:10px; height:10px; margin:-5px 0 0 -5px; box-sizing:border-box;
+      background:#fff; border:1.5px solid var(--primary); border-radius:2px; pointer-events:auto; touch-action:none; }
+    @media (pointer:coarse) { .sl-handle { width:20px; height:20px; margin:-10px 0 0 -10px; border-radius:50%; } }
+    .sl-groupbox { position:absolute; border:1px dashed var(--primary); }
+    .sl-guide { position:absolute; }
+    .sl-marquee { position:absolute; border:1px dashed var(--primary); background:rgba(59,130,246,.12); }
+    .sl-arrange { display:flex; flex-wrap:wrap; align-items:center; gap:2px; margin-bottom:8px; }
+    .sl-tool { display:grid; place-items:center; width:28px; height:26px; padding:0; border:1px solid transparent;
+      border-radius:5px; background:none; color:var(--text-primary, inherit); cursor:pointer; }
+    .sl-tool:hover:not(:disabled) { background:var(--bg-hover, rgba(127,127,127,.12)); }
+    .sl-tool:disabled { opacity:.35; cursor:default; }
+    .sl-tool.on { border-color:var(--primary); color:var(--primary); }
+    .sl-tool-sep { width:1px; height:18px; background:var(--border); margin:0 4px; }
+    @media (pointer:coarse) { .sl-tool { width:38px; height:36px; } }
+    .sl-ctx { position:fixed; z-index:2000; min-width:200px; padding:4px; font-size:13px; background:var(--bg-card);
+      border:1px solid var(--border); border-radius:var(--radius, 8px); box-shadow:var(--shadow, 0 8px 24px rgba(0,0,0,.25)); }
+    .sl-ctx button { display:flex; justify-content:space-between; gap:18px; width:100%; padding:6px 10px; border:0;
+      border-radius:5px; background:none; color:var(--text-primary, inherit); font:inherit; text-align:left; cursor:pointer; }
+    .sl-ctx button:hover:not(:disabled), .sl-ctx button:focus-visible { background:var(--bg-card-hover, rgba(127,127,127,.12)); }
+    .sl-ctx button:disabled { opacity:.4; cursor:default; }
+    .sl-ctx kbd { font:inherit; font-size:11px; color:var(--text-muted); }
+    .sl-ctx hr { border:0; border-top:1px solid var(--border); margin:4px 2px; }`;
   document.head.appendChild(st);
 }
 
@@ -369,6 +417,7 @@ async function openNewDeckModal(container) {
           <label style="display:block;font-size:13px;font-weight:600;margin-bottom:6px">${esc(t('slides.deck_name_label'))}</label>
           <input type="text" id="deckNameInput" class="input" style="width:100%" placeholder="${esc(t('slides.deck_name_placeholder'))}" value="New Slide Deck">
         </div>
+        <p style="margin:0;font-size:13px;color:var(--text-muted)">${esc(t('signs.slides_modal_hint'))} <a href="#/signs?from=slides" data-sign-link>${esc(t('signs.new_from_template'))} &rarr;</a></p>
         <div>
           <label style="display:block;font-size:13px;font-weight:600;margin-bottom:6px">${esc(t('slides.choose_template'))}</label>
           <div style="display:flex;flex-direction:column;gap:8px">
@@ -407,6 +456,7 @@ async function openNewDeckModal(container) {
   const close = () => overlay.remove();
   overlay.querySelector('#closeNewDeckModal').onclick = close;
   overlay.querySelector('#cancelNewDeckBtn').onclick = close;
+  overlay.querySelector('[data-sign-link]').addEventListener('click', close);
 
   overlay.querySelector('#submitNewDeckBtn').onclick = async () => {
     const name = overlay.querySelector('#deckNameInput').value.trim() || 'New Slide Deck';
@@ -443,7 +493,13 @@ async function openNewDeckModal(container) {
 export async function render(container) {
   container.innerHTML = `<div class="page-header"><div><h1>Slides</h1>
     <div class="subtitle">Build a deck of slides and publish it as a playlist.</div></div>
-    <button class="btn btn-primary" id="newDeck">+ New deck</button></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <!-- 3.0 Make a sign: the built-in sign templates, which come back here as an ordinary deck. -->
+      <a class="btn btn-secondary" href="#/signs?from=slides">${esc(t('signs.new_from_template'))}</a>
+      <!-- 3.0 Private AI: a starter set from one sentence, and translations of any deck. -->
+      <a class="btn btn-secondary" href="#/ai-setup">${esc(t('ai_setup.short'))}</a>
+      <a class="btn btn-secondary" href="#/translate">${esc(t('translate.title'))}</a>
+      <button class="btn btn-primary" id="newDeck">+ New deck</button></div></div>
     <div id="deckArea"><p style="color:var(--text-muted)">Loading…</p></div>`;
 
   container.querySelector('#newDeck').addEventListener('click', () => openNewDeckModal(container));
@@ -461,6 +517,9 @@ export async function render(container) {
     return;
   }
   if (state.deck) return renderEditor(container);
+  // 3.0 accessibility: "Open the editor" from the Accessibility page lands on #/slides?deck=<id>.
+  const want = new URLSearchParams((window.location.hash.split('?')[1]) || '').get('deck');
+  if (want && state.decks.some((d) => d.id === want)) return openDeck(container, want);
   renderList(container);
 }
 
@@ -475,9 +534,9 @@ function renderList(container) {
   }
   host.innerHTML = `<div class="settings-section" style="padding:0">
     ${state.decks.map((d) => `
-      <div style="display:flex;align-items:center;gap:12px;padding:11px 14px;border-bottom:1px solid var(--border)">
+      <div data-deck-row="${esc(d.id)}" style="display:flex;align-items:center;gap:12px;padding:11px 14px;border-bottom:1px solid var(--border)">
         <div style="flex:1;min-width:0">
-          <div style="font-weight:600">${esc(d.name)}</div>
+          <div style="font-weight:600" data-deck-name>${esc(d.name)}</div>
           <div style="font-size:12px;color:var(--text-muted)">
             ${d.slide_count} slide${d.slide_count === 1 ? '' : 's'} · ${(d.total_sec || 0)}s total
             ${d.playlist_id ? '· published' : '· not published yet'}</div>
@@ -508,7 +567,16 @@ async function openDeck(container, id) {
   try {
     state.deck = await api.get(`/slide-decks/${id}`);
     try { DATA_SOURCES_LIST = await api.getDataSources(); } catch (_) { DATA_SOURCES_LIST = []; }
-    state.si = 0; state.ei = 0; state.dirty = false;
+    state.si = 0; state.ei = 0; state.sel = []; state.dirty = false;
+    /*
+     * Two elements sharing a slot share their words, so editing one rewrote the other. Decks
+     * from before pasted copies were given their own slot are repaired here, additively — the
+     * twin gets a new slot and a copy of the words — and the repair is an unsaved change like any
+     * other edit, kept by the next save.
+     */
+    const repaired = state.deck.doc.slides.reduce((n, sl) => n + repairSlots(sl), 0);
+    if (repaired) state.dirty = true;
+    undoHistory.reset(snapshot());
     renderEditor(container);
   } catch (e) { showToast(e.message || 'Could not open the deck', 'error'); }
 }
@@ -573,6 +641,7 @@ function renderEditor(container) {
           </svg>
         </button>
         <span id="aiStatus" style="font-size:12px;color:var(--text-muted);margin-left:4px"></span>
+        <span data-private-ai-badge></span>
       </div>
       <!-- Hosted AI (ScreenTinker credits). Stays hidden unless the server has a platform image
            provider configured; then "Generate background" follows whichever path is picked here. -->
@@ -614,7 +683,9 @@ function renderEditor(container) {
           </label>
           <span style="margin-left:auto;font-size:12px;color:var(--text-muted)" id="settleLabel"></span>
         </div>
-        <div id="stage" style="position:relative;aspect-ratio:16/9;border-radius:4px;overflow:hidden;container-type:size"></div>
+        <!-- 3.0: arrange, align and undo for the canvas selection (PowerPoint's Arrange group). -->
+        <div id="arrangeBar" class="sl-arrange" role="toolbar" aria-label="${esc(t('slides.edit.toolbar'))}">${arrangeBarHtml()}</div>
+        <div id="stage" aria-label="${esc(t('slides.edit.canvas'))}" style="position:relative;aspect-ratio:16/9;border-radius:4px;overflow:hidden;container-type:size"></div>
 
       </div>
       <div class="settings-section" style="padding:0">
@@ -638,6 +709,8 @@ function renderEditor(container) {
   container.querySelector('#backBtn').addEventListener('click', async () => {
     if (state.dirty && !confirm('Leave without saving? Your changes will be lost.')) return; // eslint-disable-line no-alert
     state.deck = null;
+    // Opened from a #/slides?deck= link: drop the parameter, or render would reopen the same deck.
+    if (window.location.hash.startsWith('#/slides?')) history.replaceState(null, '', '#/slides');
     await render(container);
   });
   container.querySelector('#saveBtn').addEventListener('click', () => save(container));
@@ -668,9 +741,19 @@ function renderEditor(container) {
   container.querySelector('#pubBtn').addEventListener('click', () => publish(container));
   renderApprovalBar(container.querySelector('#deckApprovalBar'), {
     type: 'slide_deck', id: state.deck.id, name: state.deck.name,
-    onChanged: async () => { try { state.deck = await api.get(`/slide-decks/${state.deck.id}`); state.dirty = false; paintAll(container); } catch {} },
+    onChanged: async () => { try { state.deck = await api.get(`/slide-decks/${state.deck.id}`); state.dirty = false; undoHistory.reset(snapshot()); paintAll(container); } catch {} },
   });
   container.querySelector('#playBtn').addEventListener('click', play);
+  editorContainer = container;
+  const stageEl = container.querySelector('#stage');
+  stageEl.addEventListener('pointerdown', (ev) => onStagePointerDown(ev, container));
+  stageEl.addEventListener('dblclick', (ev) => onStageDblClick(ev, container));
+  stageEl.addEventListener('contextmenu', (ev) => onStageContextMenu(ev, container));
+  container.querySelector('#arrangeBar').addEventListener('click', (ev) => {
+    const b = ev.target.closest('[data-act]');
+    if (b && !b.disabled) runAction(container, b.dataset.act);
+  });
+  bindEditorKeys();
   container.querySelector('#aspectSel').addEventListener('change', (e) => {
     state.deck.doc.aspect = e.target.value;
     touch(container);
@@ -698,8 +781,10 @@ function renderEditor(container) {
   mountHostedPicker(container.querySelector('#aiHostedRow')).then((ctl) => { hostedCtl = ctl; }).catch(() => {});
   container.querySelector('#aiCfgBtn').addEventListener('click', async () => {
     const { openAiSettingsModal } = await import('../components/ai-settings-modal.js');
-    openAiSettingsModal();
+    // 3.0 Private AI: the badge follows a change of provider.
+    openAiSettingsModal({ onClose: () => import('../components/private-ai.js').then((m) => { m.getPrivateAiStatus(true); m.decoratePrivateBadges(container); }) });
   });
+  import('../components/private-ai.js').then((m) => m.decoratePrivateBadges(container)).catch(() => {});
   container.querySelectorAll('.tabBtn').forEach((b) => b.addEventListener('click', () => {
     state.tab = b.dataset.tab; paintTabs(container); renderProps(container);
   }));
@@ -716,7 +801,7 @@ function renderEditor(container) {
         : e.kind === 'countdown' ? 'Now open'
         : KINDS[e.kind].label;
     }
-    state.ei = s.template.elements.length - 1; state.tab = 'content';
+    state.ei = s.template.elements.length - 1; state.sel = []; state.tab = 'content';
     // Adding an element no longer auto-plays the entrance (it dropped you into a mid-animation element
     // you were trying to place). It lands settled and grabbable; "Play entrance" previews motion.
     touch(container);
@@ -743,8 +828,9 @@ function paintAll(container) {
  * A STRUCTURAL change — an element added, deleted, reordered, a slide added. Repaints everything,
  * including the inspector, because the list of things to inspect just changed.
  */
-function touch(container) {
+function touch(container, coalesce = null) {
   state.dirty = true;
+  undoHistory.record(snapshot(), { coalesce });
   paintAll(container);
 }
 
@@ -761,6 +847,8 @@ function touch(container) {
  */
 function touchValue(container) {
   state.dirty = true;
+  // One step per control: a slider dragged across fifty values undoes in one go.
+  undoHistory.record(snapshot(), { coalesce: `value:${document.activeElement && document.activeElement.id}` });
   renderStage(container);
   renderStrip(container);
   renderStatus(container);
@@ -943,6 +1031,7 @@ function ensureLiveTick() {
 
 function renderStage(container) {
   const s = slide(); const stage = container.querySelector('#stage');
+  editingText = null;   // the node being edited is about to be replaced
   if (!s) { stage.innerHTML = ''; return; }
   // ⚠️ RENDER AT REST. The entrance animations play ONLY when the operator clicks "Play entrance"
   // (which adds `.playing`). Leaving `.playing` on across a repaint meant every slide switch, and
@@ -1007,7 +1096,9 @@ function renderStage(container) {
   elementsOf(s).forEach((e, i) => {
     const d = document.createElement('div');
     d.style.cssText = `position:absolute;cursor:grab;${styleFor(e)}`;
-    if (i === state.ei) d.style.outline = '1.5px solid var(--primary)';
+    // Which element this node draws. The stage also holds the background photo and its scrim, so a
+    // node's position among the stage's children is NOT its element index — see the canvas section below.
+    d.dataset.ei = String(i);
     if (e.motion && e.motion.animation !== 'none') {
       d.dataset.anim = e.motion.animation;
       d.style.setProperty('--dur', `${e.motion.duration}s`);
@@ -1044,9 +1135,11 @@ function renderStage(container) {
     } else if (TEXT_KINDS.includes(e.kind)) {
       d.textContent = resolveInterpolatedText(s.fields[e.slot] || '');
     }
-    d.addEventListener('pointerdown', (ev) => startDrag(ev, i, d, container));
     stage.appendChild(d);
   });
+  // Selection chrome goes on last, above every element; the nodes themselves stay listener-free.
+  paintOutlines(container);
+  paintOverlay(container);
   ensureKeyframes();
   ensureEditorStyles();
   ensureLiveTick();
@@ -1059,29 +1152,695 @@ function renderStage(container) {
     settle > s.dwell_sec ? 'var(--danger)' : 'var(--text-muted)';
 }
 
-/* Drag on the stage, in stage-relative percentages so it survives any panel size. */
-function startDrag(ev, i, node, container) {
-  ev.preventDefault();
-  state.ei = i; renderLayers(container); renderProps(container); renderStage(container);
+/* ============================================================ canvas: select, move, resize */
+
+/*
+ * PowerPoint-style editing on the stage: click selects and shows handles, Shift/Ctrl-click adds
+ * and removes, a drag on empty canvas draws a marquee, handles resize, arrows nudge, and the
+ * clipboard, layer order, align/distribute and undo all act on the selection.
+ *
+ * ⚠️ ONE SET OF LISTENERS ON THE STAGE, bound once per editor by renderEditor — never one per
+ * element per repaint. The stage repaints on every edit, and listeners bound to its nodes are the
+ * shape of the bug where an old handler moved a different element than the one selected.
+ *
+ * ⚠️ AN ELEMENT'S NODE IS FOUND BY ITS `data-ei`, NEVER BY ITS POSITION AMONG THE STAGE'S
+ * CHILDREN. The stage also holds the background photo, its scrim and the selection overlay, so the
+ * n-th child is not the n-th element — which is exactly how a drag once moved the wrong thing.
+ *
+ * Rotation is deliberately absent: the renderer's entrance animations are `transform` keyframes on
+ * the element itself, so a rotated element would snap upright as it animated in, and the
+ * independent `rotate` property is missing from the Android WebView builds still common on
+ * signage panels. Doing it properly means a wrapper element in every renderer.
+ */
+
+const GRAB_PX = 3;            // pointer travel below this is a click, not a drag
+const SNAP_PX = 6;            // how close an edge has to come before it snaps
+const HANDLE_DIRS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+/* Pictures keep their shape by default, as in PowerPoint; Shift frees them (and locks the rest). */
+const KEEP_ASPECT_KINDS = ['image', 'lettering'];
+/* Kinds whose words are typed straight onto the canvas with a double-click. */
+const INLINE_TEXT_KINDS = ['head', 'body', 'stat'];
+
+let gesture = null;           // the drag, resize or marquee in progress
+let editingText = null;       // { i, node, before } while a text element is edited in place
+let clip = null;              // the editor's clipboard: copies of elements with their words
+let pasteCount = 0;           // each paste lands a little further down-right than the last
+let editorContainer = null;   // the mounted editor, for the document-level keyboard handler
+
+const round2 = (v) => Math.round(v * 100) / 100;
+const clampPos = (v) => round2(Math.max(-20, Math.min(110, v)));
+
+/* The selected element indices, ascending. Empty when nothing is selected. */
+function selection() {
+  const n = elementsOf(slide()).length;
+  if (!(state.ei >= 0 && state.ei < n)) return [];
+  const sel = (state.sel || []).filter((i) => i >= 0 && i < n);
+  return sel.includes(state.ei) ? sel : [state.ei];
+}
+
+function select(indices, primary) {
+  const uniq = [...new Set(indices)].filter((i) => i >= 0).sort((a, b) => a - b);
+  state.sel = uniq;
+  state.ei = uniq.length ? (uniq.includes(primary) ? primary : uniq[uniq.length - 1]) : -1;
+}
+
+function stageNode(container, i) {
+  return container.querySelector(`#stage > [data-ei="${i}"]`);
+}
+
+/*
+ * Every element's box as drawn, in stage percent. x, y and w are the document's own; an
+ * auto-height text box has no stored height, so that one is measured from what the canvas drew.
+ */
+function drawnRects(container) {
   const stage = container.querySelector('#stage');
-  const r = stage.getBoundingClientRect();
-  const e = elementsOf(slide())[i];
-  const ox = ev.clientX - r.left - (e.box.x / 100) * r.width;
-  const oy = ev.clientY - r.top - (e.box.y / 100) * r.height;
-  const live = stage.children[i];
-  live.setPointerCapture(ev.pointerId);
+  const r = stage ? stage.getBoundingClientRect() : { width: 0, height: 0 };
+  return elementsOf(slide()).map((e, i) => {
+    let h = e.box.h;
+    if (h == null) {
+      const n = stageNode(container, i);
+      h = n && r.height ? (n.getBoundingClientRect().height / r.height) * 100 : 5;
+    }
+    return { x: Number(e.box.x) || 0, y: Number(e.box.y) || 0, w: Number(e.box.w) || 0, h };
+  });
+}
+
+/*
+ * Snap in PIXELS, through the same helper the wall and layout editors use: a 6px threshold means
+ * the same thing on both axes, where a percentage threshold would be twice as sticky across the
+ * width of a 16:9 stage as down it. The slide's edges and centre lines are targets too.
+ */
+function snapRect(stageRect, rect, targets, mode, dir) {
+  const sx = stageRect.width / 100; const sy = stageRect.height / 100;
+  if (!sx || !sy) return { ...rect, guides: [] };
+  const px = (q) => ({ x: q.x * sx, y: q.y * sy, w: q.w * sx, h: q.h * sy });
+  const opts = { threshold: SNAP_PX, bounds: { x: 0, y: 0, w: stageRect.width, h: stageRect.height } };
+  const out = mode === 'move'
+    ? snapMove(px(rect), targets.map(px), opts)
+    : snapResize(px(rect), dir, targets.map(px), { ...opts, minW: 1, minH: 1 });
+  return {
+    x: out.x / sx, y: out.y / sy, w: out.w / sx, h: out.h / sy,
+    guides: out.guides.map((g) => ({ axis: g.axis, at: g.at / (g.axis === 'x' ? sx : sy) })),
+  };
+}
+
+/* Outlines on the selected nodes: solid on the primary, dashed on the rest of a multi-selection. */
+function paintOutlines(container) {
+  const sel = selection();
+  container.querySelectorAll('#stage > [data-ei]').forEach((n) => {
+    const i = Number(n.dataset.ei);
+    n.style.outline = !sel.includes(i) ? ''
+      : i === state.ei ? '1.5px solid var(--primary)' : '1.5px dashed var(--primary)';
+  });
+}
+
+/*
+ * The layer over the elements: resize handles on a single selection, a dashed box around a
+ * multi-selection, smart-guide lines while snapping, and the marquee. Pointer events pass through
+ * it everywhere except the handles.
+ */
+function paintOverlay(container, guides = [], marquee = null) {
+  const stage = container.querySelector('#stage');
+  if (!stage) return;
+  let ov = stage.querySelector(':scope > .sl-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.className = 'sl-overlay';
+    stage.appendChild(ov);
+  }
+  const sel = selection();
+  let html = '';
+  if (sel.length && !editingText) {
+    const rects = drawnRects(container);
+    if (sel.length === 1) {
+      const e = elementsOf(slide())[sel[0]];
+      const r = rects[sel[0]];
+      // An auto-height text box only has a width to change: its height is whatever its words need.
+      const dirs = e.box.h == null ? ['w', 'e'] : HANDLE_DIRS;
+      html += dirs.map((d) => {
+        const x = d.includes('w') ? r.x : d.includes('e') ? r.x + r.w : r.x + r.w / 2;
+        const y = d.includes('n') ? r.y : d.includes('s') ? r.y + r.h : r.y + r.h / 2;
+        return `<div class="sl-handle" data-handle="${d}" style="left:${x}%;top:${y}%;cursor:${d}-resize"
+                     aria-label="${esc(t('slides.edit.resize'))}"></div>`;
+      }).join('');
+    } else {
+      const b = boundsOf(sel.map((i) => rects[i]));
+      html += `<div class="sl-groupbox" style="left:${b.x}%;top:${b.y}%;width:${b.w}%;height:${b.h}%"></div>`;
+    }
+  }
+  for (const g of guides) {
+    html += g.axis === 'x'
+      ? `<div class="sl-guide" style="left:${g.at}%;top:0;bottom:0;width:0;border-left:1px solid #ff2d87"></div>`
+      : `<div class="sl-guide" style="top:${g.at}%;left:0;right:0;height:0;border-top:1px solid #ff2d87"></div>`;
+  }
+  if (marquee) {
+    html += `<div class="sl-marquee" style="left:${marquee.x}%;top:${marquee.y}%;width:${marquee.w}%;height:${marquee.h}%"></div>`;
+  }
+  ov.innerHTML = html;
+}
+
+/* A selection change: the canvas chrome and the panels that follow the selection. Nodes are kept. */
+function paintSelection(container) {
+  paintOutlines(container);
+  paintOverlay(container);
+  renderLayers(container);
+  renderProps(container);
+  updateArrangeBar(container);
+}
+
+/* The Style tab's position and size numbers follow a drag as it happens, not only after it. */
+function syncBoxInputs(container) {
+  const e = elementsOf(slide())[state.ei];
+  if (!e) return;
+  for (const [id, key, dec] of [['pX', 'x', 0], ['pY', 'y', 0], ['pW', 'w', 0], ['pH', 'h', 1]]) {
+    const v = e.box[key];
+    if (v == null) continue;
+    const r = container.querySelector(`#${id}`); const n = container.querySelector(`#${id}n`);
+    if (r) r.value = v;
+    if (n) n.value = Number(v).toFixed(dec);
+  }
+}
+
+/*
+ * Follow one pointer until it lifts, with the stage capturing it so a drag that leaves the canvas
+ * keeps going. The listeners are removed on the way out — every time, including on cancel.
+ */
+function trackPointer(ev, container, onMove, onEnd) {
+  const stage = container.querySelector('#stage');
+  /*
+   * Captured on the first MOVE, not on the press: a capture retargets the click that follows to
+   * the stage, and a double-click on a text box then arrives without its element — so a plain
+   * click stays uncaptured and a drag that leaves the canvas still keeps going.
+   */
+  let captured = false;
   const move = (m) => {
-    e.box.x = Math.max(-20, Math.min(110, ((m.clientX - r.left - ox) / r.width) * 100));
-    e.box.y = Math.max(-20, Math.min(110, ((m.clientY - r.top - oy) / r.height) * 100));
-    live.style.left = `${e.box.x}%`; live.style.top = `${e.box.y}%`;
+    if (m.pointerId !== ev.pointerId) return;
+    if (!captured) {
+      captured = true;
+      try { stage.setPointerCapture(ev.pointerId); } catch { /* a synthetic pointer: still works uncaptured */ }
+    }
+    onMove(m);
   };
-  const up = () => {
-    live.removeEventListener('pointermove', move);
-    live.removeEventListener('pointerup', up);
+  const end = (m) => {
+    if (m.pointerId !== ev.pointerId) return;
+    stage.removeEventListener('pointermove', move);
+    stage.removeEventListener('pointerup', end);
+    stage.removeEventListener('pointercancel', end);
+    try { stage.releasePointerCapture(ev.pointerId); } catch { /* already released */ }
+    gesture = null;
+    onEnd(m);
+  };
+  gesture = { pointerId: ev.pointerId };
+  stage.addEventListener('pointermove', move);
+  stage.addEventListener('pointerup', end);
+  stage.addEventListener('pointercancel', end);
+}
+
+function onStagePointerDown(ev, container) {
+  closeContextMenu();
+  if (ev.button !== 0 || gesture) return;
+  // Working on the canvas takes the keyboard with it: a number box left focused in the inspector
+  // would otherwise swallow the arrow keys meant to nudge the element just clicked.
+  const ae = document.activeElement;
+  if (ae && ae !== document.body && !ae.closest('#stage') && typeof ae.blur === 'function') ae.blur();
+  if (editingText) {
+    // A click inside the box being edited places the caret; anywhere else finishes the edit.
+    if (editingText.node.contains(ev.target)) return;
+    ev.preventDefault();
+    finishInlineEdit(container, true);
+    return;
+  }
+  const handle = ev.target.closest('[data-handle]');
+  if (handle) { ev.preventDefault(); startResize(ev, handle.dataset.handle, container); return; }
+
+  const node = ev.target.closest('#stage > [data-ei]');
+  if (node) {
+    ev.preventDefault();
+    const i = Number(node.dataset.ei);
+    const sel = selection();
+    if (ev.shiftKey || ev.ctrlKey || ev.metaKey) {
+      select(sel.includes(i) ? sel.filter((k) => k !== i) : sel.concat(i), i);
+      paintSelection(container);
+      return;
+    }
+    // Pressing on a member of a multi-selection drags the whole group, as in PowerPoint.
+    if (!sel.includes(i)) select([i], i); else state.ei = i;
+    paintSelection(container);
+    startMove(ev, container);
+    return;
+  }
+
+  // Empty canvas. A finger there scrolls the page on a tablet, so touch only deselects.
+  if (ev.pointerType === 'touch') { select([], -1); paintSelection(container); return; }
+  ev.preventDefault();
+  startMarquee(ev, container, ev.shiftKey || ev.ctrlKey || ev.metaKey);
+}
+
+function startMove(ev, container) {
+  const els = elementsOf(slide());
+  const sel = selection();
+  const r = container.querySelector('#stage').getBoundingClientRect();
+  const rects = drawnRects(container);
+  const starts = sel.map((i) => ({ i, e: els[i], x: Number(els[i].box.x) || 0, y: Number(els[i].box.y) || 0 }));
+  const group = boundsOf(sel.map((i) => rects[i]));
+  const others = rects.filter((_, k) => !sel.includes(k));
+  let moved = false;
+  trackPointer(ev, container, (m) => {
+    if (!moved && Math.hypot(m.clientX - ev.clientX, m.clientY - ev.clientY) < GRAB_PX) return;
+    moved = true;
+    let dx = ((m.clientX - ev.clientX) / r.width) * 100;
+    let dy = ((m.clientY - ev.clientY) / r.height) * 100;
+    let guides = [];
+    if (state.snap && !m.altKey) {
+      const sn = snapRect(r, { ...group, x: group.x + dx, y: group.y + dy }, others, 'move');
+      dx = sn.x - group.x; dy = sn.y - group.y; guides = sn.guides;
+    }
+    for (const st of starts) {
+      st.e.box.x = clampPos(st.x + dx);
+      st.e.box.y = clampPos(st.y + dy);
+      const n = stageNode(container, st.i);
+      if (n) { n.style.left = `${st.e.box.x}%`; n.style.top = `${st.e.box.y}%`; }
+    }
+    paintOverlay(container, guides);
+    syncBoxInputs(container);
+  }, () => {
+    paintOverlay(container);
+    if (moved) touch(container);
+  });
+}
+
+function startResize(ev, dir, container) {
+  const i = state.ei;
+  const e = elementsOf(slide())[i];
+  if (!e) return;
+  const r = container.querySelector('#stage').getBoundingClientRect();
+  const rects = drawnRects(container);
+  const start = rects[i];
+  const autoH = e.box.h == null;
+  const others = rects.filter((_, k) => k !== i);
+  const minH = e.kind === 'rule' ? 0.1 : 0.5;
+  let changed = false;
+  trackPointer(ev, container, (m) => {
+    if (!changed && Math.hypot(m.clientX - ev.clientX, m.clientY - ev.clientY) < 1) return;
+    changed = true;
+    const dx = ((m.clientX - ev.clientX) / r.width) * 100;
+    const dy = autoH ? 0 : ((m.clientY - ev.clientY) / r.height) * 100;
+    const keep = !autoH && (KEEP_ASPECT_KINDS.includes(e.kind) !== m.shiftKey);
+    let nb = resizeRect(start, dir, dx, dy, { keepAspect: keep, fromCenter: m.altKey, minW: 1, minH });
+    let guides = [];
+    // Alt is "from the centre" here, so it also means "no snapping"; a locked ratio is not snapped
+    // either, because snapping one edge would break the ratio the operator asked to keep.
+    if (state.snap && !m.altKey && !keep) {
+      const sn = snapRect(r, nb, others, 'resize', dir);
+      guides = sn.guides; nb = sn;
+    }
+    e.box.x = clampPos(nb.x);
+    e.box.w = round2(Math.max(1, Math.min(200, nb.w)));
+    if (!autoH) {
+      e.box.y = clampPos(nb.y);
+      e.box.h = round2(Math.max(minH, Math.min(200, nb.h)));
+    }
+    const n = stageNode(container, i);
+    if (n) {
+      n.style.left = `${e.box.x}%`; n.style.width = `${e.box.w}%`;
+      if (!autoH) { n.style.top = `${e.box.y}%`; n.style.height = `${e.box.h}%`; }
+    }
+    paintOverlay(container, guides);
+    syncBoxInputs(container);
+  }, () => {
+    paintOverlay(container);
+    if (changed) touch(container);
+  });
+}
+
+function startMarquee(ev, container, additive) {
+  const r = container.querySelector('#stage').getBoundingClientRect();
+  const at = (p) => ({ x: ((p.clientX - r.left) / r.width) * 100, y: ((p.clientY - r.top) / r.height) * 100 });
+  const p0 = at(ev);
+  const base = additive ? selection() : [];
+  const rects = drawnRects(container);
+  let moved = false;
+  trackPointer(ev, container, (m) => {
+    if (!moved && Math.hypot(m.clientX - ev.clientX, m.clientY - ev.clientY) < GRAB_PX) return;
+    moved = true;
+    const p1 = at(m);
+    const box = { x: Math.min(p0.x, p1.x), y: Math.min(p0.y, p1.y), w: Math.abs(p1.x - p0.x), h: Math.abs(p1.y - p0.y) };
+    // As in PowerPoint, an element is picked up only when the marquee encloses all of it.
+    const inside = rects.map((q, k) => (q.x >= box.x && q.y >= box.y && q.x + q.w <= box.x + box.w
+      && q.y + q.h <= box.y + box.h ? k : -1)).filter((k) => k >= 0);
+    select(base.concat(inside), state.ei);
+    paintOutlines(container);
+    paintOverlay(container, [], box);
+  }, () => {
+    if (!moved && !additive) select([], -1);
+    paintSelection(container);
+  });
+}
+
+/* ------------------------------------------------------------ in-place text */
+
+function onStageDblClick(ev, container) {
+  // The topmost element under the pointer, even if the click was retargeted to the stage itself.
+  const hit = ev.target === ev.currentTarget ? document.elementFromPoint(ev.clientX, ev.clientY) : ev.target;
+  const node = hit && hit.closest('#stage > [data-ei]');
+  if (!node || editingText) return;
+  const i = Number(node.dataset.ei);
+  const s = slide();
+  const e = elementsOf(s)[i];
+  if (!e || !INLINE_TEXT_KINDS.includes(e.kind)) return;
+  select([i], i);
+  paintSelection(container);
+  // The stored words, not the canvas's rendering of them: a `{{…}}` token has to stay editable.
+  editingText = { i, node, before: s.fields[e.slot] || '' };
+  node.textContent = editingText.before;
+  node.contentEditable = 'plaintext-only';
+  if (node.contentEditable !== 'plaintext-only') node.contentEditable = 'true';
+  node.style.cursor = 'text';
+  node.style.outline = '1.5px dashed var(--primary)';
+  node.dataset.editing = '1';
+  paintOverlay(container);
+  node.focus();
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  const sel = window.getSelection();
+  sel.removeAllRanges(); sel.addRange(range);
+  node.addEventListener('keydown', (k) => {
+    k.stopPropagation();
+    if (k.key === 'Escape') { k.preventDefault(); finishInlineEdit(container, false); }
+    else if (k.key === 'Enter' && !k.shiftKey) { k.preventDefault(); finishInlineEdit(container, true); }
+  });
+  node.addEventListener('blur', () => finishInlineEdit(container, true), { once: true });
+}
+
+function finishInlineEdit(container, keep) {
+  const ed = editingText;
+  if (!ed) return;
+  editingText = null;
+  const s = slide();
+  const e = elementsOf(s)[ed.i];
+  const v = ed.node.innerText.replace(/\n$/, '');
+  if (keep && e && v !== ed.before) {
+    s.fields[e.slot] = v;
     touch(container);
+    return;
+  }
+  renderStage(container);
+  paintSelection(container);
+}
+
+/* ------------------------------------------------------------ actions */
+
+function deleteSelection(container) {
+  const s = slide();
+  const arr = elementsOf(s);
+  const sel = selection();
+  if (!sel.length) return;
+  for (const i of [...sel].sort((a, b) => b - a)) {
+    const [gone] = arr.splice(i, 1);
+    if (gone && !arr.some((x) => x.slot === gone.slot)) delete s.fields[gone.slot];
+  }
+  select([], -1);
+  touch(container);
+}
+
+/* Layer order. Selection follows the elements themselves, not the indices they used to have. */
+function applyOrder(container, op) {
+  const arr = elementsOf(slide());
+  const sel = selection();
+  if (!sel.length) return;
+  const order = reorder(arr.length, sel, op);
+  if (order.every((v, k) => v === k)) return;
+  const primary = arr[state.ei];
+  const chosen = sel.map((i) => arr[i]);
+  arr.splice(0, arr.length, ...order.map((k) => arr[k]));
+  select(chosen.map((e) => arr.indexOf(e)), arr.indexOf(primary));
+  touch(container);
+}
+
+function applyAlign(container, how) {
+  const els = elementsOf(slide());
+  const sel = selection();
+  if (!sel.length || ((how === 'dist-h' || how === 'dist-v') && sel.length < 3)) return;
+  const rects = drawnRects(container);
+  const mine = sel.map((i) => rects[i]);
+  const out = how === 'dist-h' ? distributeRects(mine, 'x')
+    : how === 'dist-v' ? distributeRects(mine, 'y')
+      : alignRects(mine, how);
+  sel.forEach((i, k) => { els[i].box.x = clampPos(out[k].x); els[i].box.y = clampPos(out[k].y); });
+  touch(container);
+}
+
+function nudge(container, dx, dy) {
+  const els = elementsOf(slide());
+  const sel = selection();
+  if (!sel.length) return;
+  for (const i of sel) {
+    els[i].box.x = clampPos((Number(els[i].box.x) || 0) + dx);
+    els[i].box.y = clampPos((Number(els[i].box.y) || 0) + dy);
+  }
+  // Holding an arrow key down is one move, so it is one undo step.
+  touch(container, 'nudge');
+}
+
+function copySelection(cut) {
+  const sel = selection();
+  if (!sel.length) return false;
+  clip = copyElements(slide(), sel);
+  // A cut pastes back where it was; a copy lands offset, so the copy is visibly a second thing.
+  pasteCount = cut ? -1 : 0;
+  return true;
+}
+
+function pasteItems(container, items, offset) {
+  if (!items || !items.length) return;
+  const s = slide();
+  if (!s) return;
+  const room = MAX_ELEMENTS - elementsOf(s).length;
+  if (room < items.length) {
+    showToast(t('slides.edit.too_many', { max: MAX_ELEMENTS }), 'error');
+    if (room <= 0) return;
+  }
+  const idx = pasteElements(s, items, offset, MAX_ELEMENTS);
+  select(idx, idx[idx.length - 1]);
+  touch(container);
+}
+
+function undoRedo(container, redo) {
+  const cur = snapshot();
+  const snap = redo ? undoHistory.redo(cur) : undoHistory.undo(cur);
+  if (snap == null) return;
+  const doc = JSON.parse(snap);
+  // Publishing gives slides their widget ids; undoing to before a publish must not forget them, or
+  // the next publish would build a second set of widgets and orphan the first.
+  const ids = new Map(state.deck.doc.slides.map((sl) => [sl.id, sl.widget_id]));
+  for (const sl of doc.slides) if (ids.get(sl.id)) sl.widget_id = ids.get(sl.id);
+  state.deck.doc = doc;
+  undoHistory.rebase(snapshot());
+  state.si = Math.max(0, Math.min(state.si, doc.slides.length - 1));
+  const n = elementsOf(slide()).length;
+  select(selection().filter((i) => i < n), state.ei < n ? state.ei : -1);
+  state.dirty = true;
+  paintAll(container);
+}
+
+function runAction(container, act) {
+  switch (act) {
+    case 'undo': undoRedo(container, false); break;
+    case 'redo': undoRedo(container, true); break;
+    case 'cut': if (copySelection(true)) deleteSelection(container); break;
+    case 'copy': copySelection(false); break;
+    case 'paste': pasteCount++; pasteItems(container, clip, 2 * pasteCount); break;
+    case 'duplicate': {
+      const sel = selection();
+      if (sel.length) pasteItems(container, copyElements(slide(), sel), 2);
+      break;
+    }
+    case 'delete': deleteSelection(container); break;
+    case 'select-all': {
+      const n = elementsOf(slide()).length;
+      select(Array.from({ length: n }, (_, i) => i), state.ei >= 0 ? state.ei : n - 1);
+      paintSelection(container);
+      break;
+    }
+    case 'front': case 'forward': case 'backward': case 'back': applyOrder(container, act); break;
+    case 'left': case 'center': case 'right': case 'top': case 'middle': case 'bottom':
+    case 'dist-h': case 'dist-v':
+      applyAlign(container, act); break;
+    case 'snap': state.snap = !state.snap; updateArrangeBar(container); break;
+    default: break;
+  }
+}
+
+/* ------------------------------------------------------------ toolbar and context menu */
+
+const ICON = (d) => `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+  stroke-width="1.5" stroke-linecap="round" aria-hidden="true">${d}</svg>`;
+const ARRANGE_ICONS = {
+  undo: ICON('<path d="M5 3 2 6l3 3"/><path d="M2 6h8a4 4 0 0 1 0 8H7"/>'),
+  redo: ICON('<path d="m11 3 3 3-3 3"/><path d="M14 6H6a4 4 0 0 0 0 8h3"/>'),
+  front: ICON('<rect x="5" y="5" width="9" height="9" fill="currentColor" stroke="none"/><rect x="2" y="2" width="9" height="9"/>'),
+  forward: ICON('<rect x="2" y="2" width="8" height="8"/><path d="M12 14V7m-2.5 2.5L12 7l2.5 2.5"/>'),
+  backward: ICON('<rect x="2" y="2" width="8" height="8"/><path d="M12 7v7m-2.5-2.5L12 14l2.5-2.5"/>'),
+  back: ICON('<rect x="2" y="2" width="9" height="9" fill="currentColor" stroke="none"/><rect x="5" y="5" width="9" height="9" fill="var(--bg-card,#fff)"/>'),
+  left: ICON('<path d="M2 1v14"/><rect x="4" y="3" width="9" height="3"/><rect x="4" y="10" width="5" height="3"/>'),
+  center: ICON('<path d="M8 1v14"/><rect x="3" y="3" width="10" height="3"/><rect x="5" y="10" width="6" height="3"/>'),
+  right: ICON('<path d="M14 1v14"/><rect x="3" y="3" width="9" height="3"/><rect x="7" y="10" width="5" height="3"/>'),
+  top: ICON('<path d="M1 2h14"/><rect x="3" y="4" width="3" height="9"/><rect x="10" y="4" width="3" height="5"/>'),
+  middle: ICON('<path d="M1 8h14"/><rect x="3" y="3" width="3" height="10"/><rect x="10" y="5" width="3" height="6"/>'),
+  bottom: ICON('<path d="M1 14h14"/><rect x="3" y="3" width="3" height="9"/><rect x="10" y="7" width="3" height="5"/>'),
+  'dist-h': ICON('<path d="M1 2v12M15 2v12"/><rect x="6" y="4" width="4" height="8"/>'),
+  'dist-v': ICON('<path d="M2 1h12M2 15h12"/><rect x="4" y="6" width="8" height="4"/>'),
+  duplicate: ICON('<rect x="5" y="5" width="9" height="9"/><path d="M11 2H2v9"/>'),
+  delete: ICON('<path d="M3 4h10M6 4V2h4v2m-6 0 1 10h6l1-10"/>'),
+  snap: ICON('<path d="M3 1v14M1 13h14"/><path d="M6 10 12 4" stroke-dasharray="2 2"/>'),
+};
+
+/* Every label is a literal t() key, so the i18n guard can see each one is defined. */
+function actionLabels() {
+  return {
+    undo: t('slides.edit.undo'), redo: t('slides.edit.redo'),
+    cut: t('slides.edit.cut'), copy: t('slides.edit.copy'), paste: t('slides.edit.paste'),
+    duplicate: t('slides.edit.duplicate'), delete: t('slides.edit.delete'),
+    front: t('slides.edit.front'), forward: t('slides.edit.forward'),
+    backward: t('slides.edit.backward'), back: t('slides.edit.back'),
+    left: t('slides.edit.align_left'), center: t('slides.edit.align_center'), right: t('slides.edit.align_right'),
+    top: t('slides.edit.align_top'), middle: t('slides.edit.align_middle'), bottom: t('slides.edit.align_bottom'),
+    'dist-h': t('slides.edit.distribute_h'), 'dist-v': t('slides.edit.distribute_v'),
+    snap: t('slides.edit.snap'),
   };
-  live.addEventListener('pointermove', move);
-  live.addEventListener('pointerup', up);
+}
+const SHORTCUTS = {
+  undo: 'Ctrl+Z', redo: 'Ctrl+Shift+Z', cut: 'Ctrl+X', copy: 'Ctrl+C', paste: 'Ctrl+V', duplicate: 'Ctrl+D',
+  delete: 'Del', front: 'Ctrl+Shift+]', forward: 'Ctrl+]', backward: 'Ctrl+[', back: 'Ctrl+Shift+[',
+};
+
+function arrangeBarHtml() {
+  const L = actionLabels();
+  const btn = (act) => `<button type="button" class="sl-tool" data-act="${act}"
+      title="${esc(L[act] + (SHORTCUTS[act] ? ` (${SHORTCUTS[act]})` : ''))}" aria-label="${esc(L[act])}">${ARRANGE_ICONS[act]}</button>`;
+  const sep = '<span class="sl-tool-sep" aria-hidden="true"></span>';
+  return [['undo', 'redo'], ['front', 'forward', 'backward', 'back'],
+    ['left', 'center', 'right', 'top', 'middle', 'bottom'], ['dist-h', 'dist-v'], ['duplicate', 'delete'], ['snap']]
+    .map((g) => g.map(btn).join('')).join(sep);
+}
+
+/* What each action needs to be worth pressing. */
+function actionEnabled(act) {
+  const n = selection().length;
+  if (act === 'undo') return undoHistory.canUndo;
+  if (act === 'redo') return undoHistory.canRedo;
+  if (act === 'paste') return !!(clip && clip.length);
+  if (act === 'dist-h' || act === 'dist-v') return n >= 3;
+  if (act === 'snap' || act === 'select-all') return true;
+  return n > 0;
+}
+
+function updateArrangeBar(container) {
+  container.querySelectorAll('#arrangeBar [data-act]').forEach((b) => {
+    b.disabled = !actionEnabled(b.dataset.act);
+    if (b.dataset.act === 'snap') {
+      b.setAttribute('aria-pressed', state.snap ? 'true' : 'false');
+      b.classList.toggle('on', state.snap);
+    }
+  });
+}
+
+function closeContextMenu() {
+  document.querySelectorAll('.sl-ctx').forEach((n) => n.remove());
+}
+
+function onStageContextMenu(ev, container) {
+  ev.preventDefault();
+  if (editingText) return;
+  closeContextMenu();
+  const node = ev.target.closest('#stage > [data-ei]');
+  if (node) {
+    const i = Number(node.dataset.ei);
+    if (!selection().includes(i)) select([i], i);
+  } else {
+    select([], -1);
+  }
+  paintSelection(container);
+  const n = selection().length;
+  const L = actionLabels();
+  const groups = [['cut', 'copy', 'paste', 'duplicate', 'delete'], ['front', 'forward', 'backward', 'back']];
+  if (n > 1) groups.push(['left', 'center', 'right', 'top', 'middle', 'bottom']);
+  if (n > 2) groups.push(['dist-h', 'dist-v']);
+  const menu = document.createElement('div');
+  menu.className = 'sl-ctx';
+  menu.setAttribute('role', 'menu');
+  menu.innerHTML = groups.map((g) => g.map((act) => `<button type="button" role="menuitem" data-act="${act}"
+      ${actionEnabled(act) ? '' : 'disabled'}><span>${esc(L[act])}</span><kbd>${esc(SHORTCUTS[act] || '')}</kbd></button>`).join(''))
+    .join('<hr>');
+  document.body.appendChild(menu);
+  const w = menu.offsetWidth; const h = menu.offsetHeight;
+  menu.style.left = `${Math.max(4, Math.min(ev.clientX, window.innerWidth - w - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(ev.clientY, window.innerHeight - h - 4))}px`;
+  menu.addEventListener('click', (c) => {
+    const b = c.target.closest('[data-act]');
+    if (!b || b.disabled) return;
+    closeContextMenu();
+    runAction(container, b.dataset.act);
+  });
+  const first = menu.querySelector('button:not([disabled])');
+  if (first) first.focus();
+}
+
+/*
+ * The keyboard, bound ONCE for the module and active only while an editor is mounted. It stands
+ * aside whenever focus is in something that types — an input, the inspector, a text box being
+ * edited on the canvas — so Ctrl+Z there is the field's own undo and Backspace deletes a letter,
+ * not the element. Focus inside a dialog is outside the editor and is left alone too.
+ */
+let keysBound = false;
+function bindEditorKeys() {
+  if (keysBound) return;
+  keysBound = true;
+  document.addEventListener('keydown', (ev) => {
+    const container = editorContainer;
+    const stage = container && container.querySelector('#stage');
+    if (!state.deck || !stage || !stage.isConnected) return;
+    const target = ev.target;
+    if (target && target !== document.body && !container.contains(target)) return;
+    if (target && target.closest && target.closest('input, textarea, select, [contenteditable="true"], [contenteditable="plaintext-only"]')) return;
+    const mod = ev.ctrlKey || ev.metaKey;
+    const key = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
+    let act = null;
+    if (mod && key === 'z') act = ev.shiftKey ? 'redo' : 'undo';
+    else if (mod && key === 'y') act = 'redo';
+    else if (mod && key === 'a') act = 'select-all';
+    else if (mod && key === 'c') act = 'copy';
+    else if (mod && key === 'x') act = 'cut';
+    else if (mod && key === 'v') act = 'paste';
+    else if (mod && key === 'd') act = 'duplicate';
+    else if (mod && ev.code === 'BracketRight') act = ev.shiftKey ? 'front' : 'forward';
+    else if (mod && ev.code === 'BracketLeft') act = ev.shiftKey ? 'back' : 'backward';
+    else if (!mod && (key === 'Delete' || key === 'Backspace')) act = 'delete';
+    if (act) {
+      // With nothing to act on, the browser keeps the key (copying page text, say). Otherwise its
+      // own meaning — Ctrl+D bookmarks, Ctrl+A selects the page — must not fire as well.
+      if (!actionEnabled(act)) return;
+      ev.preventDefault();
+      runAction(container, act);
+      return;
+    }
+    if (key === 'Escape') {
+      closeContextMenu();
+      if (selection().length) { select([], -1); paintSelection(container); }
+      return;
+    }
+    const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    if (!mod && arrows[key] && selection().length) {
+      ev.preventDefault();
+      const step = ev.shiftKey ? 10 : 1;
+      nudge(container, arrows[key][0] * step, arrows[key][1] * step);
+    }
+  });
+  // A context menu closes on any press outside it, and when the page scrolls under it.
+  document.addEventListener('pointerdown', (ev) => {
+    if (!ev.target.closest || !ev.target.closest('.sl-ctx')) closeContextMenu();
+  }, true);
+  window.addEventListener('scroll', closeContextMenu, true);
 }
 
 /*
@@ -1154,7 +1913,7 @@ function renderStrip(container) {
   container.querySelectorAll('[data-slide]').forEach((b) => {
     b.addEventListener('click', () => {
       // Switching to a slide lands it SETTLED (no auto entrance) so elements are grabbable at once.
-      state.si = +b.dataset.slide; state.ei = 0; paintAll(container);
+      state.si = +b.dataset.slide; state.ei = 0; state.sel = []; paintAll(container);
     });
     b.addEventListener('dblclick', (ev) => {
       ev.stopPropagation();
@@ -1172,7 +1931,7 @@ function renderStrip(container) {
   container.querySelector('#addSlide').addEventListener('click', () => {
     state.deck.doc.slides.splice(state.si + 1, 0, newSlide(`Slide ${state.deck.doc.slides.length + 1}`));
     // A newly added slide lands settled too, not mid-entrance.
-    state.si++; state.ei = 0; touch(container);
+    state.si++; state.ei = 0; state.sel = []; touch(container);
   });
 }
 
@@ -1180,18 +1939,24 @@ function renderStrip(container) {
 
 function renderLayers(container) {
   const s = slide(); if (!s) return;
+  const sel = selection();
   container.querySelector('#layers').innerHTML = elementsOf(s).map((e, i) => `
     <button data-el="${i}" style="display:flex;align-items:center;gap:7px;padding:6px 12px;width:100%;
       text-align:left;border:0;cursor:pointer;border-bottom:1px solid var(--border);
-      background:${i === state.ei ? 'var(--bg-hover, rgba(127,127,127,.12))' : 'none'}">
+      background:${sel.includes(i) ? 'var(--bg-hover, rgba(127,127,127,.12))' : 'none'}">
       <span style="width:14px;text-align:center;color:var(--text-muted);font-size:12px">${KINDS[e.kind].icon}</span>
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px">
         ${esc(TEXT_KINDS.includes(e.kind) ? (s.fields[e.slot] || KINDS[e.kind].label) : KINDS[e.kind].label)}</span>
       <span style="font-size:10px;color:var(--text-muted);font-variant-numeric:tabular-nums">${
         !e.motion || e.motion.animation === 'none' ? '—' : `${e.motion.delay.toFixed(2)}+${e.motion.duration.toFixed(2)}`}</span>
     </button>`).join('');
-  container.querySelectorAll('[data-el]').forEach((b) => b.addEventListener('click', () => {
-    state.ei = +b.dataset.el; renderLayers(container); renderProps(container); renderStage(container);
+  // The same element the canvas would pick: one selection, whichever of the two you click in.
+  container.querySelectorAll('[data-el]').forEach((b) => b.addEventListener('click', (ev) => {
+    const i = +b.dataset.el;
+    const cur = selection();
+    if (ev.shiftKey || ev.ctrlKey || ev.metaKey) select(cur.includes(i) ? cur.filter((k) => k !== i) : cur.concat(i), i);
+    else select([i], i);
+    paintSelection(container);
   }));
 }
 
@@ -1317,13 +2082,17 @@ function renderProps(container) {
     host.querySelector('#delSlide').onclick = () => {
       if (state.deck.doc.slides.length === 1) { showToast('A deck needs at least one slide', 'error'); return; }
       state.deck.doc.slides.splice(state.si, 1);
-      state.si = Math.max(0, state.si - 1); state.ei = 0; touch(container);
+      state.si = Math.max(0, state.si - 1); state.ei = 0; state.sel = []; touch(container);
     };
     return;
   }
 
   const e = elementsOf(s)[state.ei];
-  if (!e) { host.innerHTML = `<p style="font-size:12px;color:var(--text-muted)">Add an element from the toolbar.</p>`; return; }
+  if (!e) {
+    host.innerHTML = `<p style="font-size:12px;color:var(--text-muted)">${esc(elementsOf(s).length
+      ? t('slides.edit.nothing_selected') : 'Add an element from the toolbar.')}</p>`;
+    return;
+  }
   const isText = TEXT_KINDS.includes(e.kind);
 
   if (state.tab === 'content') {
@@ -1485,19 +2254,8 @@ function renderProps(container) {
       // in this panel — but there is no reason to rebuild it either.
       host.querySelector('#pImg').onchange = (ev) => { e.content_id = ev.target.value || null; touchValue(container); };
     }
-    host.querySelector('#pFwd').onclick = () => {
-      const arr = s.template.elements;
-      if (state.ei < arr.length - 1) {
-        [arr[state.ei], arr[state.ei + 1]] = [arr[state.ei + 1], arr[state.ei]];
-        state.ei++; touch(container);
-      }
-    };
-    host.querySelector('#pDel').onclick = () => {
-      const arr = s.template.elements;
-      const [gone] = arr.splice(state.ei, 1);
-      if (gone) delete s.fields[gone.slot];
-      state.ei = Math.max(0, state.ei - 1); touch(container);
-    };
+    host.querySelector('#pFwd').onclick = () => applyOrder(container, 'forward');
+    host.querySelector('#pDel').onclick = () => deleteSelection(container);
     return;
   }
 
@@ -1800,8 +2558,22 @@ async function save(container) {
   state.saving = true;
   try {
     const d = state.deck;
+    const sent = snapshot();
     const fresh = await api.put(`/slide-decks/${d.id}`, { name: d.name, doc: d.doc });
+    /*
+     * ⚠️ EDITED WHILE THE SAVE WAS IN FLIGHT — or mid-drag when it landed: keep the editor's own
+     * document. Swapping in the server's copy here would throw the newer edit away, and a drag in
+     * progress would go on moving an element that is no longer in the deck.
+     */
+    if (snapshot() !== sent || gesture) {
+      state.deck = { ...fresh, name: d.name, doc: d.doc };
+      renderStatus(container);
+      showToast('Saved', 'success');
+      return;
+    }
     state.deck = fresh; state.dirty = false;
+    // What the server stored is now the current state, not an edit to undo.
+    undoHistory.rebase(snapshot());
     paintAll(container);
     showToast('Saved', 'success');
   } catch (e) {
@@ -1811,9 +2583,12 @@ async function save(container) {
 
 async function publish(container) {
   if (state.dirty) await save(container);
+  // 3.0 accessibility: list errors/warnings first, with "Publish anyway".
+  if (!(await confirmAccessibility('slide_deck', state.deck.id))) return;
   try {
     const out = await api.post(`/slide-decks/${state.deck.id}/publish`, {});
     state.deck = out;
+    undoHistory.rebase(snapshot());
     paintAll(container);
     const n = out.published ? out.published.slides : state.deck.doc.slides.length;
     // ⚠️ Says what actually happened, including that it is now a playlist — an operator who does not
@@ -1828,9 +2603,9 @@ async function publish(container) {
  * Generate the CURRENT slide from a sentence.
  *
  * ⚠️ IT REPLACES THE SLIDE, AND SAYS SO BEFORE IT DOES. The server returns a whole {template,
- * fields} pair — layout and words together — so applying it discards whatever was there. There is
- * no undo in this editor, so the confirmation is the undo: the one thing worse than a mediocre
- * generated slide is a good hand-built one silently overwritten by it. An EMPTY slide (one default
+ * fields} pair — layout and words together — so applying it discards whatever was there. Ctrl+Z
+ * now brings the old slide back, but the confirmation stays: an operator who does not know that
+ * should still not lose a good hand-built slide to a mediocre generated one without being asked. An EMPTY slide (one default
  * element, no words typed) is not worth asking about, so it is replaced without ceremony.
  *
  * ⚠️ THE DECK IS NOT SAVED HERE. The result lands as an unsaved edit like any other, so an operator
@@ -2030,7 +2805,7 @@ async function aiGenerate(container) {
   if (!slide()) {
     state.deck.doc.slides.push(newSlide(`Slide ${state.deck.doc.slides.length + 1}`));
     state.si = state.deck.doc.slides.length - 1;
-    state.ei = 0;
+    state.ei = 0; state.sel = [];
     /*
      * ⚠️ MARKED AND PAINTED BEFORE THE REQUEST, NOT AFTER. Without this the strip and the header
      * describe the old empty deck for the whole generation, and if the generation then FAILS the
@@ -2089,7 +2864,7 @@ async function aiGenerate(container) {
       if (keptDim != null) s2.template.background_dim = keptDim;
     }
     s2.fields = out.fields || {};
-    state.ei = 0;
+    state.ei = 0; state.sel = [];
     state.dirty = true;
     paintAll(container);
     say(t('slides.ai.done', { n: out.elements != null ? out.elements : elementsOf(s2).length }));

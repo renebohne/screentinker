@@ -83,4 +83,28 @@ function resolveDeviceContext(deviceId) {
   };
 }
 
-module.exports = { resolveDevicePlaylist, resolveDevicePlaylistId, resolvedLayoutId, resolveDeviceContext, clearInheritedCopy };
+/**
+ * The layout the device draws and WHICH TIER chose it — mandate, schedule, the playlist's own (3.0)
+ * or the device's — so the dashboard can say "this screen uses its playlist's layout" instead of
+ * showing a device layout that is not on screen. The view decides; this only reads back why.
+ * @returns {{id, name, source, playlist_id}|null}
+ */
+function resolvedLayoutInfo(deviceId) {
+  if (!deviceId) return null;
+  const r = db.prepare(`SELECT r.layout_id, r.source, r.playlist_id, d.scheduled_layout_id, d.wall_id
+                          FROM device_resolved_playlist r JOIN devices d ON d.id = r.device_id
+                         WHERE r.device_id = ?`).get(deviceId);
+  if (!r || !r.layout_id) return null;
+  let source = 'device';
+  if (r.source === 'corporate') source = 'mandate';
+  else if (r.scheduled_layout_id) source = 'schedule';
+  else if (!r.wall_id && r.playlist_id) {
+    let pl = null;
+    try { pl = db.prepare('SELECT published_layout_id FROM playlists WHERE id = ?').get(r.playlist_id); } catch (_) { pl = null; }
+    if (pl && pl.published_layout_id === r.layout_id) source = 'playlist';
+  }
+  const l = db.prepare('SELECT name FROM layouts WHERE id = ?').get(r.layout_id);
+  return { id: r.layout_id, name: l ? l.name : null, source, playlist_id: source === 'playlist' ? r.playlist_id : null };
+}
+
+module.exports = { resolveDevicePlaylist, resolveDevicePlaylistId, resolvedLayoutId, resolveDeviceContext, resolvedLayoutInfo, clearInheritedCopy };

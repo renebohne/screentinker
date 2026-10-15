@@ -50,4 +50,11 @@
     <string name="setup_screen_unavailable_plain">This device\'s Settings app has no screen for this permission (common on Android TV boxes).</string>
     <string name="device_blocked_status">This screen has been blocked in the dashboard</string>
     <string name="device_unpaired_status">This screen was unpaired — waiting to be re-paired</string>
+
+    <!-- 3.0 screen share (remote/ScreenShareOverlay.kt). {name} and {url} are filled in by the player. -->
+    <string name="screen_share_connecting">Connecting to {name}…</string>
+    <string name="screen_share_shared_by">Shared by {name}</string>
+    <string name="screen_share_guest">guest</string>
+    <string name="screen_share_code_title">Share your screen here</string>
+    <string name="screen_share_code_hint">Go to {url} and enter</string>
 </resources>

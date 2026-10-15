@@ -20,8 +20,10 @@ const { resolveSheets, validateSheetsConfig } = require('./sheets-resolver');
 const { resolveCsv, validateCsvConfig } = require('./csv-resolver');
 const { resolveRss, validateRssConfig } = require('./rss-resolver');
 const { resolveTable, validateTableConfig } = require('./table-resolver');
+const { resolveSquare, validateSquareConfig } = require('./square-resolver');
+const { resolveShopify, validateShopifyConfig, shopifyDestination } = require('./shopify-resolver');
 
-const intervalOf = (floor) => (c) => Math.max(floor, parseInt(c && c.interval_min, 10) || 15);
+const intervalOf = (floor, dflt = 15) => (c) => Math.max(floor, parseInt(c && c.interval_min, 10) || dflt);
 
 const TYPES = {
   rest: {
@@ -43,6 +45,29 @@ const TYPES = {
   rss: { validate: validateRssConfig, resolve: resolveRss, fields: [], interval: intervalOf(5), network: true },
   // Nothing to fetch: it only "syncs" when edited, so the interval just keeps the poller away.
   table: { validate: validateTableConfig, resolve: resolveTable, fields: [], interval: () => 24 * 60, network: false },
+  // Point of sale (docs/pos-menus.md). Five minutes by default: a price change reaches the screens
+  // within one sync, and a whole catalogue is a handful of paged calls — well inside either
+  // provider's limits. Floored at two minutes so a busy workspace cannot hammer a store's API.
+  //
+  // `secretDestination` says where a stored secret may be sent. These types have no `url` for the
+  // route's same-origin rule to compare, and without it an edit would merge the saved token into a
+  // config pointing at a different store (routes/data-sources.js sameSecretDestination).
+  square: {
+    validate: validateSquareConfig,
+    resolve: resolveSquare,
+    fields: [{ name: 'access_token', type: 'password' }],
+    interval: intervalOf(2, 5),
+    network: true,
+    secretDestination: (c) => `square:${c && c.environment === 'sandbox' ? 'sandbox' : 'production'}`,
+  },
+  shopify: {
+    validate: validateShopifyConfig,
+    resolve: resolveShopify,
+    fields: [{ name: 'access_token', type: 'password' }, { name: 'client_secret', type: 'password' }],
+    interval: intervalOf(2, 5),
+    network: true,
+    secretDestination: shopifyDestination,
+  },
 };
 
 function getBuiltinType(type) {

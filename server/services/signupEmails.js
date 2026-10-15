@@ -206,7 +206,8 @@ async function sendVerificationEmail(user, token, req) {
   // Same public-origin resolution as workspace invites: APP_URL pins the canonical origin
   // in prod; otherwise derive from the (proxy-aware) request. The link hits the API GET
   // route, which flips the flag and redirects into the app.
-  const base = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+  // ⚠️ lib/public-origin, never the raw Host header: see its note on host-header poisoning.
+  const base = require('../lib/public-origin').publicOrigin(req);
   const url = `${base}/api/auth/verify-email?token=${encodeURIComponent(token)}`;
   const { text, html } = verifyEmailBody(user.name || user.email, url);
   return sendEmail({ to: user.email, subject: 'Verify your email for ScreenTinker', text, html });
@@ -219,7 +220,9 @@ async function sendPasswordResetEmail(user, token, req) {
   // which posts the token back to /api/auth/reset-password with the new password — the
   // token is never redeemed by a bare GET, so a link-prefetching mail client cannot
   // consume it.
-  const base = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+  // ⚠️ lib/public-origin, never the raw Host header: a forged Host would mail the victim a real
+  // reset token inside a link to the attacker's site.
+  const base = require('../lib/public-origin').publicOrigin(req);
   const url = `${base}/app#/reset-password?token=${encodeURIComponent(token)}`;
   const who = user.name || user.email;
   const text = `Hi ${who},

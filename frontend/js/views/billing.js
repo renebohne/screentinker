@@ -34,6 +34,29 @@ export async function render(container) {
 
 
     const content = document.getElementById('billingContent');
+    if (!content) return; // navigated away while the plans were loading
+
+    /*
+     * 3.0: which plan to point at. The plan a prompt sent them for (?plan=), else the cheapest paid
+     * plan that fits what this account already runs — "you have 6 screens, Starter covers 8" is a
+     * reason, "Upgrade" is not. Never on self-hosted, never for someone already paying.
+     */
+    const params = new URLSearchParams((window.location.hash.split('?')[1]) || '');
+    const from = (params.get('from') || 'direct').slice(0, 40);
+    const paying = !!subData.subscription?.stripe_subscription_id;
+    const freePlan = plans.find((p) => p.id === 'free' || p.name === 'free') || null;
+    const fits = (p) => (p.max_devices === -1 || p.max_devices >= Math.max(1, subData.usage.devices))
+      && (p.max_storage_mb === -1 || p.max_storage_mb > subData.usage.storage_mb);
+    let recommendedId = null;
+    if (!subData.self_hosted && !paying) {
+      const asked = params.get('plan');
+      if (asked && plans.some((p) => p.id === asked && p.price_monthly > 0)) recommendedId = asked;
+      else {
+        const pick = plans.filter((p) => p.price_monthly > 0 && fits(p)).sort((a, b) => a.price_monthly - b.price_monthly)[0];
+        if (pick) recommendedId = pick.id;
+      }
+    }
+    if (!subData.self_hosted) api.trackEvent('billing_view', { from, plan: recommendedId || '' });
 
     content.innerHTML = `
       <div class="settings-section">
@@ -48,7 +71,27 @@ export async function render(container) {
           <span style="font-size:20px">&#9201;</span>
           <div>
             <div style="font-size:13px;font-weight:500">${t('billing.trial_ends', { plan: (subData.trial.plan?.charAt(0).toUpperCase() + subData.trial.plan?.slice(1)) || '', n: subData.trial.days_left })}</div>
-            <div style="font-size:12px;color:var(--text-muted)">${t('billing.trial_after')}</div>
+            <div style="font-size:12px;color:var(--text-muted)">${t('billing.trial_after', { n: freePlan ? freePlan.max_devices : 1 })}</div>
+          </div>
+        </div>
+        <!-- 3.0: what the end of a trial actually means, before it happens. -->
+        <div class="billing-keep-lose">
+          <div>
+            <h4>${t('billing.keep.title')}</h4>
+            <ul>
+              <li>${t('billing.keep.content')}</li>
+              <li>${t('billing.keep.screens', { n: freePlan ? freePlan.max_devices : 1 })}</li>
+              <li>${t('billing.keep.account')}</li>
+            </ul>
+          </div>
+          <div>
+            <h4>${t('billing.lose.title')}</h4>
+            <ul>
+              <li>${t('billing.lose.screens', { n: freePlan ? freePlan.max_devices : 1 })}</li>
+              ${freePlan && !freePlan.remote_url ? `<li>${t('billing.lose.remote_url')}</li>` : ''}
+              ${freePlan && !freePlan.remote_control ? `<li>${t('billing.lose.remote_control')}</li>` : ''}
+              ${freePlan && freePlan.max_storage_mb !== -1 ? `<li>${t('billing.lose.storage', { size: freePlan.max_storage_mb >= 1024 ? (freePlan.max_storage_mb / 1024) + ' GB' : freePlan.max_storage_mb + ' MB' })}</li>` : ''}
+            </ul>
           </div>
         </div>
         ` : ''}
@@ -96,8 +139,9 @@ export async function render(container) {
         ${saleEligible ? `<div class="billing-sale"><span class="billing-sale-tag">${t('billing.sale_tag', { pct: promo.percent_off })}</span><strong>${esc(promo.headline)}</strong>${promo.ends_at ? `<span class="billing-sale-end">${t('billing.sale_ends', { when: new Date(promo.ends_at * 1000).toLocaleString() })}</span>` : ''}</div>` : ''}
         <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(240px, 1fr));gap:16px">
           ${plans.map(p => `
-            <div style="background:var(--bg-secondary);border:${p.id === subData.plan.id ? '2px solid var(--accent)' : '1px solid var(--border)'};border-radius:var(--radius-lg);padding:20px;position:relative">
+            <div id="plan-card-${esc(p.id)}" style="background:var(--bg-secondary);border:${p.id === subData.plan.id ? '2px solid var(--accent)' : p.id === recommendedId ? '2px solid var(--success)' : '1px solid var(--border)'};border-radius:var(--radius-lg);padding:20px;position:relative">
               ${p.id === subData.plan.id ? `<div style="position:absolute;top:-10px;right:12px;background:var(--accent);color:white;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:500">${t('billing.current')}</div>` : ''}
+              ${p.id === recommendedId && p.id !== subData.plan.id ? `<div style="position:absolute;top:-10px;right:12px;background:var(--success);color:#06210f;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600">${t('billing.recommended')}</div>` : ''}
               <div style="font-size:18px;font-weight:700;margin-bottom:4px">${esc(p.display_name)}</div>
               <div style="font-size:24px;font-weight:700;color:var(--accent);margin-bottom:12px">
                 ${p.price_monthly > 0
@@ -106,6 +150,7 @@ export async function render(container) {
                     : `$${p.price_monthly}<span style="font-size:13px;color:var(--text-secondary);font-weight:400">${t('billing.per_month')}</span>`)
                   : t('billing.free')}
               </div>
+              ${p.id === recommendedId && p.id !== subData.plan.id ? `<div style="font-size:12px;color:var(--success);margin:-6px 0 8px">${subData.usage.devices > 0 ? t('billing.recommended_why', { n: subData.usage.devices }) : t('billing.recommended_why_new')}</div>` : ''}
               <div style="font-size:13px;color:var(--text-secondary);line-height:2">
                 <div>${p.max_devices === -1 ? t('billing.unlimited') : p.max_devices} ${t('billing.devices_lc')}</div>
                 <div>${p.max_storage_mb === -1 ? t('billing.unlimited') : (p.max_storage_mb >= 1024 ? (p.max_storage_mb/1024) + ' GB' : p.max_storage_mb + ' MB')} ${t('billing.storage_lc')}</div>
@@ -138,7 +183,7 @@ export async function render(container) {
         const res = await fetch('/api/stripe/checkout', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
-          body: JSON.stringify({ plan_id: planId, interval })
+          body: JSON.stringify({ plan_id: planId, interval, from })
         });
         const data = await res.json();
         if (data.error) { showToast(data.error, 'error'); return; }
@@ -165,10 +210,17 @@ export async function render(container) {
     if (window.location.hash.includes('payment=success')) {
       showToast(t('billing.toast.payment_success'), 'success');
       window.location.hash = '#/billing';
+    } else if (window.location.hash.includes('payment=cancelled')) {
+      // 3.0: Stripe sends people back here when they close checkout. Say plainly nothing happened.
+      showToast(t('billing.toast.payment_cancelled'), 'info');
+    }
+    if (recommendedId && params.get('plan')) {
+      document.getElementById(`plan-card-${recommendedId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
 
   } catch (err) {
-    document.getElementById('billingContent').innerHTML = `<div class="empty-state"><h3>${t('billing.failed_to_load')}</h3><p>${esc(err.message)}</p></div>`;
+    const host = document.getElementById('billingContent');
+    if (host) host.innerHTML = `<div class="empty-state"><h3>${t('billing.failed_to_load')}</h3><p>${esc(err.message)}</p></div>`;
   }
 }
 

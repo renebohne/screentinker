@@ -6,6 +6,7 @@ const { requireAuth } = require('../middleware/auth');
 const subscriptions = require('../middleware/subscription');
 const config = require('../config');
 const { periodEndOf, subscriptionIdOf, invoicePriceIdOf } = require('../lib/stripe-fields');
+const { trimTrailing } = require('../lib/trim-trailing');
 
 const appUrl = process.env.APP_URL || '';
 
@@ -39,7 +40,7 @@ const appBase = (req) => {
    * only thing left that is true, and it can only ever affect the caller's own redirect.
    */
   const raw = req.headers.origin || appUrl || `${req.protocol}://${req.get('host') || ''}`;
-  return `${String(raw).replace(/\/+$/, '')}/app`;
+  return `${trimTrailing(raw, '/')}/app`;
 };
 
 // Resolved per request (lib/stripe-client.js) so a test can substitute a double; null when
@@ -56,6 +57,9 @@ router.post('/checkout', requireAuth, async (req, res) => {
 
   const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(plan_id);
   if (!plan) return res.status(404).json({ error: 'Plan not found' });
+  // 3.0 funnel (hosted only; lib/conversion-events.js). `from` is where the click came from.
+  require('../lib/conversion-events').record(db, { userId: req.user.id, event: 'checkout_start',
+    meta: { plan: plan_id, interval: interval === 'yearly' ? 'yearly' : 'monthly', from: typeof req.body.from === 'string' ? req.body.from : undefined } });
 
   const priceId = interval === 'yearly' ? plan.stripe_price_yearly : plan.stripe_price_monthly;
   if (!priceId) return res.status(400).json({ error: `No Stripe price configured for ${plan_id} (${interval || 'monthly'})` });
@@ -194,6 +198,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
           db.prepare(`UPDATE users SET stripe_subscription_id = ?, plan_id = ?, plan_comped = 0, subscription_status = 'active', trial_started = NULL, updated_at = strftime('%s','now') WHERE id = ?`)
             .run(session.subscription, planId || 'starter', userId);
           console.log(`User ${userId} subscribed to ${planId} (sub: ${session.subscription})`);
+          require('../lib/conversion-events').record(db, { userId, event: 'checkout_complete', meta: { plan: planId || 'starter' } });
         }
         break;
       }

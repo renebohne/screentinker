@@ -15,7 +15,7 @@
   // packaged config.xml via the Tizen application API; fall back to a constant that
   // build-wgt.sh stamps from config.xml's version="" so the dashboard always shows the
   // version that is actually installed (never the old hardcoded '1.0.0').
-  var APP_VERSION_FALLBACK = '2.6.1'; // st:app-version — stamped by build-wgt.sh
+  var APP_VERSION_FALLBACK = '3.0.0'; // st:app-version — stamped by build-wgt.sh
   var APP_VERSION = (function () {
     try {
       var v = tizen.application.getCurrentApplication().appInfo.version;
@@ -456,6 +456,24 @@
     socket.on('device:remote-start', function () { startStreaming(); });
     socket.on('device:remote-stop', function () { stopStreaming(); });
 
+    // 3.0 screen share (js/screen-share-tizen.js): the content steps aside exactly as for screen-off
+    // (AVPlay torn down, <video> paused) and comes back the same way when the share ends.
+    if (window.STShareTizen) {
+      STShareTizen.wire(socket, {
+        creds: function () { return deviceId && deviceToken ? { deviceId: deviceId, deviceToken: deviceToken, serverUrl: serverUrl } : null; },
+        pause: function () {
+          try { if (player && player.avActive && player.avStop) player.avStop(); } catch (e) {}
+          try { var v = elStage.querySelectorAll('video'); for (var i = 0; i < v.length; i++) { try { v[i].pause(); } catch (e2) {} } } catch (e) {}
+        },
+        resume: function () {
+          if (document.getElementById('screenOffOverlay')) return;   // blanked meanwhile: screen_on restores
+          if (stageOwner === 'wallzones') { replayCurrent(); return; }
+          try { if (player && player.playCurrent) player.playCurrent(); } catch (e) {}
+        },
+        log: function (level, msg) { try { reportCmd(level, 'screen_share', msg); } catch (e) {} },
+      });
+    }
+
     // Dashboard remote control (parity with the web player) — touch injection + D-pad/volume/mute keys
     // + real-time per-item mute. All wrapped so a malformed payload can never wedge the socket.
     socket.on('device:remote-touch', function (data) {
@@ -679,9 +697,11 @@
     o.id = 'infoOverlay';
     o.style.cssText = 'position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,0.82);color:#e6e6e6;' +
       'font:16px/1.7 sans-serif;padding:6vh 6vw;box-sizing:border-box';
+    // Values are escaped: the server URL is typed on the remote and "Now playing" is an uploaded
+    // filename, and both used to be parsed as markup here.
     function row(k, val) {
       return '<div><span style="color:#8ab4f8;display:inline-block;min-width:210px">' + k + '</span>' +
-        (val == null || val === '' ? '—' : String(val)) + '</div>';
+        (val == null || val === '' ? '—' : esc(val)) + '</div>';
     }
     o.innerHTML = '<h2 style="margin:0 0 14px;color:#fff">ScreenTinker — Tizen Player</h2>' +
       row('Device ID', deviceId) +
@@ -767,6 +787,15 @@
       } catch (e) {}
       return;
     }
+    // 3.0 screen share: the screen IS the share while one is up — say so, rather than show the
+    // paused playlist underneath (the shared <video> is on the hardware plane too).
+    try {
+      if (window.STShareTizen && STShareTizen.drawCard(ctx, 960, 540)) {
+        var sb = canvas.toDataURL('image/jpeg', 0.4).split(',')[1];
+        if (sb) socket.emit('device:screenshot', { device_id: deviceId, image_b64: sb });
+        return;
+      }
+    } catch (e) {}
     try {
       var img = elStage.querySelector('img');
       if (img && img.complete && img.naturalWidth > 0) {
@@ -945,6 +974,8 @@
     function () { return deviceId; },
     function () { return authenticated && !!socket && socket.connected; }
   );
+  // #624: a wall keeps every item's fixed duration (the shared clock), so play to end is off there.
+  player.wallActive = function () { return wallController.active(); };
   // #group-sync: clock/schedule group sync (no leader, offline-native). Separate from WallController.
   var groupSync = new GroupSyncController(player, function () { return clockOffsetMs; }, reportSync);
   // Wall zones: a video wall's own layout, every zone paced by the SAME server-disciplined clock
@@ -1032,9 +1063,13 @@
       var mc = window.__stMediaCache;
       if (mc && serverUrl) {
         var mcItems = payload.assignments || [];
+        // 3.0 TV-safe video: a tall video that plays the server's copy here is cached AS that copy
+        // (its own key and revision); the original it replaces is one this TV cannot decode.
+        if (window.StVideoPlan) mcItems = window.StVideoPlan.cacheItems(mcItems, payload.wall_config ? 'landscape' : (payload.orientation || 'landscape'));
         var mcBase = serverUrl.replace(/\/+$/, '');
         setTimeout(function () {
           mc.sync(mcItems, function (it) {
+            if (it.__path) return mcBase + it.__path;
             return mcBase + '/api/content/' + it.content_id + '/file'
               + (it.content_rev ? '?rev=' + encodeURIComponent(it.content_rev) : '');
           });
@@ -1079,6 +1114,9 @@
       groupSync.exit();                 // wall and group are mutually exclusive
       player.setScheduleDriven(false);  // #157: wall gates on wallFollower, not scheduleDriven
       wallController.apply(payload.wall_config);
+      // No orientation transform on a wall, so none for video routing either: a screen that was
+      // portrait before joining must not keep playing AVPlay-rotated or turned (3.0 TV-safe) copies.
+      try { player.setOrientation('landscape'); } catch (e) {}
       player.setTimezone(payload.timezone || null);
       player.load(payload.assignments || [], payload.playback_order);
       stageOwner = 'player';

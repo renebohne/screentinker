@@ -240,8 +240,9 @@ test('a clip as long as its slot does NOT loop, so a freeze after it holds the L
 });
 
 test('a wall panel comes back from a reboot as its slice: the wall config is cached and restored before the first render', () => {
-  assert.match(extractFn(PLAYER, 'applyWallMode'), /localStorage\.setItem\('st_wall_config'/);
-  const restore = PLAYER.indexOf("const cw = localStorage.getItem('st_wall_config'); if (cw) applyWallMode(JSON.parse(cw));");
+  // (3.0: suffixed per display link; '' for plain /player, so the key is unchanged there.)
+  assert.match(extractFn(PLAYER, 'applyWallMode'), /localStorage\.setItem\('st_wall_config' \+ LINK_SUFFIX/);
+  const restore = PLAYER.indexOf("const cw = localStorage.getItem('st_wall_config' + LINK_SUFFIX); if (cw) applyWallMode(JSON.parse(cw));");
   const firstRender = PLAYER.indexOf('startPlaybackAt(0); // #74/#75: honour schedules from the first frame on cold-start');
   assert.ok(restore > 0 && firstRender > restore);
 });

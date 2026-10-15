@@ -130,6 +130,18 @@ class WebSocketService : Service() {
     var onRemoteStop: (() -> Unit)? = null
     // #talk: duck (true) / restore (false) the content playback while a call/PA is active.
     var onTalkDuck: ((Boolean) -> Unit)? = null
+    // 3.0 screen share: duck (true) / restore (false) the content while a share is on screen.
+    var onShareDuck: ((Boolean) -> Unit)? = null
+    private val screenShare by lazy {
+        com.remotedisplay.player.remote.ScreenShareController(
+            applicationContext,
+            credentials = {
+                val id = config.deviceId; val token = config.deviceToken; val url = config.serverUrl
+                if (id.isEmpty() || token.isEmpty() || url.isEmpty()) null else Triple(url, id, token)
+            },
+            onDuck = { on -> try { onShareDuck?.invoke(on) } catch (e: Throwable) { Log.e("WebSocketService", "share duck: ${e.message}") } },
+        )
+    }
     var onRemoteTouch: ((Float, Float, String) -> Unit)? = null
     var onRemoteKey: ((String) -> Unit)? = null
     var onCommand: ((String, JSONObject?) -> Unit)? = null
@@ -690,6 +702,12 @@ class WebSocketService : Service() {
                     catch (e: Throwable) { Log.e("WebSocketService", "talk stop: ${e.message}") }
                     handler.post { try { onTalkDuck?.invoke(false) } catch (e: Throwable) { Log.e("WebSocketService", "talk unduck: ${e.message}") } }
                 }
+
+                // 3.0 screen share: a person's screen, peer to peer, fullscreen over the content
+                // (remote/ScreenShareController + ScreenShareReceiver; docs/screen-share.md).
+                safeOn("device:screenshare-start") { args -> screenShare.onStart(args.firstOrNull() as? JSONObject) }
+                safeOn("device:screenshare-stop") { args -> screenShare.onStop(args.firstOrNull() as? JSONObject) }
+                safeOn("device:screenshare-code") { args -> screenShare.onCode(args.firstOrNull() as? JSONObject) }
 
                 safeOn("device:remote-touch") { args ->
                     if (privacyOn()) { Log.i("WebSocketService", "remote touch refused: interactive session in progress"); return@safeOn }
@@ -1621,6 +1639,21 @@ class WebSocketService : Service() {
         } catch (e: Throwable) { Log.w("WebSocketService", "sendPlayStart: ${e.message}") }
     }
 
+    /** 3.0 campaigns: a whole layout went on screen (server: play-event layout_start). Live only. */
+    fun sendLayoutStart(layoutId: String, layoutName: String, durationSec: Int) {
+        if (socket?.connected() != true || layoutId.isEmpty()) return
+        try {
+            val data = JSONObject().apply {
+                put("device_id", config.deviceId)
+                put("event", "layout_start")
+                put("layout_id", layoutId)
+                put("content_name", layoutName)
+                put("duration_sec", if (durationSec > 0) durationSec else JSONObject.NULL)
+            }
+            socket?.emit("device:play-event", data)
+        } catch (e: Throwable) { Log.w("WebSocketService", "sendLayoutStart: ${e.message}") }
+    }
+
     fun sendPlayEnd(contentId: String, contentName: String, completed: Boolean) {
         if (socket?.connected() != true) {
             /*
@@ -2007,6 +2040,7 @@ class WebSocketService : Service() {
         try { screenReceiver?.let { unregisterReceiver(it) } } catch (e: Throwable) { Log.w("WebSocketService", "unregister screenReceiver: ${e.message}") }
         screenReceiver = null
         wakeLock?.let { if (it.isHeld) it.release() }
+        try { screenShare.shutdown("screen_left") } catch (e: Throwable) { }   // 3.0 screen share
         disconnect()
         super.onDestroy()
     }

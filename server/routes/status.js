@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { copyFileBytes } = require('../lib/fsutil'); // exFAT-safe; see lib/fsutil.js
 const fs = require('fs');
+const { resolveWithin } = require('../lib/safe-path');
 const config = require('../config');
 const replicaProxy = require('../lib/replica-proxy');
 const { sixDigitCode } = require('../lib/numeric-code');
@@ -115,7 +116,9 @@ router.get('/', (req, res) => {
     // #go2rtc: whether live video is enabled server-wide (the master switch). The dashboard uses
     // this to decide whether to OFFER the per-workspace/per-device toggles at all; both of those
     // flags are inert unless this is on. A boolean, no sidecar detail leaks here.
-    features: { live_video: !!config.liveVideoEnabled, talk: !!config.talkEnabled, view_only: !!config.viewOnlyEnabled },
+    features: { live_video: !!config.liveVideoEnabled, talk: !!config.talkEnabled, view_only: !!config.viewOnlyEnabled,
+      // 3.0: screen share (lib/screen-share.js) — on unless SCREEN_SHARE_ENABLED=false.
+      screen_share: !!config.screenShareEnabled },
   };
 
   /*
@@ -203,43 +206,34 @@ router.get('/backup', (req, res) => {
   res.download(dbPath, `remotedisplay-backup-${new Date().toISOString().split('T')[0]}.db`);
 });
 
-// User data export (own data only)
-router.get('/export', async (req, res) => {
-  const token = req.query.token;
-  if (!token) return res.status(401).json({ error: 'Token required' });
-
-  let userId;
-  let workspaceId;
-  try {
-    const session = resolveSessionUser(token);
-    // For a break-glass identity this is the synthetic recovery id, which has no users
-    // row - the lookup below then 404s exactly as the inline verify did before.
-    userId = session.user.id;
-    // Re-validate the JWT's workspace claim against current membership (stale-access), then fall back.
-    workspaceId = sessionWorkspaceId(session.user.id, session.user.role, session.decoded.current_workspace_id || null);
-    if (!userId) return res.status(401).json({ error: 'Invalid token' });
-  } catch (err) {
-    if (err.code === 'user_not_found') return res.status(404).json({ error: 'User not found' });
-    return denySession(res, err);
-  }
-
+/*
+ * The data of one export in the screentinker-export-v2 format: the person's own resources
+ * (byWorkspace false — GET /export), or every resource of one workspace (byWorkspace true — used by
+ * the complete organization export, which writes one re-importable export.json per workspace).
+ * Returns null when the user row is gone.
+ */
+function collectExportData({ userId, workspaceId, byWorkspace = false }) {
   // Re-read with the export's own column list (it needs created_at, which the session
   // resolver doesn't select).
   const user = db.prepare('SELECT id, email, name, role, auth_provider, plan_id, created_at FROM users WHERE id = ?').get(userId);
-  if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!user) return null;
+  // The rows this export covers: the person's own (the original GET /export), or one whole
+  // workspace's (3.0 complete organization export, lib/trust/export.js). Never interpolated from input.
+  const col = byWorkspace ? 'workspace_id' : 'user_id';
+  const key = byWorkspace ? workspaceId : userId;
 
-  const devices = db.prepare('SELECT id, name, status, ip_address, android_version, app_version, screen_width, screen_height, tags, created_at FROM devices WHERE user_id = ?').all(userId);
+  const devices = db.prepare(`SELECT id, name, status, ip_address, android_version, app_version, screen_width, screen_height, tags, created_at FROM devices WHERE ${col} = ?`).all(key);
   const deviceIds = devices.map(d => d.id);
   const devicePlaceholders = deviceIds.map(() => '?').join(',') || "'__none__'";
 
-  const content = db.prepare('SELECT id, filename, mime_type, file_size, duration_sec, remote_url, width, height, created_at FROM content WHERE user_id = ?').all(userId);
-  const widgets = db.prepare('SELECT id, widget_type, name, config, created_at FROM widgets WHERE user_id = ?').all(userId);
-  const layouts = db.prepare('SELECT id, name, width, height, is_template, template_category, created_at FROM layouts WHERE user_id = ? AND is_template = 0').all(userId);
+  const content = db.prepare(`SELECT id, filename, mime_type, file_size, duration_sec, remote_url, width, height, created_at FROM content WHERE ${col} = ?`).all(key);
+  const widgets = db.prepare(`SELECT id, widget_type, name, config, created_at FROM widgets WHERE ${col} = ?`).all(key);
+  const layouts = db.prepare(`SELECT id, name, width, height, is_template, template_category, created_at FROM layouts WHERE ${col} = ? AND is_template = 0`).all(key);
   const layoutIds = layouts.map(l => l.id);
   const layoutPlaceholders = layoutIds.map(() => '?').join(',') || "'__none__'";
   const layoutZones = layoutIds.length ? db.prepare(`SELECT * FROM layout_zones WHERE layout_id IN (${layoutPlaceholders})`).all(...layoutIds) : [];
 
-  const playlists = db.prepare('SELECT id, name, description, is_auto_generated, smart_rules, created_at, updated_at, corporate FROM playlists WHERE user_id = ?').all(userId)
+  const playlists = db.prepare(`SELECT id, name, description, is_auto_generated, smart_rules, created_at, updated_at, corporate${require('../lib/corporate/schema-probe').hasColumn(db, 'playlists', 'layout_id') ? ', layout_id' : ''} FROM playlists WHERE ${col} = ?`).all(key)
     .map(({ corporate, ...p }) => (corporate ? { ...p, corporate: 1 } : p));
   const playlistIds = playlists.map(p => p.id);
   const playlistPlaceholders = playlistIds.map(() => '?').join(',') || "'__none__'";
@@ -273,21 +267,21 @@ router.get('/export', async (req, res) => {
     }
   } catch (_) { /* no corporate tables */ }
 
-  const schedules = db.prepare('SELECT id, device_id, group_id, zone_id, content_id, widget_id, layout_id, playlist_id, title, start_time, end_time, timezone, recurrence, recurrence_end, priority, enabled, color, created_at FROM schedules WHERE user_id = ?').all(userId);
-  const videoWalls = db.prepare('SELECT * FROM video_walls WHERE user_id = ?').all(userId);
+  const schedules = db.prepare(`SELECT id, device_id, group_id, zone_id, content_id, widget_id, layout_id, playlist_id, title, start_time, end_time, timezone, recurrence, recurrence_end, priority, enabled, color, created_at FROM schedules WHERE ${col} = ?`).all(key);
+  const videoWalls = db.prepare(`SELECT * FROM video_walls WHERE ${col} = ?`).all(key);
   const wallIds = videoWalls.map(w => w.id);
   const wallPlaceholders = wallIds.map(() => '?').join(',') || "'__none__'";
   const wallDevices = wallIds.length ? db.prepare(`SELECT * FROM video_wall_devices WHERE wall_id IN (${wallPlaceholders})`).all(...wallIds) : [];
 
-  const kioskPages = db.prepare('SELECT id, name, config, created_at FROM kiosk_pages WHERE user_id = ?').all(userId);
-  const deviceGroups = db.prepare('SELECT id, name, color, rules, created_at FROM device_groups WHERE user_id = ?').all(userId);
+  const kioskPages = db.prepare(`SELECT id, name, config, created_at FROM kiosk_pages WHERE ${col} = ?`).all(key);
+  const deviceGroups = db.prepare(`SELECT id, name, color, rules, created_at FROM device_groups WHERE ${col} = ?`).all(key);
   const groupIds = deviceGroups.map(g => g.id);
   const groupPlaceholders = groupIds.map(() => '?').join(',') || "'__none__'";
   const groupMembers = groupIds.length ? db.prepare(`SELECT * FROM device_group_members WHERE group_id IN (${groupPlaceholders})`).all(...groupIds) : [];
-  const alertConfigs = db.prepare('SELECT id, alert_type, enabled, config, created_at FROM alert_configs WHERE user_id = ?').all(userId);
+  const alertConfigs = db.prepare(`SELECT id, alert_type, enabled, config, created_at FROM alert_configs WHERE ${col} = ?`).all(key);
   const whiteLabel = workspaceId ? db.prepare('SELECT * FROM white_labels WHERE workspace_id = ?').get(workspaceId) : null;
 
-  const exportData = {
+  return {
     format: 'screentinker-export-v2',
     exported_at: new Date().toISOString(),
     user,
@@ -317,15 +311,39 @@ router.get('/export', async (req, res) => {
     alert_configs: alertConfigs.map(a => ({ ...a, config: JSON.parse(a.config || '{}') })),
     white_label: whiteLabel || null,
   };
+}
+
+// User data export (own data only)
+router.get('/export', async (req, res) => {
+  const token = req.query.token;
+  if (!token) return res.status(401).json({ error: 'Token required' });
+
+  let userId;
+  let workspaceId;
+  try {
+    const session = resolveSessionUser(token);
+    // For a break-glass identity this is the synthetic recovery id, which has no users
+    // row - the lookup below then 404s exactly as the inline verify did before.
+    userId = session.user.id;
+    // Re-validate the JWT's workspace claim against current membership (stale-access), then fall back.
+    workspaceId = sessionWorkspaceId(session.user.id, session.user.role, session.decoded.current_workspace_id || null);
+    if (!userId) return res.status(401).json({ error: 'Invalid token' });
+  } catch (err) {
+    if (err.code === 'user_not_found') return res.status(404).json({ error: 'User not found' });
+    return denySession(res, err);
+  }
+
+  const exportData = collectExportData({ userId, workspaceId });
+  if (!exportData) return res.status(404).json({ error: 'User not found' });
 
   // If include_files requested, bundle as ZIP with content files
   if (req.query.include_files === 'true') {
-    const archiver = require('archiver');
+    const { ZipArchive } = require('archiver');
     const dateStr = new Date().toISOString().split('T')[0];
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename=screentinker-export-${dateStr}.zip`);
 
-    const archive = archiver('zip', { zlib: { level: 5 } });
+    const archive = new ZipArchive({ zlib: { level: 5 } });
     archive.pipe(res);
 
     // Collect file info and add files to archive
@@ -381,40 +399,102 @@ router.get('/export', async (req, res) => {
 
 // User data import (JSON or ZIP with files)
 const multer = require('multer');
-const importUpload = multer({ dest: path.join(os.tmpdir(), 'screentinker-import'), limits: { fileSize: 2 * 1024 * 1024 * 1024 } }); // 2GB max
-
-/*
- * Scale-out (docs/scale-out.md): an import WRITES into the session's workspace. When that workspace
- * is a copy (origin_node_id set) the whole upload is forwarded to the primary — before multer, so
- * the multipart stream is still intact — and nothing lands here. Session errors are left to the
- * handler below, which reports them exactly as it always has.
- */
-function proxyImportIfCopied(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return next();
-  let ws = null;
-  try {
-    const session = resolveSessionUser(authHeader.split(' ')[1]);
-    if (session.viaRecovery) return next();
-    const wsId = sessionWorkspaceId(session.user.id, session.user.role, session.decoded.current_workspace_id || null);
-    ws = wsId ? db.prepare('SELECT id, origin_node_id FROM workspaces WHERE id = ?').get(wsId) : null;
-  } catch (e) { return next(); }
-  if (ws && replicaProxy.shouldIntercept(req, ws)) return replicaProxy.proxyToPrimary(req, res, config);
-  next();
+const IMPORT_UPLOAD_DIR = path.join(os.tmpdir(), 'screentinker-import');
+const importUpload = multer({ dest: IMPORT_UPLOAD_DIR, limits: { fileSize: 2 * 1024 * 1024 * 1024 } }); // 2GB max
+// The uploaded zip's path, contained to the directory multer writes it into. Every open and unlink
+// below goes through this, so none of them can be pointed outside that directory.
+function importZipPath(req) {
+  return req.file && req.file.path ? resolveWithin(IMPORT_UPLOAD_DIR, req.file.path) : null;
+}
+function discardImportZip(req) {
+  const p = importZipPath(req);
+  if (p) { try { fs.unlinkSync(p); } catch (_) { /* already gone */ } }
 }
 
-router.post('/import', proxyImportIfCopied, importUpload.single('file'), async (req, res) => {
+/*
+ * ⚠️ LEFTOVERS FROM A CRASH OR A KILLED REQUEST ARE SWEPT AT LOAD. Uploads land in
+ * IMPORT_UPLOAD_DIR and are extracted into IMPORT_EXTRACT_PREFIX<random>; both are removed per
+ * request now, but a process that dies mid-import leaves up to 2 GB (plus its extraction) in /tmp
+ * forever. Anything older than an hour cannot belong to a live import (the route is rate-limited
+ * to 3/min and an import is one request).
+ */
+const IMPORT_EXTRACT_PREFIX = 'screentinker-import-';
+const IMPORT_STALE_MS = 60 * 60 * 1000;
+function sweepImportTmp(now = Date.now()) {
+  const old = (p) => { try { return now - fs.statSync(p).mtimeMs > IMPORT_STALE_MS; } catch (_) { return false; } };
+  try {
+    for (const f of fs.readdirSync(IMPORT_UPLOAD_DIR)) {
+      const p = resolveWithin(IMPORT_UPLOAD_DIR, f);
+      if (p && old(p)) { try { fs.rmSync(p, { recursive: true, force: true }); } catch (_) {} }
+    }
+  } catch (_) { /* no upload dir yet */ }
+  try {
+    for (const f of fs.readdirSync(os.tmpdir())) {
+      if (!f.startsWith(IMPORT_EXTRACT_PREFIX)) continue;
+      const p = resolveWithin(os.tmpdir(), f);
+      if (p && old(p)) { try { fs.rmSync(p, { recursive: true, force: true }); } catch (_) {} }
+    }
+  } catch (_) { /* tmpdir unreadable: nothing to sweep */ }
+}
+sweepImportTmp();
+
+/*
+ * ⚠️ EXTRACTION IS CAPPED ON REAL BYTES. unzipper.Extract wrote whatever the archive inflated to,
+ * so a 2 GB upload of zeros (or a few-MB bomb) could fill /tmp. Only the two shapes an export
+ * contains are written — export.json and files/<content id>/<name> — every other entry is ignored,
+ * symlinks are refused, names go through the bundle path normaliser (zip slip) and resolveWithin.
+ * Each entry is capped at its claimed size, and the whole extraction at a total and a ratio.
+ */
+const IMPORT_MAX_ENTRIES = 50000;
+const IMPORT_MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024;   // an export is mostly already-compressed media
+const IMPORT_MAX_RATIO = 50;                             // real bytes out per archive byte, whole archive
+const IMPORT_MIN_BUDGET = 256 * 1024 * 1024;             // so a small, JSON-heavy export is never refused
+async function extractImportZip(zipPath, extractDir) {
+  const unzipper = require('unzipper');
+  const { normalizeEntryPath } = require('../lib/html-bundle');
+  const { inflateToFileCapped } = require('../lib/zip-inflate');
+  const zipBytes = fs.statSync(zipPath).size;
+  const budget = { remaining: Math.min(IMPORT_MAX_TOTAL_BYTES, Math.max(IMPORT_MIN_BUDGET, zipBytes * IMPORT_MAX_RATIO)) };
+  const directory = await unzipper.Open.file(zipPath);
+  const entries = directory.files || [];
+  if (entries.length > IMPORT_MAX_ENTRIES) throw new Error(`archive has more than ${IMPORT_MAX_ENTRIES} entries`);
+  const tooBig = (kind) => new Error(kind === 'too-large' ? 'archive inflates past the import limit' : 'archive entry is corrupt');
+  for (const e of entries) {
+    if (e.type === 'Directory') continue;
+    if ((((Number(e.externalFileAttributes) || 0) >>> 16) & 0xF000) === 0xA000) throw new Error('archive contains a symlink');
+    const name = normalizeEntryPath(e.path);
+    if (!name) throw new Error('archive entry has an unsafe path');
+    const parts = name.split('/');
+    if (!(name === 'export.json' || (parts.length === 3 && parts[0] === 'files'))) continue;
+    const claimed = Number(e.uncompressedSize) || 0;
+    if (claimed > budget.remaining) throw tooBig('too-large');
+    const dest = resolveWithin(extractDir, name);
+    if (!dest) throw new Error('archive entry has an unsafe path');
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    await inflateToFileCapped(e, dest, claimed, budget, tooBig);
+  }
+}
+
+/*
+ * ⚠️ AUTHENTICATE BEFORE MULTER. The session check used to run inside the handler, AFTER
+ * importUpload had already streamed up to 2 GB to disk — for anyone, token or not — and the 401 /
+ * denySession returns never removed it. This resolves the same session, with the same statuses and
+ * bodies, before a byte of the upload is accepted, and hands the result to the handler.
+ */
+function authenticateImport(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ error: 'Token required' });
 
   let userId;
   let workspaceId;
+  let sessionRole = null;
   try {
     const session = resolveSessionUser(authHeader.split(' ')[1]);
     // A break-glass identity has no users row: the lookup this replaced returned nothing
     // for it, so the route 404'd. Preserve that.
     if (session.viaRecovery) return res.status(404).json({ error: 'User not found' });
     userId = session.user.id;
+    sessionRole = session.user.role;
     // Import WRITES into the workspace and can overwrite its branding, so re-validate the JWT's
     // workspace claim against current membership (stale-access) rather than trusting it, then fall back.
     workspaceId = sessionWorkspaceId(session.user.id, session.user.role, session.decoded.current_workspace_id || null);
@@ -432,19 +512,113 @@ router.post('/import', proxyImportIfCopied, importUpload.single('file'), async (
    * applied denyReadOnly's rule — a workspace_viewer could create devices, playlists and widgets
    * and overwrite the workspace's branding. Same rule as lib/tenancy.js denyReadOnly.
    */
-  let sessionRole = null;
   try {
-    sessionRole = resolveSessionUser(authHeader.split(' ')[1]).user.role;
     const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId);
     const ctx = ws && accessContext(userId, sessionRole, ws);
     if (!ctx || (!ctx.actingAs && ctx.workspaceRole === 'workspace_viewer')) {
-      if (req.file) fs.unlink(req.file.path, () => {});
       return res.status(403).json({ error: 'Read-only access' });
     }
   } catch (err) {
-    if (req.file) fs.unlink(req.file.path, () => {});
     return res.status(403).json({ error: 'Access denied' });
   }
+  req.importAuth = { userId, workspaceId, sessionRole };
+  next();
+}
+
+/*
+ * Imported content rows: the URL and type get the same gates the content routes apply
+ * (routes/content.js POST /remote, PUT /:id). A live transport is player-opened (LAN allowed);
+ * a hold is hold://blank|freeze; everything else is server-retrievable and SSRF-gated. Returns
+ * null when the row may be imported, else a reason.
+ */
+function importedContentRefusal(c) {
+  const mime = c.mime_type;
+  if (mime != null && (typeof mime !== 'string' || !/^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,99}$/i.test(mime))) {
+    return 'invalid mime_type';
+  }
+  const url = c.remote_url;
+  const { HOLD_MIME } = require('../lib/hold-item');
+  if (mime === HOLD_MIME) return url && !/^hold:\/\/(blank|freeze)$/.test(String(url)) ? 'invalid hold url' : null;
+  if (!url) return null;
+  if (typeof url !== 'string') return 'invalid remote_url';
+  const ru = require('../lib/remote-url');
+  let err;
+  if (mime === ru.RTSP_MIME) err = ru.validateRtspUrl(url);
+  else if (mime === ru.HDMI_IN_MIME) err = ru.validateHdmiInUrl(url);
+  else if (mime === ru.LIVE_MIME) err = ru.validatePlayerOpenedUrl(url);
+  else err = ru.validateRemoteUrl(url);
+  return err ? err.error : null;
+}
+
+/*
+ * ⚠️ A DIGEST NAME IS A CLAIM UNTIL THE BYTES ARE HASHED. The restore keeps <sha256><ext> names
+ * (see below), and contentDir is SHARED across workspaces — so an archive naming a file after
+ * another tenant's digest overwrote that tenant's media with its own bytes. The name is kept only
+ * when the bytes hash to it, and an existing file is never written over: if it is there and its
+ * bytes match, it is reused (refcounted, lib/content-files.js); otherwise a fresh uuid name is used.
+ * Returns the destination basename, or null when the copy failed.
+ */
+function restoreImportedFile(srcPath, srcName, newId, ext) {
+  if (isDigestName(srcName)) {
+    const claimed = path.basename(srcName).split('.')[0];
+    if (digestFileSync(srcPath) === claimed) {
+      const name = path.basename(srcName);
+      const dest = path.join(config.contentDir, name);
+      if (fs.existsSync(dest)) {
+        if (digestFileSync(dest) === claimed) return name;
+      } else if (copyFileExclusive(srcPath, dest)) {
+        return name;
+      }
+    }
+  }
+  // A row's file and its thumbnail can share an extension, so the second one gets its own uuid
+  // instead of truncating the first (which the old 'w' copy did).
+  for (const name of [`${newId}${ext}`, `${require('uuid').v4()}${ext}`]) {
+    if (copyFileExclusive(srcPath, path.join(config.contentDir, name))) return name;
+  }
+  return null;
+}
+// copyFileBytes truncates; refuse to overwrite by claiming the name with O_EXCL first.
+function copyFileExclusive(src, dest) {
+  try { fs.closeSync(fs.openSync(dest, 'wx')); } catch (_) { return false; }
+  try { copyFileBytes(src, dest); return true; } catch (_) {
+    try { fs.unlinkSync(dest); } catch (_2) {}
+    return false;
+  }
+}
+
+/*
+ * Scale-out (docs/scale-out.md): an import WRITES into the session's workspace. When that workspace
+ * is a copy (origin_node_id set) the whole upload is forwarded to the primary — before multer, so
+ * the multipart stream is still intact — and nothing lands here. Session errors are left to
+ * authenticateImport, which reports them exactly as the handler always has.
+ */
+function proxyImportIfCopied(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return next();
+  let ws = null;
+  try {
+    const session = resolveSessionUser(authHeader.split(' ')[1]);
+    if (session.viaRecovery) return next();
+    const wsId = sessionWorkspaceId(session.user.id, session.user.role, session.decoded.current_workspace_id || null);
+    ws = wsId ? db.prepare('SELECT id, origin_node_id FROM workspaces WHERE id = ?').get(wsId) : null;
+  } catch (e) { return next(); }
+  if (ws && replicaProxy.shouldIntercept(req, ws)) return replicaProxy.proxyToPrimary(req, res, config);
+  next();
+}
+
+router.post('/import', proxyImportIfCopied, authenticateImport, importUpload.single('file'), async (req, res) => {
+  // The upload and its extraction are removed however the handler ends (return, throw, or success).
+  try {
+    await handleImport(req, res);
+  } finally {
+    discardImportZip(req);
+    if (req.importExtractDir) { try { fs.rmSync(req.importExtractDir, { recursive: true, force: true }); } catch (_) {} }
+  }
+});
+
+async function handleImport(req, res) {
+  const { userId, workspaceId, sessionRole } = req.importAuth;
   const importerIsPlatformAdmin = PLATFORM_ROLES.includes(sessionRole);
 
   let data;
@@ -452,49 +626,44 @@ router.post('/import', proxyImportIfCopied, importUpload.single('file'), async (
 
   if (req.file) {
     // ZIP upload — extract export.json and files/
+    const zipPath = importZipPath(req);
+    if (!zipPath) return res.status(400).json({ error: 'Upload not found' });
     try {
-      const unzipper = require('unzipper');
-      const extractDir = path.join(os.tmpdir(), `screentinker-import-${Date.now()}`);
-      fs.mkdirSync(extractDir, { recursive: true });
+      const extractDir = fs.mkdtempSync(path.join(os.tmpdir(), IMPORT_EXTRACT_PREFIX));
+      req.importExtractDir = extractDir;   // removed by the route wrapper's finally
 
-      await new Promise((resolve, reject) => {
-        fs.createReadStream(req.file.path)
-          .pipe(unzipper.Extract({ path: extractDir }))
-          .on('close', resolve)
-          .on('error', reject);
-      });
+      await extractImportZip(zipPath, extractDir);
 
       // Read the JSON manifest
       const jsonPath = path.join(extractDir, 'export.json');
       if (!fs.existsSync(jsonPath)) {
-        fs.unlinkSync(req.file.path);
+        discardImportZip(req);
         return res.status(400).json({ error: 'ZIP does not contain export.json' });
       }
       data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
 
       // Map extracted files by content ID, with path traversal validation
       const filesDir = path.join(extractDir, 'files');
-      const resolvedExtractDir = path.resolve(extractDir);
       if (fs.existsSync(filesDir)) {
         for (const contentDir of fs.readdirSync(filesDir)) {
-          const contentPath = path.resolve(filesDir, contentDir);
-          // Validate path is within extractDir to prevent directory traversal
-          if (!contentPath.startsWith(resolvedExtractDir)) continue;
+          // Contained to files/ (lib/safe-path). The bare startsWith(extractDir) this replaced
+          // also admitted a sibling sharing the prefix, `screentinker-import-<ts>x/...`.
+          const contentPath = resolveWithin(filesDir, contentDir);
+          if (!contentPath) continue;
           if (!fs.statSync(contentPath).isDirectory()) continue;
           const files = fs.readdirSync(contentPath);
           extractedFiles[contentDir] = files.map(f => {
-            const filePath = path.resolve(contentPath, f);
-            // Validate each file path is within extractDir
-            if (!filePath.startsWith(resolvedExtractDir)) return null;
+            const filePath = resolveWithin(contentPath, f);
+            if (!filePath) return null;
             return { name: f, path: filePath };
           }).filter(Boolean);
         }
       }
 
       // Cleanup uploaded zip
-      fs.unlinkSync(req.file.path);
+      discardImportZip(req);
     } catch (err) {
-      if (req.file?.path) try { fs.unlinkSync(req.file.path); } catch {}
+      discardImportZip(req);
       return res.status(400).json({ error: 'Failed to extract ZIP: ' + err.message });
     }
   } else {
@@ -545,6 +714,12 @@ router.post('/import', proxyImportIfCopied, importUpload.single('file'), async (
 
     // Import content metadata + files from ZIP if available
     for (const c of (data.content || [])) {
+      // Same URL / type gates as the content routes; a refused row is left out (items naming it
+      // are dropped like any other unknown content id) and counted.
+      if (importedContentRefusal(c)) {
+        stats.content_refused = (stats.content_refused || 0) + 1;
+        continue;
+      }
       const newId = uuid.v4();
       idMap.content[c.id] = newId;
 
@@ -578,10 +753,10 @@ router.post('/import', proxyImportIfCopied, importUpload.single('file'), async (
            * unlinking is refcounted now (lib/content-files.js), so neither row can take the other's
            * file with it.
            */
-          const destName = isDigestName(f.name) ? path.basename(f.name) : `${newId}${ext}`;
-          const destPath = path.join(config.contentDir, destName);
+          // ...and only once its bytes are hashed and nothing is written over: restoreImportedFile.
           try {
-            copyFileBytes(f.path, destPath);
+            const destName = restoreImportedFile(f.path, f.name, newId, ext);
+            if (!destName) throw new Error('copy failed');
             // Match original filepath vs thumbnail
             if (c.original_filepath && f.name === c.original_filepath) {
               newFilepath = destName;
@@ -683,6 +858,12 @@ router.post('/import', proxyImportIfCopied, importUpload.single('file'), async (
         const asCorporate = corpImport && p.corporate && !smartRules ? 1 : 0;
         if (asCorporate) idMap.corporate = { ...(idMap.corporate || {}), [p.id]: newId };
         db.prepare('INSERT INTO playlists (id, user_id, workspace_id, name, description, is_auto_generated, smart_rules, created_at, updated_at, corporate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(newId, userId, workspaceId, p.name, p.description || '', p.is_auto_generated || 0, smartRules ? JSON.stringify(smartRules) : null, p.created_at || Math.floor(Date.now() / 1000), p.updated_at || Math.floor(Date.now() / 1000), asCorporate);
+        // 3.0 playlist layout: only a layout this same import created (its id is remapped), never a
+        // raw id from the file — that could name another tenant's layout on this server.
+        // A built-in template (shared by every tenant) keeps its id.
+        const importedLayout = p.layout_id && !asCorporate ? (idMap.layouts[p.layout_id]
+          || ((db.prepare('SELECT is_template FROM layouts WHERE id = ?').get(String(p.layout_id)) || {}).is_template ? String(p.layout_id) : null)) : null;
+        if (importedLayout) db.prepare('UPDATE playlists SET layout_id = ? WHERE id = ?').run(importedLayout, newId);
         stats.playlists++;
       }
       /*
@@ -943,8 +1124,13 @@ router.post('/import', proxyImportIfCopied, importUpload.single('file'), async (
     console.error('Import error:', err);
     res.status(500).json({ error: 'Import failed: ' + err.message });
   }
-});
+}
 
 module.exports = router;
 // Scale-out NOC (routes/mesh-enroll.js /noc) reads the same block rather than recomputing it.
 module.exports.scaleOutStatus = scaleOutStatus;
+// 3.0 complete exports (lib/trust/export.js) write this same format for each workspace and person.
+module.exports.collectExportData = collectExportData;
+// 3.0 organization import (lib/trust/import-restore.js) applies the same URL and type gates to the
+// content rows it restores.
+module.exports.importedContentRefusal = importedContentRefusal;

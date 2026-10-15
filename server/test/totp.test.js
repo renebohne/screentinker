@@ -60,14 +60,16 @@ async function enroll(token) {
   assert.match(s.body.otpauth_uri, /^otpauth:\/\/totp\//);
   assert.match(s.body.qr_data_url, /^data:image\/png;base64,/);
   const e = await jfetch('/api/auth/totp/enable', post(token, { code: authenticator.generate(s.body.secret) }));
-  return { secret: s.body.secret, recovery: e.body.recovery_codes };
+  // 3.0: enabling TOTP ends every other session (token_version) and hands THIS one a fresh token.
+  return { secret: s.body.secret, recovery: e.body.recovery_codes, token: e.body.token };
 }
 
 test('enrollment: setup -> enable issues 10 recovery codes; status reflects it', async () => {
   const u = await newUser();
-  const { recovery } = await enroll(u.token);
+  const { recovery, token } = await enroll(u.token);
   assert.equal(recovery.length, 10);
-  const st = await jfetch('/api/auth/totp/status', auth(u.token));
+  assert.equal((await jfetch('/api/auth/me', auth(u.token))).status, 401, '3.0: the pre-enrolment session is over');
+  const st = await jfetch('/api/auth/totp/status', auth(token));
   assert.equal(st.body.enabled, true);
   assert.equal(st.body.recovery_codes_remaining, 10);
 });
@@ -102,10 +104,10 @@ test('/totp/verify completes login via recovery code; single-use; surfaces remai
 
 test('API token BYPASSES TOTP: an st_ token works while the owner has TOTP enabled', async () => {
   const u = await newUser();
-  await enroll(u.token);
-  // the pre-existing session token (issued at register, before enroll) still works -
-  // enabling TOTP does NOT invalidate it - so it can mint an API token:
-  const t = await jfetch('/api/tokens', post(u.token, { name: 'ci', scope: 'read' }));
+  // 3.0: enabling TOTP returns a fresh session for the tab that did it (every other session ends),
+  // and that session can mint an API token:
+  const { token } = await enroll(u.token);
+  const t = await jfetch('/api/tokens', post(token, { name: 'ci', scope: 'read' }));
   const secret = Object.values(t.body || {}).find(v => typeof v === 'string' && v.startsWith('st_'));
   assert.ok(secret, 'got an st_ token (existing JWT still valid post-enroll)');
   const r = await jfetch('/api/devices', auth(secret));

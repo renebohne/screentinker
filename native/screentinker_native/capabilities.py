@@ -22,6 +22,9 @@ CAPABILITIES_ALWAYS = [
     "audio.mute", "audio.volume",
     "display.rotation", "display.brightness", "display.power", "display.power_schedule",
     "remote.screenshot", "remote.stream", "remote.input", "remote.talk", "remote.set_server_url",
+    # 3.0 screen share: the server's /player/screen-share.js in the QtWebEngine RTC page (Chromium's
+    # WebRTC, the same page Talk uses), shown fullscreen over the content (app._share_start).
+    "remote.screen_share",
     "system.restart_player", "system.self_update", "system.shell", "system.pty", "system.kiosk",
     "net.http_request", "sync.clock", "offline.cache",
     # A meeting-room display's buttons work here: the engine passes #panel (player/engine.py) and the

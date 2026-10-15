@@ -294,6 +294,34 @@ function deckWarnings(deck, durations = {}) {
 }
 
 /**
+ * The widget config one slide of a deck publishes as. Shared by publishDeck and by Make a sign
+ * (routes/signs.js), which creates a sign's widget up front so the sign can go straight onto a
+ * screen — and must write it in exactly the shape a later publish of the same deck would, or that
+ * publish would see a "change" and bump every screen's render URL for nothing.
+ */
+function slideWidgetConfig(normalized, s) {
+  const template = {
+    ...s.template,
+    audio: { ...s.template.audio, music: normalized.music, music_volume: normalized.music_volume },
+    /*
+     * ⚠️ AND THE DECK'S SHAPE, for the same structural reason as the bed above: by the time it
+     * plays, a deck is N independent widgets and nothing downstream can still ask the deck
+     * anything. Stored on the deck, stamped here, so two slides can never disagree about the
+     * shape they were laid out in.
+     *
+     * CARRIED, NOT YET HONOURED. The renderer still gives the stage the panel's whole box, so a
+     * 16:9 deck on a 2560x1800 screen is a different composition (cover backgrounds cropped,
+     * text past the edges). The CSS that fixes it needs container queries, which the Android
+     * WebView on a lot of signage hardware does not have — see the long note in
+     * test/slide-render.test.js. Stamping it now means every deck published from today already
+     * carries its shape when the renderer can use it, with no republish needed then.
+     */
+    aspect: normalized.aspect,
+  };
+  return JSON.stringify({ template, fields: s.fields });
+}
+
+/**
  * Publish a deck: one slide widget per page, ordered by a playlist.
  *
  * Returns a summary and the (possibly updated) document — slides that had no widget now carry the
@@ -338,25 +366,7 @@ function publishDeck(db, { deck, doc, userId, playlistId, publishedWidgetIds }) 
        * Also written when it is null — clearing the deck's music has to clear it everywhere, and
        * leaving a stale id on one slide would restart the bed in the middle of the deck.
        */
-      const template = {
-        ...s.template,
-        audio: { ...s.template.audio, music: normalized.music, music_volume: normalized.music_volume },
-        /*
-         * ⚠️ AND THE DECK'S SHAPE, for the same structural reason as the bed above: by the time it
-         * plays, a deck is N independent widgets and nothing downstream can still ask the deck
-         * anything. Stored on the deck, stamped here, so two slides can never disagree about the
-         * shape they were laid out in.
-         *
-         * CARRIED, NOT YET HONOURED. The renderer still gives the stage the panel's whole box, so a
-         * 16:9 deck on a 2560x1800 screen is a different composition (cover backgrounds cropped,
-         * text past the edges). The CSS that fixes it needs container queries, which the Android
-         * WebView on a lot of signage hardware does not have — see the long note in
-         * test/slide-render.test.js. Stamping it now means every deck published from today already
-         * carries its shape when the renderer can use it, with no republish needed then.
-         */
-        aspect: normalized.aspect,
-      };
-      const config = JSON.stringify({ template, fields: s.fields });
+      const config = slideWidgetConfig(normalized, s);
       const name = `${deck.name} — ${s.name}`.slice(0, 200);
 
       let existing = s.widget_id
@@ -458,6 +468,6 @@ function publishDeck(db, { deck, doc, userId, playlistId, publishedWidgetIds }) 
 
 module.exports = {
   MAX_SLIDES, MIN_DWELL, MAX_DWELL,
-  normalizeDeck, deckWarnings, publishDeck,
+  normalizeDeck, deckWarnings, publishDeck, slideWidgetConfig,
   ASPECTS,
 };

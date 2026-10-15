@@ -191,6 +191,9 @@ function buildSmtpMessage(to, subject, text, html, fromName, headers) {
 }
 
 async function smtpSend(to, subject, text, html, fromName, headers) {
+  // SMTP is not HTTP, so the outbound ledger's diagnostics channels never see it: count it here
+  // (host and port only — lib/outbound-ledger.js).
+  require('../lib/outbound-ledger').note({ host: `${config.smtpHost}:${Number(config.smtpPort) || 25}`, protocol: 'smtp:', feature: 'email' });
   await getSmtpTransporter().sendMail(buildSmtpMessage(to, subject, text, html, fromName, headers));
 }
 
@@ -215,19 +218,23 @@ function escapeHtml(s) {
  * the visible footer link is the unsubscribe path; over SMTP the mail client also gets its own
  * button. The link works identically either way, which is the part that matters.
  */
-function unsubscribeParts(userId) {
+// What the footer calls the mail, per list (lib/unsubscribe-token.js PURPOSES).
+const UNSUBSCRIBE_NOUN = { alerts: 'these alerts', freshness: 'this weekly digest' };
+
+function unsubscribeParts(userId, list = 'alerts') {
   if (!userId) return { footerHtml: '', footerText: '', headers: null };
   const { unsubscribeUrl } = require('../lib/unsubscribe-token');
-  const url = unsubscribeUrl(userId);
+  const url = unsubscribeUrl(userId, list);
   // No APP_URL means no absolute origin to build a clickable link from. Emit nothing rather than a
   // link to `undefined/unsubscribe`.
   if (!url) return { footerHtml: '', footerText: '', headers: null };
+  const noun = UNSUBSCRIBE_NOUN[list] || UNSUBSCRIBE_NOUN.alerts;
   return {
     footerHtml: `<hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0 12px">`
       + `<p style="font-family:sans-serif;font-size:12px;color:#64748b;margin:0">`
-      + `Don't want these alerts? <a href="${url}" style="color:#3b82f6">Unsubscribe</a>.`
+      + `Don't want ${noun}? <a href="${url}" style="color:#3b82f6">Unsubscribe</a>.`
       + ` Account email such as password resets will still reach you.</p>`,
-    footerText: `\n\n---\nDon't want these alerts? Unsubscribe: ${url}`,
+    footerText: `\n\n---\nDon't want ${noun}? Unsubscribe: ${url}`,
     headers: {
       'List-Unsubscribe': `<${url}>`,
       // RFC 8058: tells the client it may POST rather than open a browser. Paired with the route's
@@ -242,7 +249,7 @@ function unsubscribeParts(userId) {
 // prefix). fromName overrides the display name. Returns a result object and never
 // throws — delivery failures are logged and returned as sent:false so app flow
 // (offline alerts, signup mail, etc.) keeps running even when email is broken.
-async function sendEmail({ to, subject, text, html, fromName, rawSubject, unsubscribeUserId }) {
+async function sendEmail({ to, subject, text, html, fromName, rawSubject, unsubscribeUserId, unsubscribeList }) {
   if (!isConfigured()) {
     console.log(`[EMAIL] not configured - would send to ${to}: ${subject}`);
     if (text) console.log(`  ${text.split('\n')[0]}`);
@@ -261,7 +268,7 @@ async function sendEmail({ to, subject, text, html, fromName, rawSubject, unsubs
     }
   }
   const finalSubject = rawSubject ? subject : `[ScreenTinker] ${subject}`;
-  const unsub = unsubscribeParts(unsubscribeUserId);
+  const unsub = unsubscribeParts(unsubscribeUserId, unsubscribeList || 'alerts');
   const baseHtml = html || `<pre style="font-family:sans-serif">${escapeHtml(text || '')}</pre>`;
   const finalHtml = baseHtml + unsub.footerHtml;
   const finalText = text ? text + unsub.footerText : text;

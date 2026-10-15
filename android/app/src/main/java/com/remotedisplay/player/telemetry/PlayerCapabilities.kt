@@ -54,6 +54,9 @@ object PlayerCapabilities {
                 // server's strip keeps rtsp items off screens that cannot open rtsp://.
                 "playback.rtsp",
                 "playback.zones", "playback.transitions", "playback.pip",
+                // 3.0 campaigns: a playlist whose items are whole layouts (player/CampaignPlayer.kt).
+                // In no server baseline: an older APK gets the plain fallback list instead.
+                "layout.campaign",
                 // HOLD items (application/x-st-hold, hold://blank | hold://freeze): fullscreen
                 // (MediaPlayerManager.holdFreeze/holdBlank on the item's timer, or the group/wall
                 // tick), normal zones (ZoneManager) and wall zones. In no server baseline: an older
@@ -110,6 +113,10 @@ object PlayerCapabilities {
                 // remote.talk = can play the operator's audio/webcam (one-way / PA); remote.mic =
                 // also has a microphone to send back (unlocks 2-way). Android has both.
                 "remote.talk", "remote.mic",
+                // 3.0 screen share: receive a person's screen peer to peer and show it fullscreen
+                // (remote/ScreenShareReceiver + ScreenShareOverlay). The same bundled libwebrtc as
+                // Talk, receive-only (no permission at all), so it holds on every panel this APK runs on.
+                "remote.screen_share",
                 // #312 follow-up: accept a server-URL rewrite from the dashboard, VERIFYING the new
                 // address is reachable before committing and rolling back if not (see
                 // WebSocketService's set_server_url handler). Declared because we do that
@@ -121,6 +128,10 @@ object PlayerCapabilities {
                 "sync.clock",
                 // Content is cached to local storage and survives a server outage.
                 "offline.cache",
+                // 3.0 site cache: DownloadCoordinator tries the site's LAN cache box first and keeps
+                // the bytes only if they hash to the origin's sha256 (ContentCache.fetchFromSiteCache),
+                // falling back to the origin on any failure. Declared so the payload carries the box.
+                "net.site_cache",
                 // A meeting-room display's buttons work here: PlaylistController passes the page its
                 // #panel capability. The server's no-show release waits for a screen with this.
                 "room.panel",

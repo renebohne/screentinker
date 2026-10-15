@@ -1,5 +1,350 @@
 # Changelog
 
+## 3.0.0
+
+The ease-of-use release: a guided first run, a simple menu for new accounts, trial-to-paid that
+explains instead of refusing, Node 22 enforced at boot, and the 3.0 security review. Every 2.x
+capability is still here, and existing accounts see no change to their menu. Full design and
+security notes: `docs/v3-review.md`. Upgrade steps: `docs/upgrading-to-3.0.md`.
+
+### Upgrade notes
+
+- **Node.js 22.14+ is enforced.** Below it the server prints what it needs and exits 78
+  (`server/lib/node-guard.js`). Shipped units carry `RestartPreventExitStatus=78`.
+  `ST_ALLOW_OLD_NODE=1` downgrades the refusal to a warning.
+- **The first boot of every new version snapshots the database** before migrating
+  (`remote_display.pre-upgrade-*.db`, newest 3 kept; `server/lib/upgrade-snapshot.js`).
+- Additive schema: `users.token_version`, `users.ui_mode`, `users.onboarded_at`, and the
+  `conversion_events` table. A one-time step marks pre-3.0 accounts as onboarded, on the full menu.
+- **Password and 2FA changes now end your other sessions** (`token_version`). Sessions issued by 2.x
+  stay valid until the first change.
+- **Self-hosted:** later signups get enterprise instead of a 14-day trial
+  (`SELF_HOSTED_SIGNUP_PLAN=trial` restores 2.x).
+- Emailed links use `APP_URL`, or the `PUBLIC_HOSTS` allowlist. A placeholder `JWT_SECRET` is refused
+  in production.
+- `scripts/remotedisplay.service` is now a template filled in by `install-service.sh`.
+- `upgrade.sh` checks the Node the service actually runs.
+
+- **A new server dependency**, `@simplewebauthn/server` (pinned, for passkeys): run `npm ci` in
+  `server/` when upgrading from a checkout. Docker images and release bundles already include it.
+- **Passkeys need a stable public address**: set `APP_URL` (or list the host in `PUBLIC_HOSTS`) on
+  HTTPS. Without it passkeys stay off and Settings tells platform admins what to set.
+- **New optional environment variables:** `PEXELS_API_KEY` / `PIXABAY_API_KEY` (free stock media;
+  or paste a key in Platform → System), `SCREEN_SHARE_ENABLED` / `SCREEN_SHARE_MAX_MINUTES`,
+  `SCIM_RATE_LIMIT`, `FRESHNESS_DIGEST=off`.
+
+### Added
+
+- **First-run guide reached by default** for new accounts. It offers an in-browser player path, a
+  sample image, and server-side completion (`users.onboarded_at`).
+- **Simple menu** (`users.ui_mode`): about 10 items for new accounts. A **Simple | Advanced** switch at the top of the menu changes it
+  per account. Every page still opens from a link or bookmark.
+- **Simple view is guide-style** (`views/simple-home.js`). There is no sidebar. Home asks "What
+  would you like to do?" with four tasks: Add a screen, Change what a screen shows (replace or add;
+  upload, pick from the photos and videos already in the library, sample, or same as another screen), Upload photos (then choose the screens), and Get help.
+  Your screens are listed below with their status. A top bar carries the Simple | Advanced switch and
+  an account menu. Other pages still open with the full shell from links and bookmarks.
+- Simple view, for the person who runs the server (platform admins): an **Admin** entry in the
+  account menu (Platform → Overview, with the way home), an **update available** notice on the
+  home page, and the one-time "share install statistics?" question that was only on the Advanced
+  dashboard.
+- **ScreenTinker Manager**, a new Android app (`android-admin/`, `com.screentinker.manager`) for
+  updating screens from a phone. It wraps the Simple view and adds:
+  - several servers, with switching between them;
+  - Android's photo picker;
+  - "Share → Show on a screen" from Photos;
+  - invite links through the share sheet;
+  - Advanced, Admin and Settings in the browser.
+
+  Single sign-on (Google, Microsoft, OIDC, SAML, organization SSO) runs in the phone's browser and
+  hands the session back through a PKCE-style, single-use code (`POST /api/auth/sso/app-exchange`).
+  See `docs/manager-app.md`.
+- **Your team** (Simple view, workspace admins): invite someone as "can update screens", "can only
+  look" or "can manage everything", see who is in the workspace, cancel invites, remove people.
+  When the server cannot send email, the invite link is offered to share or copy. The invite
+  response now carries `email_sent` and `accept_url`.
+- **Add screen in Simple view is the same step-by-step guide** (`#/add-screen`): open the player,
+  connect it, choose what it shows. The last step also offers "show the same as another screen".
+  Advanced view keeps the Add screen dialog.
+- The guide's upload step takes **several photos and videos at once** (pick or drag and drop). They
+  all go on the screen and are published once.
+- Simple view also hides power-user controls inside pages: on a screen's page, Remote, Controls,
+  Terminal, talk, device-owner, move, block, layout and "Copy to".
+- In the simple menu, adding content to a screen publishes it. The release gate still applies, so
+  workspaces that review keep the draft.
+- **Trial banner** (hosted, org owner, dismissible per day); a first-screen moment; a trial-ended
+  banner that says what was kept.
+- **Upgrade prompt** on `DEVICE_LIMIT` / `STORAGE_LIMIT` / `FEATURE_LOCKED`, naming the server's
+  `suggested_plan`.
+- A "Pro" pill on Media URL. Screens paused by the plan are badged on the Screens page
+  (`plan_paused` in `GET /api/devices`).
+- **Subscription page:** recommended plan from usage, or from the prompt that sent you; a "when the
+  trial ends you keep / paused" list using the real Free-plan limits; cancelled-checkout handling.
+- **Trial-to-paid funnel** (hosted only): `lib/conversion-events.js`,
+  `POST /api/subscription/events`, `GET /api/subscription/funnel`, and Platform → Overview →
+  "Trial to paid".
+- `/api/auth/me` now returns `trial`, `plan_name`, `plan_limits`, `plan_features`, `self_hosted`,
+  `subscription_status`, `ui_mode`, `onboarded_at`.
+- `POST /api/auth/sessions/revoke-others` and Settings → "Sign out everywhere else".
+- CI runs the unit suite on Node 22.14.0 as well as on the latest 22. `.nvmrc` added.
+
+- **Self-hosted: an occasional GitHub Sponsors ask** in place of the trial banner. It is shown to
+  platform admins only, after setup: at once on an install upgraded from an earlier version, after
+  3 days on a fresh one. "Not now" snoozes it for 30 days; "Don't ask again" ends it. A permanent
+  link sits in Settings → About. `ST_HIDE_SPONSOR=true` turns it off.
+
+- **Make a sign.** New users can put a professional sign on a screen in about a minute, with no
+  photos: pick one of 14 built-in designs (today's specials, sale, opening hours, welcome, event,
+  announcement, now hiring, holiday closure, Wi-Fi with a join QR code, safety notice, celebration,
+  live countdown, room/reception, QR link), type your words with a live preview, and choose screens.
+  Designs work offline on every install, in landscape and portrait, and each sign is an ordinary
+  slide deck, editable later in Slides. A per-workspace **brand kit** (business name, logo, colours,
+  headline font) pre-fills and themes every design, with text colour chosen for contrast. From the
+  Simple home, Slides → New from template and the first-run guide. See docs/make-a-sign.md.
+- **Free stock photos and videos.** Search Pexels and Pixabay inside ScreenTinker and add what you
+  pick to your library: "Free photos" in Simple view's Change and Upload flows and the setup guide,
+  and "Free stock photos and videos" in Content → Add content. Items arrive at signage size (about
+  1920px photos, HD video), count toward storage like uploads, and keep the photographer credit and
+  licence. Keys stay on the server; searches are cached and rate limited. See docs/stock-media.md.
+- **Menus from Square and Shopify.** Menu boards and price displays take their items straight from
+  a Square item library or a Shopify store: sections, sizes, prices in the store's currency,
+  descriptions, photos and sold-out items. A price change or sold-out mark at the till reaches the
+  screens on the next sync (5 minutes by default, or Sync now). Shopify connections are read-only
+  (`read_products`); credentials are encrypted and only ever sent back to the store they were saved
+  for. Advanced → Data sources, or "Menu from Square/Shopify" in the menu board editor. See
+  docs/pos-menus.md.
+- **Share your screen to a screen.** Present a laptop on any screen running the web player, straight
+  from the browser, and the screen goes back to its content the moment you stop. Editors use **Share
+  my screen** on a screen's page or in Simple view; admins can turn on a rotating **meeting-room
+  code** per screen so guests can share at `/share` without an account. Peer-to-peer WebRTC (no
+  sidecar, nothing recorded) using the organization's STUN/TURN settings. The sharer needs HTTPS; the
+  native Android and other non-browser players do not support it yet. See docs/screen-share.md.
+- **Passkeys.** Sign in with a fingerprint, face, device PIN, phone or security key: add one in
+  Settings → Passkeys (or the Simple view account menu), then "Sign in with a passkey" or pick it
+  from the browser's autofill. Accounts with two-factor codes can use a passkey in place of the
+  code; removing a passkey signs out your other devices; SSO-only organizations refuse passkeys like
+  passwords. Not yet available inside the Manager app. See docs/passkeys.md.
+- **User provisioning (SCIM 2.0).** Connect Okta, Microsoft Entra ID or any SCIM 2.0 provider under
+  Settings → User provisioning: people are created, updated, deactivated and removed automatically,
+  and groups grant workspace roles mapped by org admins. Provisioned people sign in with the
+  organization's SSO; deactivation ends their sessions at once. Same safety rules as org SSO
+  (verified domains only, never platform accounts, org roles or the owner). See docs/scim.md.
+- **Screen verification.** ScreenTinker checks what each screen is actually showing, not just that
+  the player is online: from the screenshots players send plus an occasional verification capture
+  (every 30 minutes by default), each screen is Verified, Blank, Frozen, Unexpected content, Panel
+  off or Unknown. A problem must persist before it counts and clears itself on recovery; confirmed
+  problems go to Slack, Teams, PagerDuty, webhook or email channels ("screen problem" / "screen
+  recovered"). Badges on Screens and the screen page, plain words in Simple view ("Showing a blank
+  screen"). No extra images are stored. See docs/screen-verification.md.
+- **What will this screen show?** Pick any screen and any date and time to see exactly what it will
+  play then, and why: which schedule, group, wall or head-office rule won, and why each item does or
+  doesn't play (expired, outside its hours, condition not met, not playable on this player, screen
+  powered off). A clickable day/week timeline, a whole-group comparison, and "What's coming up" on
+  Simple view's screen cards. The forecast uses the same rules as the live screen (proven equivalent
+  by tests). Read-only API: `GET /api/devices/:id/simulate`, `/simulate/payload`, `/timeline`,
+  `GET /api/groups/:id/simulate`. See docs/preview-at-time.md.
+- **Content freshness.** A **Freshness** page (Insights) shows how old the content your screens
+  actually played is and lists what needs a look, worst first: items mentioning a date that has
+  passed ("Christmas 2025", "Sale ends Oct 3"), holiday content out of season, expired items still in
+  playlists, and things unchanged for 30 or 90 days, each with a plain reason and one-click fixes
+  (replace, take off screens, set an expiry, snooze). **Stale** chips on cards, a gentle nudge on the
+  Simple home, and an optional weekly digest email with one-click unsubscribe. See
+  docs/content-freshness.md.
+- **Content requests.** Share a request form so staff, students or departments without an account
+  can send something for the screens: each form sets where requests may go (friendly names over
+  screens, groups or playlists), file rules (type, size, resolution, shape, video length, checked on
+  the server), notice, a daily limit, and who may use it (anyone with the link, an email in your
+  domains confirmed by code, or your SSO). Requesters get a reference number and a status link;
+  requests land in Reviews and go live only after an explicit approval, for exactly the requested
+  dates. See docs/content-requests.md.
+- **Web player: `?autoplay_audio=1`** starts with sound on kiosk browsers that allow it (e.g. Fully
+  Kiosk with Autoplay Audio), skipping the tap screen; anywhere else it behaves as before (#627).
+  See docs/web-player.md.
+
+- **Accessibility checker.** ScreenTinker checks what goes on your screens: text contrast against the
+  real background (WCAG 2.2 AA, including text over photos), text too small for the viewing distance
+  (ISO 9241-303), videos and GIFs that flash more than three times a second (WCAG 2.3.1), and videos with
+  sound but no captions. An Accessibility page lists problems worst first with one-click fixes; publishing
+  warns first ("Publish anyway"), and admins can optionally block publishing with errors. Every built-in
+  sign design meets AA contrast with any brand colours. **Generate captions** transcribes a video's audio
+  with the speech-to-text service you choose (OpenAI or a local Whisper server) into an editable subtitle
+  track; nothing is sent until an admin sets one up. See docs/accessibility.md.
+- **Experiments.** A/B test what's on your screens: show two to four versions of a sign, menu panel or
+  video in place of one playlist item, by location or by time of day, judged on sales imported read-only
+  from Square or Shopify, QR scans, audience looks or your own CSV, with a plain-language verdict and a 95%
+  interval, then roll out the winner in one click. Players need no update; only hourly totals are
+  imported. See docs/experiments.md.
+- **Energy & carbon.** Insights → Energy estimates electricity use and CO2e per screen, group and
+  workspace, what power schedules saved, and where more could be saved, with CSV and an ESG appendix.
+  Wattage from your figures, 52 cited datasheet/EU-label panels, or an EU-label estimate by size; carbon
+  from Ember's country averages or your own figure. Clearly labelled estimates. See docs/energy.md.
+- **Private AI.** Run AI on your own hardware (Ollama, LM Studio, llama.cpp, vLLM, LocalAI or any
+  OpenAI-compatible server) with a "data stays on your network" badge and an optional "Only allow private
+  AI" policy per organization. New on top: **Set up my screens with AI** (describe your place, get 3–6
+  signs in your brand) and **Translate** (signs and decks into other languages, reviewed by a person; each
+  screen shows one language or rotates). See docs/private-ai.md.
+- **Site cache.** A small always-on box at a site (Raspberry Pi, NUC or Docker) downloads media once and
+  serves it to every screen on that network; screens check each file's sha256 and fall back to the
+  server, so a cache can save bandwidth but never blank a screen. Web and Android players. See
+  docs/site-cache.md.
+- **Switch to ScreenTinker.** New accounts are asked in the first-run guide whether they're coming from
+  another app; imports media, playlists, layouts, schedules and screens from Xibo, Yodeck, ScreenCloud,
+  Screenly and Anthias through their official APIs, or a zip of media with optional CSVs from anything
+  else. Background, resumable, never duplicates; old screens arrive as placeholders ready to pair; API
+  keys are deleted when the import ends. See docs/migrate.md.
+- **Your data, provably.** Data & privacy pages (platform and organization) built from the running
+  configuration: where data lives, what is encrypted, every integration and what it sends where,
+  retention, sign-in security, and whether everything stays on this server; an outbound connections log
+  of every external host contacted and why; a complete organization export (and a personal export);
+  organization deletion after a 14-day grace period; an optional public printable `/trust` page.
+  See docs/trust.md.
+- **Slides: edit like PowerPoint.** Resize handles, multi-select and marquee, smart guides and snapping,
+  arrow-key nudge, bring to front / send to back, align and distribute, cut/copy/paste/duplicate,
+  double-click to type on the slide, and undo/redo for every change. See docs/slides-editor.md.
+- **Platform overview: this server.** Disk, CPU and memory of the machine running ScreenTinker, with a
+  warning under "Needs your attention" when the disk or memory runs low.
+
+- **Move your organization to another server.** Import an organization export into another ScreenTinker
+  server from Settings → Data & privacy: pull it straight from the old server (resumable, checked against
+  its digest), upload the zip, or (platform admins) pick it from the server's `imports` folder. Works when
+  the old server is gone (recovery), restores into a new or empty organization with every id remapped,
+  never overwrites, and rolls back on failure. Members become invites, integrations arrive switched off
+  with a reconnect checklist, and a handover file lets the old server send its screens across. Platform
+  admins can export and restore the whole server. See docs/move-server.md.
+- **Screen share on more players, and on several at once.** The Android app, the Raspberry Pi / Windows /
+  macOS app, the iPad app and Samsung Tizen 10+ can now show a share; the remote viewer shows the share
+  while it is up. Multi share shows one capture on several screens or a group (up to
+  `SCREEN_SHARE_MAX_TARGETS`, default 6). Screens that cannot show a share say so by name.
+- **Display links everywhere, and mirrors.** Any display can get a web player link from its page. Opening
+  a display's link in a second place while it is on creates a *mirror*: it plays the same content and has
+  its own status, remote view and proof-of-play (mirrors count as screens on your plan). Different display
+  links in one browser keep separate identities and caches.
+- **Layouts on playlists, portrait versions, and campaigns.** A playlist can carry its own layout, so a
+  group of screens shows the same zones without per-screen setup (head office > schedule > playlist >
+  screen). Layouts can have portrait and 4:3 versions, picked per screen automatically. Campaigns put whole
+  layouts in a playlist (layout A → a full-screen video → layout B); the web player and Android app switch
+  smoothly, other players play a simplified version and the editor names them. See
+  docs/layouts-and-campaigns.md.
+
+### Changed
+
+- "Screen" is the user-facing noun (Screens, Add screen, Connect screen).
+- The Add screen dialog puts the code first and folds the downloads and advanced options.
+- The Screens toolbar wraps on phones.
+- Content library reads no longer count against the 30/min per-IP content-operations budget; the
+  global backstop still bounds them.
+
+### Fixed
+
+- The onboarding wizard was unreachable from signup.
+- The past-due banner disappeared after the first `/me` refresh (`subscription_status` was never
+  returned).
+- Trial copy said "Free plan (1 device)" and "Pro (15 devices)" against seeded limits of 2 and 25.
+
+- **Web player: adding items to a one-item playlist now reaches the screen.** A lone video or
+  YouTube item looped forever and the new items never played until the browser restarted; the clip
+  now finishes its pass and the playlist moves on (#632).
+- **Web player: a display link (`/player?k=…`) wins over an identity left in the browser.** A casting
+  device or kiosk that had been paired before (or whose server was rebuilt) showed a pairing code as a
+  new display; it now becomes the link's display, and an unrecognised link says so on screen (#630).
+- **Self-hosted servers serve the native Raspberry Pi player** (#634). `/download/pi` answered 404 on
+  every self-hosted install, so `raspberry-pi-setup.sh --native` could not install it: the `.deb` is
+  not in git and nothing built it. The Docker image, `scripts/upgrade.sh`, `scripts/debian-13-setup.sh`
+  and the release tarball now build or carry it, and the release has it attached. When a server still
+  has none, the setup script says so and points at the browser player, instead of asking whether the
+  server is 2.3 or later.
+- **`scripts/upgrade.sh` installs the release's player packages** (#634). Before, only a tarball
+  install had the signed Android APK, the webOS and Tizen packages and the Windows/macOS installers,
+  and every git install copied them in by hand. The upgrade now downloads the ones the release has
+  attached, checks each against the SHA-256 the release publishes, and puts them where the server
+  serves them (the checkout root and `native/dist/`). A file it replaces is kept as `.bak-pre-<tag>`.
+  The APK's `.version` only moves with the APK. A copy kept in `DATA_DIR` still wins, so a pinned APK
+  stays pinned. `UPGRADE_SKIP_PLAYERS=1` turns it off. A failed download warns and never fails the upgrade.
+- **ScreenTinker Manager: password sign-in threw in the app** (a 3.0 pre-release regression).
+- **Simple view:** workspace switching, read-only handling for view-only members, and the
+  "No TV handy?" card on phones.
+
+- **Slides: dragging an element on a slide with a background photo moved a different element** (or the
+  photo) until you let go; it now moves the one you selected.
+- **Settings: the two-factor, passkey and sign-in cards no longer throw** when you leave the page while
+  they load.
+
+- **Screen share: the remote viewer showed the paused playlist (or the status card) during a share**; it
+  now shows the share.
+- **Display links: the same link open in two browsers took turns** (one showed "Waiting for content" and
+  the remote view flipped); the second opening is now a mirror.
+
+### Security
+
+21 fixes from the 3.0 review. None were critical. The highest:
+
+- server-side Chromium could render internal URLs from layout zones and widgets;
+- revoked access persisted on open dashboard sockets and PTY sessions;
+- data-source secrets could be redirected to an attacker host;
+- JWTs were not revoked on password change;
+- reset links were built from the Host header;
+- viewers could pair screens;
+- a zip bomb in HTML bundles;
+- unauthenticated import uploads were left on disk;
+- digest-name content poisoning on import.
+
+The full table and the deliberately deferred items are in `docs/v3-review.md` §4.
+
+### Contributors
+
+- @gainskills: playback resumes when the app returns to the foreground (#625).
+- @arminfauland: every video gets a poster, so Android WebView no longer skips large clips (#626).
+
+Each authored 1 of the 158 commits in this release.
+
+### Sponsors
+
+Thank you to @Semetra22 and @hapishyguy for sponsoring ScreenTinker on GitHub Sponsors, and to everyone
+who sponsors privately.
+
+## 2.6.2
+
+A server-only fix release on the 2.6 line. It still runs on Node 20, so it can be installed before a
+host moves to Node 22. No player changed.
+
+### Added
+
+- **Self-hosted instances can open private addresses for outbound requests** (#618, reported by
+  @davidsrrh). A calendar or data source on the LAN was refused with "The address is not allowed",
+  with no way to allow it. The same guard covers webhooks, OIDC, Canva, embedded renders, the media
+  proxy, plugin egress and hosted AI. Two settings, both off unless set:
+  - **`OUTBOUND_ALLOW_HOSTS`** takes names (exact or `*.suffix`), IPs and CIDRs.
+  - **`OUTBOUND_ALLOW_PRIVATE=true`** opens every private-network range at once, for single-tenant
+    installs.
+
+  Cloud metadata addresses stay blocked whatever is set. On a self-hosted instance the "not allowed"
+  message now names the settings. See `docs/outbound-requests.md`.
+
+### Fixed
+
+- **Talk media routes need write access** (#597). Publishing into, and listening to, a device's Talk
+  session, and publishing a workspace-wide broadcast, now need the same write access as starting a
+  session (`dashboard:talk-start`). Before, read access was enough. Reading the session info stays open
+  to members.
+- **Hosted AI requests are checked at connect time** (#597). On hosted instances every AI request
+  (chat, models, image generation, ComfyUI) goes through one transport. It vets the address it
+  actually connects to, so a hostname that resolves to a private, loopback or link-local address is
+  refused even after DNS. It does not follow redirects. This now includes the image URL an
+  OpenAI-compatible endpoint returns, and the save-time endpoint check now also refuses bracketed and
+  IPv4-mapped IPv6 literals. OIDC discovery, JWKS and token requests use the same connect-time check.
+  Self-hosted instances are unchanged, so local and LAN AI servers keep working.
+- **Proof-of-play reports stay in step with the raw plays** (#612). The hourly rollup computed each
+  hour once, when the hour ended, but plays are closed later, offline backlogs arrive with past times,
+  and device deletes remove their rows. On a copy of a production database the rollup had drifted in
+  31 workspaces: seconds were up to 40% short, and deleted devices were still counted. Later changes
+  to an already-rolled hour now mark it for recomputation from raw, and the retention prune deletes
+  whole hours and is never mistaken for such a change.
+  - **One-time repair on first boot:** it recomputes every hour that still has raw rows, in short
+    passes on the maintenance sweep. On a production-sized copy that was 2,142 hours in about 22
+    minutes, with the slowest pass at 59 ms.
+  - Once it has finished, `scripts/verify-play-rollup.js` should report OK. It is then safe to lower
+    `PLAY_LOG_RETENTION_DAYS`.
+
 ## 2.6.1
 
 A fix release for 2.6.0, found while filming its release video. Server only: no player changed.

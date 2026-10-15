@@ -37,7 +37,14 @@ async function vetted(url, allowPrivate) {
  * @returns {Promise<{status:number, headers:object, body:Buffer}>} — any status; the caller decides.
  * Throws on a refused address, a timeout, or a body over maxBytes.
  */
-async function request(urlString, { method = 'GET', headers = {}, body = null, allowPrivate = false, timeoutMs = 20000, maxBytes = 12 * 1024 * 1024 } = {}) {
+function request(urlString, opts) {
+  // The outbound ledger names the caller from the stack, which the await below would lose: read it
+  // now and carry it (lib/outbound-ledger.js). A plain call when the ledger is not installed.
+  const ledger = require('../outbound-ledger');
+  const ctx = ledger.captureContext();
+  return ctx ? ledger.withContext(ctx, () => requestVetted(urlString, opts)) : requestVetted(urlString, opts);
+}
+async function requestVetted(urlString, { method = 'GET', headers = {}, body = null, allowPrivate = false, timeoutMs = 20000, maxBytes = 12 * 1024 * 1024 } = {}) {
   const url = new URL(urlString);
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new SsrfError('bad-scheme');
   if (url.username || url.password) throw new SsrfError('userinfo');

@@ -36,6 +36,9 @@ let driverName = null;
 let fallbackReason = null;
 
 function loadNative() {
+  // ⚠️ Before the require: on a too-old Node the binary segfaults, which no catch below can see.
+  const tooOld = require('./native-floor').nativeUnsupported();
+  if (tooOld) throw new Error(tooOld);
   const D = require('better-sqlite3');
   // The ABI check. Touches no file.
   new D(':memory:').close();
@@ -57,10 +60,10 @@ if (FORCED === 'node' || FORCED === 'node:sqlite') {
       throw new Error('ST_SQLITE_DRIVER=better-sqlite3 was requested but it is not usable: ' + msg);
     }
     /*
-     * ⚠️ NODE 24 IN PRACTICE. node:sqlite is unflagged only from Node 23.4; on the 22.x line it
-     * exists solely behind --experimental-sqlite. So on a 22.x host with a broken native module
-     * BOTH drivers are gone, and the bare failure would be "Cannot find module 'node:sqlite'" —
-     * which names the fallback rather than the actual problem, on a server that is already down.
+     * node:sqlite is unflagged from Node 22.13 / 23.4 (still experimental: it prints an
+     * ExperimentalWarning). Below that — Node 20, or 22.0-22.12 — a broken native module leaves
+     * BOTH drivers gone, and the bare failure would be "Cannot find module 'node:sqlite'", which
+     * names the fallback rather than the actual problem, on a server that is already down.
      */
     try {
       Database = require('./sqlite-compat');
@@ -68,8 +71,8 @@ if (FORCED === 'node' || FORCED === 'node:sqlite') {
       throw new Error(
         'No usable SQLite driver. better-sqlite3 failed with: ' + msg +
         ' — and the built-in node:sqlite is unavailable on ' + process.version +
-        ' (it is unflagged only from Node 23.4; 22.x needs --experimental-sqlite). ' +
-        'Rebuild better-sqlite3 for this Node, or run Node 24.');
+        ' (it is unflagged from Node 22.13). ' +
+        'Upgrade Node to 22.14 or newer (or run Node 24), or rebuild better-sqlite3 for this Node.');
     }
     driverName = 'node:sqlite';
     fallbackReason = msg;

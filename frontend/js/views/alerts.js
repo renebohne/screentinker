@@ -2,6 +2,7 @@ import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { esc } from '../utils.js';
 import { t, tn } from '../i18n.js';
+import { mountSettings as mountVerification } from '../components/screen-verify.js';
 
 /*
  * Alerts — where a workspace hears that a screen went offline and came back (server:
@@ -57,10 +58,12 @@ export async function render(app) {
     const [chs, devs, grps] = await Promise.all([api.get('/alert-channels'), api.get('/devices'), api.get('/groups')]);
     cache = { channels: Array.isArray(chs) ? chs : [], devices: Array.isArray(devs) ? devs : (devs.devices || []), groups: Array.isArray(grps) ? grps : (grps.groups || []) };
   } catch (e) { body.innerHTML = `<p class="corp-notice corp-notice-danger">${esc((e && e.message) || t('common.error'))}</p>`; return; }
-  body.innerHTML = `<div class="corp-toolbar"><button class="btn btn-primary" id="alNew">${esc(t('alerts.new'))}</button></div>
+  body.innerHTML = `<div id="svSettings"></div><div class="corp-toolbar"><button class="btn btn-primary" id="alNew">${esc(t('alerts.new'))}</button></div>
     ${cache.channels.length ? cache.channels.map(card).join('') : `<div class="corp-empty">${esc(t('alerts.empty'))}</div>`}
     <p class="corp-help" style="font-size:12px;margin-top:16px">${esc(t('alerts.owner_note'))}</p>`;
   document.getElementById('alNew').addEventListener('click', () => openForm(app, null));
+  // Screen verification settings and incident history sit above the channels they alert through.
+  mountVerification(document.getElementById('svSettings'));
   body.querySelectorAll('.corp-card[data-id]').forEach((el) => {
     const c = cache.channels.find((x) => x.id === el.dataset.id);
     el.querySelector('[data-act="edit"]').addEventListener('click', () => openForm(app, c));
@@ -83,7 +86,7 @@ function openForm(app, ch) {
   const kind0 = ch ? ch.kind : 'slack';
   const scopeKind = !ch || (ch.scopes || []).some((s) => s.scope_kind === 'workspace') ? 'workspace' : (ch.scopes || []).some((s) => s.scope_kind === 'group') ? 'group' : 'device';
   const chosen = new Set((ch && ch.scopes || []).map((s) => s.scope_id));
-  const ev = new Set(ch ? ch.events : ['device_offline', 'device_online']);
+  const ev = new Set(ch ? ch.events : ['device_offline', 'device_online', 'screen_problem', 'screen_ok']);
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px';
   overlay.innerHTML = `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;width:640px;max-width:100%;max-height:92vh;overflow:auto">
@@ -95,7 +98,9 @@ function openForm(app, ch) {
     <div class="form-group"><label>${esc(t('alerts.f.events'))}</label>
       <label style="display:flex;gap:8px;font-size:13px"><input type="checkbox" id="alEvOff" ${ev.has('device_offline') ? 'checked' : ''}> ${esc(t('alerts.f.ev_off'))}
         <input type="number" id="alMin" class="input" min="2" max="1440" value="${esc(ch ? ch.offline_minutes : 5)}" style="width:80px;display:inline-block"> ${esc(t('alerts.f.minutes'))}</label>
-      <label style="display:flex;gap:8px;font-size:13px;margin-top:6px"><input type="checkbox" id="alEvOn" ${ev.has('device_online') ? 'checked' : ''}> ${esc(t('alerts.f.ev_on'))}</label></div>
+      <label style="display:flex;gap:8px;font-size:13px;margin-top:6px"><input type="checkbox" id="alEvOn" ${ev.has('device_online') ? 'checked' : ''}> ${esc(t('alerts.f.ev_on'))}</label>
+      <label style="display:flex;gap:8px;font-size:13px;margin-top:6px"><input type="checkbox" id="alEvSvBad" ${ev.has('screen_problem') ? 'checked' : ''}> ${esc(t('alerts.f.ev_screen_problem'))}</label>
+      <label style="display:flex;gap:8px;font-size:13px;margin-top:6px"><input type="checkbox" id="alEvSvOk" ${ev.has('screen_ok') ? 'checked' : ''}> ${esc(t('alerts.f.ev_screen_ok'))}</label></div>
     <div class="form-group"><label>${esc(t('alerts.f.scope'))}</label>
       <select id="alScope" class="input" style="width:auto">${['workspace', 'group', 'device'].map((k) => `<option value="${k}" ${scopeKind === k ? 'selected' : ''}>${esc(t(`alerts.scope.${k}`))}</option>`).join('')}</select>
       <div id="alScopeList" style="margin-top:8px;max-height:150px;overflow:auto;display:flex;flex-direction:column;gap:4px"></div></div>
@@ -137,7 +142,8 @@ function openForm(app, ch) {
     const k = $('alKind').value;
     const scope = $('alScope').value;
     const ids = [...overlay.querySelectorAll('#alScopeList input:checked')].map((i) => i.value);
-    const events = [$('alEvOff').checked && 'device_offline', $('alEvOn').checked && 'device_online'].filter(Boolean);
+    const events = [$('alEvOff').checked && 'device_offline', $('alEvOn').checked && 'device_online',
+      $('alEvSvBad').checked && 'screen_problem', $('alEvSvOk').checked && 'screen_ok'].filter(Boolean);
     const body = { kind: k, name: $('alName').value.trim(), events, offline_minutes: Number($('alMin').value), enabled: $('alEnabled').checked,
       scopes: scope === 'workspace' ? [{ scope_kind: 'workspace' }] : ids.map((id) => ({ scope_kind: scope, scope_id: id })) };
     if (k === 'email') body.emails = $('alEmails').value;

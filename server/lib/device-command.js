@@ -240,10 +240,19 @@ function deliverCommand(deviceNs, device, type, payload, opts = {}) {
 
   if (type === 'set_server_url' && device.client_type === 'player') {
     let key = null;
-    try {
-      const row = db.prepare('SELECT enrol_key FROM devices WHERE id = ?').get(device.id);
-      key = (row && row.enrol_key) || enrolKey.setEnrolKey(db, device.id);
-    } catch (_) { /* if we cannot mint, the redirect falls back to a re-pair on the new origin */ }
+    /*
+     * 3.0 organization move (docs/move-server.md): the destination server issued this screen an
+     * enrolment key of ITS OWN, and the handover (routes/org-import.js) passes it here so the web
+     * player arrives on the new server already as the imported screen. Only that server-side path
+     * sets opts.enrolKey; the payload a person sends never chooses the key.
+     */
+    if (opts.enrolKey && enrolKey.looksLikeEnrolKey(opts.enrolKey)) key = opts.enrolKey;
+    else {
+      try {
+        const row = db.prepare('SELECT enrol_key FROM devices WHERE id = ?').get(device.id);
+        key = (row && row.enrol_key) || enrolKey.setEnrolKey(db, device.id);
+      } catch (_) { /* if we cannot mint, the redirect falls back to a re-pair on the new origin */ }
+    }
     if (key) outPayload = Object.assign({}, outPayload, { enrol_key: key });
   }
 

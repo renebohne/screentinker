@@ -34,7 +34,11 @@ const crypto = require('node:crypto');
 // renders the head office setup prompt — the path every new organization sees first.
 const VIEWS = ['#/', '#/content', '#/playlists', '#/layouts', '#/widgets', '#/schedule',
   '#/walls', '#/reports', '#/kiosk', '#/designer', '#/activity', '#/members', '#/help', '#/settings',
-  '#/corporate'];
+  '#/corporate', '#/freshness', '#/requests', '#/requests?tab=forms', '#/energy', '#/experiments', '#/experiments/new', '#/site-caches', '#/migrate', '#/accessibility',
+  // 3.0 Private AI: with no AI set up, both explain instead of failing.
+  '#/ai-setup', '#/translate',
+  // 3.0 Your data, provably.
+  '#/privacy', '#/platform/privacy'];
 
 function findChrome() {
   if (process.env.CHROME && fs.existsSync(process.env.CHROME)) return process.env.CHROME;
@@ -69,7 +73,10 @@ const check = (name, ok, detail) => {
   const logFile = path.join(os.tmpdir(), 'st-smoke.log');
   const srv = spawn('node', ['server.js'], {
     cwd: __dirname,
-    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'production' },
+    // PUBLIC_HOSTS: the passkey check below runs on http://localhost:<port> (WebAuthn refuses an IP
+    // as the relying party), and passkeys are only enabled on an address the operator declared.
+    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'production',
+      APP_URL: '', PUBLIC_HOSTS: `localhost:${PORT}` },
     stdio: ['ignore', fs.openSync(logFile, 'w'), fs.openSync(logFile, 'a')],
   });
   const stop = () => { try { srv.kill('SIGKILL'); } catch { /* */ } };
@@ -99,6 +106,61 @@ const check = (name, ok, detail) => {
     return !!d.token;
   });
   check('an account can be created', registered);
+
+  // ---- 3.0 first run: a new signup is GUIDED, and skipping is remembered by the account ----------
+  // 2.x's wizard was unreachable from a signup (the login handler went straight to #/), so nearly
+  // every new account started on an empty dashboard. Everything below this block runs as an account
+  // that has skipped the guide, as it did before.
+  await page.goto(BASE + '/app#/', { waitUntil: 'networkidle2' });
+  await page.reload({ waitUntil: 'networkidle2' });
+  await new Promise(r => setTimeout(r, 1500));
+  check('a new signup is sent to the first-run guide', await page.evaluate(() => location.hash === '#/onboarding'));
+  // 3.0 switch to ScreenTinker: right after the welcome, the guide asks about another signage app,
+  // and "No, start fresh" (the Next button) carries on with the normal guide.
+  await page.evaluate(() => document.getElementById('nextBtn')?.click());
+  await page.waitForSelector('#onboardImport [data-act="fresh"]', { timeout: 8000 }).catch(() => {});
+  check('the first-run guide offers importing from another app', await page.evaluate(() =>
+    !!document.querySelector('#onboardImport [data-act="fresh"]')
+    && ['xibo', 'yodeck', 'optisigns', 'screencloud', 'generic-zip'].every((v) => !!document.querySelector(`#onboardImport [data-vendor="${v}"]`))));
+  // Width only: changing isMobile/hasTouch makes puppeteer reload the page (back to step one).
+  await page.setViewport({ width: 390, height: 844 });
+  await new Promise(r => setTimeout(r, 300));
+  check('the import choice fits a phone', await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
+  await page.setViewport({ width: 1440, height: 900 });
+  await page.evaluate(() => document.getElementById('nextBtn')?.click());
+  await new Promise(r => setTimeout(r, 600));
+  check('"No, start fresh" continues the normal guide (the player step)', await page.evaluate(() =>
+    !document.getElementById('onboardImport') && !!document.querySelector('a[href="/player"]')));
+  const skipped = await page.evaluate(() => { const b = document.getElementById('skipBtn'); if (b) b.click(); return !!b; });
+  await new Promise(r => setTimeout(r, 1500));
+  await page.evaluate(() => localStorage.removeItem('rd_onboarded')); // only the server-side record may keep it closed
+  await page.goto(BASE + '/app#/', { waitUntil: 'networkidle2' });
+  await page.reload({ waitUntil: 'networkidle2' });
+  await new Promise(r => setTimeout(r, 1500));
+  check('skipping the guide is remembered by the account, not just this browser',
+    skipped && await page.evaluate(() => location.hash === '#/' || location.hash === ''));
+  // A new account is in Simple view: guide-style home, no sidebar.
+  check('a new account lands on the Simple home', await page.evaluate(() =>
+    !!document.querySelector('.simple-tasks') && getComputedStyle(document.getElementById('sidebar')).display === 'none'));
+  check('the Simple home offers Make a sign', await page.evaluate(() => !!document.querySelector('.simple-tasks a[href="#/simple/sign"]')));
+  // 3.0 news feeds: the Simple task opens on its "Which news?" step with the feed picker.
+  check('the Simple home offers Show news headlines', await page.evaluate(() => !!document.querySelector('.simple-tasks a[href="#/simple/news"]')));
+  {
+    const before = errors.length;
+    await page.goto(BASE + '/app#/simple/news', { waitUntil: 'networkidle2' });
+    await new Promise(r => setTimeout(r, 900));
+    check('Show news headlines opens with the feed picker', await page.evaluate(() =>
+      !!document.querySelector('.news-picker [data-np-url]') && !!document.querySelector('[data-np-find]')
+      && document.querySelector('[data-guide-next]').disabled === true), 'no picker, or Next enabled with no feed');
+    check('no uncaught error on #/simple/news', errors.length === before, errors.slice(before).join(' | '));
+    await page.goto(BASE + '/app#/', { waitUntil: 'networkidle2' });
+  }
+  // Everything below exercises the full product, so switch this account to Advanced view.
+  await page.evaluate(async () => {
+    await fetch('/api/auth/me', { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('token') },
+      body: JSON.stringify({ ui_mode: 'advanced' }) });
+    const u = JSON.parse(localStorage.getItem('user') || '{}'); u.ui_mode = 'advanced'; localStorage.setItem('user', JSON.stringify(u));
+  });
 
   // ---- every view: renders, no raw keys, no uncaught errors ----------------------------------
   const rawKeyOffenders = [];
@@ -152,6 +214,8 @@ const check = (name, ok, detail) => {
       await sleep(250);
       const f = document.getElementById('widgetConfigForm');
       out[type] = f && f.children.length ? 'ok' : 'empty form';
+      // 3.0 news feeds: the news widget's form carries the feed picker.
+      if (type === 'rss' && out[type] === 'ok' && !f.querySelector('#wFeedPicker [data-np-url]')) out[type] = 'no feed picker';
       const modal = document.getElementById('widgetModal');
       if (modal) modal.style.display = 'none';
     }
@@ -587,6 +651,57 @@ const check = (name, ok, detail) => {
     !ai.err && /not configured|endpoint|AI/i.test(ai.failMsg || ''),
     `status said ${JSON.stringify(ai.failMsg)} — a silent no-op here is indistinguishable from a broken button`);
 
+  // ---- 3.0 Make a sign: the gallery renders real previews, and the flow produces a deck ----------
+  //
+  // ⚠️ The previews are server-rendered documents put in sandboxed srcdoc frames, and the whole
+  // value of the feature is that a new user sees finished signs, not grey boxes. A broken preview
+  // endpoint, a frame the CSP blanks, or a script-blocked console storm are all invisible to the
+  // unit suite. This drives the real flow to the end and checks a deck came out of it.
+  {
+    const before = errors.length;
+    await page.goto(BASE + '/app#/signs', { waitUntil: 'networkidle2' });
+    await page.reload({ waitUntil: 'networkidle2' });
+    const sign = await page.evaluate(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      let cards = 0, previews = 0;
+      for (let i = 0; i < 60; i++) {
+        cards = document.querySelectorAll('[data-tpl]').length;
+        previews = [...document.querySelectorAll('iframe[data-prev]')].filter((f) => /class="stage"/.test(f.srcdoc || '')).length;
+        if (cards && previews === cards) break;
+        await sleep(150);
+      }
+      const bare = [...document.querySelectorAll('body *')].filter((e) => e.children.length === 0)
+        .map((e) => (e.textContent || '').trim()).filter((s) => /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/.test(s) && !/^v?\d/.test(s));
+      const card = document.querySelector('[data-tpl="specials"]');
+      if (!card) return { cards, previews, err: 'no specials template' };
+      card.click();
+      let live = '';
+      for (let i = 0; i < 60 && !/class="stage"/.test(live); i++) { await sleep(150); live = (document.querySelector('[data-live]') || {}).srcdoc || ''; }
+      const title = document.querySelector('[data-key="title"]');
+      if (!title) return { cards, previews, err: 'the form has no headline field' };
+      title.value = 'Smoke <i>soup</i>';
+      title.dispatchEvent(new Event('input', { bubbles: true }));
+      for (let i = 0; i < 40 && !/Smoke &lt;i&gt;soup/.test(live); i++) { await sleep(150); live = document.querySelector('[data-live]').srcdoc || ''; }
+      const typed = /Smoke &lt;i&gt;soup/.test(live) && !/<i>soup/.test(live);
+      document.querySelector('[data-guide-next]').click();
+      // With screens, the next step asks which; with none (this account), the sign is saved.
+      await sleep(600);
+      const show = document.querySelector('.simple-checks') && document.querySelector('[data-guide-next]');
+      if (show) show.click();
+      let done = false;
+      for (let i = 0; i < 60 && !done; i++) { await sleep(150); done = !!document.querySelector('.simple-done-actions'); }
+      const decks = await (await fetch('/api/slide-decks', { headers: { Authorization: 'Bearer ' + localStorage.getItem('token') } })).json();
+      return { cards, previews, bare, typed, done, deck: Array.isArray(decks) && decks.some((d) => /Smoke/.test(d.name)) };
+    });
+    check('Make a sign: every template shows a live preview', !sign.err && sign.cards >= 12 && sign.previews === sign.cards,
+      sign.err || `${sign.previews} of ${sign.cards} previews rendered`);
+    check('Make a sign: typed text reaches the preview, escaped', !!sign.typed, 'the live preview never showed the typed headline as text');
+    check('Make a sign: the flow finishes and the sign is a deck in Slides', !!(sign.done && sign.deck),
+      `done=${sign.done} deck=${sign.deck}`);
+    check('Make a sign renders no untranslated keys', !(sign.bare || []).length, (sign.bare || []).join(', '));
+    check('no uncaught error or console error in Make a sign', errors.length === before, errors.slice(before).join(' | '));
+  }
+
   // ---- the calendar binds its pointer handlers ONCE -------------------------------------------
   await page.goto(BASE + '/app#/schedule', { waitUntil: 'networkidle2' });
   await page.reload({ waitUntil: 'networkidle2' });
@@ -609,7 +724,7 @@ const check = (name, ok, detail) => {
   // ---- a phone-width viewport must not scroll sideways -----------------------------------------
   await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
   const overflowing = [];
-  for (const hash of ['#/', '#/schedule', '#/content', '#/settings']) {
+  for (const hash of ['#/', '#/schedule', '#/content', '#/settings', '#/signs']) {
     await page.goto(BASE + '/app' + hash, { waitUntil: 'networkidle2' });
     await page.reload({ waitUntil: 'networkidle2' });
     await new Promise(r => setTimeout(r, 900));
@@ -617,6 +732,126 @@ const check = (name, ok, detail) => {
     if (m.doc > m.win + 4) overflowing.push(`${hash} (${m.doc}px in ${m.win}px)`);
   }
   check('no horizontal overflow at phone width', overflowing.length === 0, overflowing.join(', '));
+
+  // ---- the Manager app: sign in through the form, as the Android WebView does --------------------
+  // The app is told apart by its user agent, and code that runs only there is invisible to every
+  // check above: an undefined variable in login.js's app-only branch once stopped the sign-in form
+  // from working in the app while every browser test passed.
+  {
+    const email = 'app' + Date.now() + '@x.test';
+    await fetch(BASE + '/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password: 'Passw0rd123' }) });
+    const ctx = await browser.createBrowserContext();
+    const app = await ctx.newPage();
+    const appErrors = [];
+    app.on('pageerror', (e) => appErrors.push(e.message));
+    await app.setUserAgent('Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Mobile Safari/537.36 ScreenTinkerManager/1.0.0');
+    await app.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
+    await app.goto(BASE + '/app#/login', { waitUntil: 'networkidle2' });
+    await app.type('#loginEmail', email);
+    await app.click('#loginBtn');
+    await app.waitForSelector('#loginPassword', { visible: true, timeout: 5000 }).catch(() => {});
+    await app.type('#loginPassword', 'Passw0rd123');
+    await app.click('#loginBtn');
+    await new Promise(r => setTimeout(r, 2500));
+    const landed = await app.evaluate(() => ({ hash: location.hash, signedIn: !!localStorage.getItem('token') }));
+    check('Manager app: the sign-in form works and throws nothing', landed.signedIn && appErrors.length === 0,
+      `${JSON.stringify(landed)} ${appErrors.slice(0, 3).join(' | ')}`);
+    await ctx.close();
+  }
+
+  // ---- 3.0 passkeys: add one in Settings and sign in with it, on Chrome's virtual authenticator ----
+  // The server side is covered with real signatures in test/passkeys.test.js; what only a browser
+  // shows is the glue: base64url both ways, the options shapes navigator.credentials accepts, and
+  // the button actually ending signed in.
+  {
+    const LOCAL = `http://localhost:${PORT}`;
+    const email = 'pk' + Date.now() + '@x.test';
+    const reg = await fetch(BASE + '/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password: 'Passw0rd123' }) }).then((r) => r.json());
+    // Past the first-run guide, so #/settings is where we land.
+    await fetch(BASE + '/api/auth/me', { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + reg.token },
+      body: JSON.stringify({ onboarded: true }) });
+    const ctx = await browser.createBrowserContext();
+    const pk = await ctx.newPage();
+    const pkErrors = [];
+    pk.on('pageerror', (e) => pkErrors.push(e.message));
+    const wa = await pk.target().createCDPSession();
+    await wa.send('WebAuthn.enable');
+    await wa.send('WebAuthn.addVirtualAuthenticator', { options: {
+      protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true,
+      isUserVerified: true, automaticPresenceSimulation: true,
+    } });
+
+    await pk.goto(LOCAL + '/app#/login', { waitUntil: 'networkidle2' });
+    check('the login page offers "Sign in with a passkey"', await pk.evaluate(() => !!document.getElementById('passkeyLoginBtn')));
+    await pk.evaluate((tok, user) => { localStorage.setItem('token', tok); localStorage.setItem('user', JSON.stringify(user)); }, reg.token, reg.user);
+    await pk.goto(LOCAL + '/app#/settings', { waitUntil: 'networkidle2' });
+    await pk.reload({ waitUntil: 'networkidle2' });
+    const addBtn = await pk.waitForSelector('#passkeyAddBtn', { visible: true, timeout: 8000 }).catch(() => null);
+    let rows = 0;
+    if (addBtn) {
+      await addBtn.click();
+      await pk.type('#passkeyPassword', 'Passw0rd123');
+      await pk.click('#passkeyCreateBtn');
+      await pk.waitForSelector('.passkey-row', { timeout: 8000 }).catch(() => {});
+      rows = await pk.evaluate(() => document.querySelectorAll('.passkey-row').length);
+    }
+    check('a passkey can be added from Settings → Security', rows === 1,
+      addBtn ? `${rows} passkey rows after creating one` : 'no "Add a passkey" button in Settings');
+
+    await pk.evaluate(() => { localStorage.removeItem('token'); localStorage.removeItem('user'); });
+    await pk.goto(LOCAL + '/app#/login', { waitUntil: 'networkidle2' });
+    await pk.reload({ waitUntil: 'networkidle2' });
+    await pk.evaluate(() => document.getElementById('passkeyLoginBtn')?.click());
+    await new Promise(r => setTimeout(r, 3000));
+    const signedIn = await pk.evaluate(() => ({ token: !!localStorage.getItem('token'), hash: location.hash,
+      err: (document.getElementById('loginError') || {}).textContent || '' }));
+    check('signing in with the passkey ends signed in, with no email or password typed', signedIn.token,
+      JSON.stringify(signedIn));
+    check('the passkey pages throw nothing', pkErrors.length === 0, pkErrors.slice(0, 3).join(' | '));
+    await ctx.close();
+  }
+
+  // ---- 3.0 content requests: the public form works on a phone for someone with no account --------
+  {
+    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const H = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token };
+    const pl = await (await fetch(BASE + '/api/playlists', { method: 'POST', headers: H, body: JSON.stringify({ name: 'Requests smoke' }) })).json();
+    await fetch(BASE + `/api/playlists/${pl.id}/publish`, { method: 'POST', headers: H });
+    const form = await (await fetch(BASE + '/api/content-requests/forms', { method: 'POST', headers: H,
+      body: JSON.stringify({ title: 'Smoke request form', intro: 'Send us a poster', targets: [{ label: 'Lobby', playlist_id: pl.id }] }) })).json();
+    check('a request form can be made', !!(form && form.path), JSON.stringify(form).slice(0, 200));
+    const ctx = await browser.createBrowserContext();
+    const pub = await ctx.newPage();
+    const pubErrors = [];
+    pub.on('pageerror', (e) => pubErrors.push(e.message));
+    pub.on('console', (m) => { if (m.type() === 'error' && !/favicon|404 \(Not Found\)/.test(m.text())) pubErrors.push(m.text().slice(0, 140)); });
+    await pub.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
+    await pub.goto(BASE + (form.path || '/r/none'), { waitUntil: 'networkidle2' });
+    await pub.waitForSelector('#rqName', { timeout: 5000 }).catch(() => {});
+    const shown = await pub.evaluate(() => ({
+      title: (document.querySelector('h1') || {}).textContent,
+      bare: [...document.querySelectorAll('body *')].filter((e) => e.children.length === 0).map((e) => (e.textContent || '').trim())
+        .filter((s) => /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/.test(s)),
+      scroll: document.documentElement.scrollWidth - window.innerWidth,
+    }));
+    check('the public request page renders on a phone, translated, with no sideways scroll',
+      shown.title === 'Smoke request form' && !shown.bare.length && shown.scroll <= 0 && !pubErrors.length,
+      `${JSON.stringify(shown)} ${pubErrors.slice(0, 3).join(' | ')}`);
+    await pub.type('#rqName', 'Smoke Tester');
+    await pub.type('#rqEmail', 'tester@x.test');
+    await pub.click('[data-go]');
+    await pub.waitForSelector('#rqTitle', { timeout: 5000 }).catch(() => {});
+    check('a requester passes an open-link gate and reaches the request form',
+      await pub.evaluate(() => !!document.querySelector('#rqTitle') && document.querySelectorAll('.choices input').length === 1) && !pubErrors.length,
+      pubErrors.slice(0, 3).join(' | '));
+    await pub.goto(BASE + '/r/status#' + 'x'.repeat(43), { waitUntil: 'networkidle2' });
+    await new Promise((r) => setTimeout(r, 500));
+    check('an unknown status link says so instead of failing', await pub.evaluate(() => (document.body.innerText || '').length > 20) && !pubErrors.length,
+      pubErrors.slice(0, 3).join(' | '));
+    await ctx.close();
+  }
 
   await browser.close();
   stop();

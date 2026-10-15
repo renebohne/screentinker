@@ -192,6 +192,19 @@ async function renderEditor(container, layoutId, wallId = null) {
       </div>
     </div>
     <div id="layoutApprovalBar" style="margin:-8px 0 12px"></div>
+    ${wallId ? '' : `
+    <!-- 3.0: orientation versions (docs/layouts-and-campaigns.md). Same zones, own geometry; a
+         screen gets the version for its shape, or the landscape one when the layout has none. -->
+    <div id="variantBar" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:-4px 0 12px">
+      <div role="group" aria-label="${esc(t('layoutvar.group'))}" style="display:inline-flex;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">
+        <button class="btn btn-sm variant-tab" data-variant="default" aria-pressed="true">${esc(t('layoutvar.landscape'))}</button>
+        <button class="btn btn-sm variant-tab" data-variant="portrait" aria-pressed="false">${esc(t('layoutvar.portrait'))}</button>
+        <button class="btn btn-sm variant-tab" data-variant="square" aria-pressed="false">${esc(t('layoutvar.square'))}</button>
+      </div>
+      <button class="btn btn-secondary btn-sm" id="variantCreateBtn" style="display:none"></button>
+      <button class="btn btn-secondary btn-sm" id="variantRemoveBtn" style="display:none;color:var(--danger)">${esc(t('layoutvar.remove'))}</button>
+      <span id="variantHint" style="font-size:12px;color:var(--text-muted)"></span>
+    </div>`}
     <div style="display:flex;gap:20px">
       <div style="flex:1">
         <div id="canvasWrap" style="position:relative;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden">
@@ -227,6 +240,9 @@ async function renderEditor(container, layoutId, wallId = null) {
             </select>
             <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('layout.fit_hint')}</div>
           </div>
+          <!-- 3.0: where a playlist's zone-less items play (docs/layouts-and-campaigns.md). -->
+          <div class="form-group"><label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" id="propMain"> ${t('layoutpl.main_zone')}</label>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('layoutpl.main_zone_hint')}</div></div>
           <button class="btn btn-danger btn-sm" id="deleteZoneBtn" style="width:100%;justify-content:center;margin-top:8px">${t('layout.delete_zone')}</button>
         </div>
       </div>
@@ -239,6 +255,90 @@ async function renderEditor(container, layoutId, wallId = null) {
   let zones = (layout.draft && Array.isArray(layout.draft.zones)) ? layout.draft.zones : (layout.zones || []);
   let selectedZone = null;
   let dragging = null;
+
+  /*
+   * Orientation versions. Every editing path below reads and writes z.x_percent… directly, so the
+   * version being edited is SWAPPED INTO those fields: z._base keeps the landscape geometry and
+   * z.variants[v] each version's, and switching flushes the canvas into its slot and loads the next.
+   * `removedVariants` sends an explicit null so a removed version is deleted on save.
+   */
+  const GEO = ['x_percent', 'y_percent', 'width_percent', 'height_percent'];
+  let variantMode = 'default';
+  const removedVariants = new Set();
+  const geoOf = (z) => Object.fromEntries(GEO.map((k) => [k, Number(z[k]) || 0]));
+  const initBase = () => zones.forEach((z) => { z._base = geoOf(z); });
+  initBase();
+  const hasVariant = (v) => zones.some((z) => z.variants && z.variants[v]);
+  function flushMode() {
+    zones.forEach((z) => {
+      if (variantMode === 'default') z._base = geoOf(z);
+      else if (hasVariant(variantMode) || (z.variants && z.variants[variantMode])) { z.variants = z.variants || {}; z.variants[variantMode] = geoOf(z); }
+    });
+  }
+  function loadMode(next) {
+    variantMode = next;
+    zones.forEach((z) => {
+      const g = next === 'default' ? z._base : ((z.variants && z.variants[next]) || z._base);
+      if (g) GEO.forEach((k) => { z[k] = g[k]; });
+    });
+    const canvas = document.getElementById('canvas');
+    if (canvas) canvas.style.paddingTop = (next === 'portrait' ? 177.78 : next === 'square' ? 75 : canvasRatioPct(canvasSize().width ? canvasSize() : layout)) + '%';
+    // A 9:16 canvas as wide as the page would be taller than the screen: keep it phone-shaped.
+    const wrap = document.getElementById('canvasWrap');
+    if (wrap) { wrap.style.maxWidth = next === 'portrait' ? '380px' : ''; wrap.style.margin = next === 'portrait' ? '0 auto' : ''; }
+    paintVariantBar();
+  }
+  function paintVariantBar() {
+    const bar = document.getElementById('variantBar');
+    if (!bar) return;
+    bar.querySelectorAll('.variant-tab').forEach((b) => {
+      const on = b.dataset.variant === variantMode;
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      b.className = 'btn btn-sm variant-tab ' + (on ? 'btn-primary' : 'btn-secondary');
+      b.style.borderRadius = '0';
+    });
+    const create = document.getElementById('variantCreateBtn');
+    const remove = document.getElementById('variantRemoveBtn');
+    const hint = document.getElementById('variantHint');
+    const missing = variantMode !== 'default' && !hasVariant(variantMode);
+    create.style.display = missing ? '' : 'none';
+    create.textContent = variantMode === 'portrait' ? t('layoutvar.create_portrait') : t('layoutvar.create_square');
+    remove.style.display = variantMode !== 'default' && !missing ? '' : 'none';
+    hint.textContent = variantMode === 'default' ? t('layoutvar.hint_default')
+      : missing ? t('layoutvar.hint_missing') : t('layoutvar.hint_editing');
+    document.getElementById('canvas')?.classList.toggle('variant-missing', missing);
+  }
+  document.querySelectorAll('#variantBar .variant-tab').forEach((b) => {
+    b.onclick = () => { flushMode(); selectedZone = null; loadMode(b.dataset.variant); renderZones(); updateProperties(); };
+  });
+  document.getElementById('variantCreateBtn')?.addEventListener('click', async () => {
+    try {
+      const sz = canvasSize();
+      const res = await API('/layouts/auto-variant', {
+        method: 'POST',
+        body: JSON.stringify({ variant: variantMode, width: sz.width || layout.width, height: sz.height || layout.height,
+          zones: zones.map((z, i) => ({ key: String(i), ...z._base })) }),
+      });
+      if (!res || res.error) { showToast((res && res.error) || t('layoutvar.create_failed'), 'error'); return; }
+      zones.forEach((z, i) => {
+        const g = res.zones && res.zones[String(i)];
+        if (!g) return;
+        z.variants = z.variants || {};
+        z.variants[variantMode] = g;
+      });
+      removedVariants.delete(variantMode);
+      loadMode(variantMode);
+      renderZones();
+      showToast(t('layoutvar.created'), 'info');
+    } catch (err) { showToast(err.message, 'error'); }
+  });
+  document.getElementById('variantRemoveBtn')?.addEventListener('click', () => {
+    if (!confirm(t('layoutvar.remove_confirm'))) return;
+    zones.forEach((z) => { if (z.variants) delete z.variants[variantMode]; });
+    removedVariants.add(variantMode);
+    loadMode(variantMode);
+    renderZones();
+  });
 
   // Snapping (components/snap.js), done in on-screen pixels so the pull is the same on both axes of
   // a very wide wall canvas. Targets: the other zones, the canvas edges and centre, and — when
@@ -273,6 +373,11 @@ async function renderEditor(container, layoutId, wallId = null) {
   function renderZones() {
     const canvas = document.getElementById('canvas');
     canvas.querySelectorAll('.zone-el').forEach(z => z.remove());
+    // A version that does not exist yet has nothing to edit: the bar above offers to create it.
+    if (variantMode !== 'default' && !hasVariant(variantMode)) {
+      document.getElementById('zoneList').innerHTML = '';
+      return;
+    }
     if (!canvas.querySelector('.wall-panel-el')) {
       for (const p of wallPanels) {
         const el = document.createElement('div');
@@ -373,7 +478,7 @@ async function renderEditor(container, layoutId, wallId = null) {
         border:1px solid ${selectedZone === i ? 'var(--accent)' : 'var(--border)'};border-radius:var(--radius);
         margin-bottom:4px;cursor:pointer;font-size:13px" data-zone-idx="${i}">
         <div style="font-weight:500">${esc(z.name)}</div>
-        <div style="font-size:11px;color:var(--text-muted)">${Math.round(z.width_percent)}% x ${Math.round(z.height_percent)}% • ${esc(z.zone_type)}</div>
+        <div style="font-size:11px;color:var(--text-muted)">${Math.round(z.width_percent)}% x ${Math.round(z.height_percent)}% • ${esc(z.zone_type)}${Number(z.is_main) === 1 ? ' • ' + esc(t('layoutpl.main_zone')) : ''}</div>
       </div>
     `).join('');
 
@@ -395,7 +500,16 @@ async function renderEditor(container, layoutId, wallId = null) {
     document.getElementById('propZ').value = z.z_index || 0;
     document.getElementById('propType').value = z.zone_type;
     document.getElementById('propFit').value = z.fit_mode || 'cover';
+    document.getElementById('propMain').checked = Number(z.is_main) === 1 || z.is_main === true;
   }
+
+  // At most one main zone: ticking one clears the rest. Sent with every save (is_main on each zone).
+  document.getElementById('propMain').onchange = () => {
+    if (selectedZone === null) return;
+    const on = document.getElementById('propMain').checked;
+    zones.forEach((z, i) => { z.is_main = on && i === selectedZone ? 1 : 0; });
+    renderZones();
+  };
 
   ['propName', 'propX', 'propY', 'propW', 'propH', 'propZ', 'propType', 'propFit'].forEach(id => {
     document.getElementById(id).oninput = () => {
@@ -414,7 +528,8 @@ async function renderEditor(container, layoutId, wallId = null) {
   });
 
   document.getElementById('addZoneBtn').onclick = () => {
-    zones.push({ id: null, name: t('layout.zone_n', { n: zones.length + 1 }), x_percent: 10, y_percent: 10, width_percent: 30, height_percent: 30, z_index: 0, zone_type: 'content', fit_mode: 'contain', background_color: '#000000', sort_order: zones.length });
+    zones.push({ id: null, name: t('layout.zone_n', { n: zones.length + 1 }), x_percent: 10, y_percent: 10, width_percent: 30, height_percent: 30, z_index: 0, zone_type: 'content', fit_mode: 'contain', background_color: '#000000', sort_order: zones.length,
+      _base: { x_percent: 10, y_percent: 10, width_percent: 30, height_percent: 30 } });
     selectedZone = zones.length - 1;
     renderZones();
     updateProperties();
@@ -439,12 +554,21 @@ async function renderEditor(container, layoutId, wallId = null) {
         method: 'PUT',
         // Name goes with the zones so renaming is part of the Save the user already
         // presses, not a second hidden action.
-        body: JSON.stringify({ zones, ...(newName ? { name: newName } : {}), ...canvasSize() }),
+        // Landscape geometry in the zone's own fields, each version under `variants` (null = remove).
+        body: JSON.stringify({ zones: (flushMode(), zones).map((z) => {
+          const { _base, variants, ...rest } = z;
+          const v = { ...(variants || {}) };
+          for (const r of removedVariants) if (!v[r]) v[r] = null;
+          return { ...rest, ...(_base || {}), is_main: Number(z.is_main) === 1 ? 1 : 0, variants: v };
+        }), ...(newName ? { name: newName } : {}), ...canvasSize() }),
       });
       if (updated && updated.error) { showToast(updated.error, 'error'); return; }
       layout = updated;
       zones = layout.zones || [];
       selectedZone = null;
+      removedVariants.clear();
+      initBase();
+      loadMode(variantMode);
       showToast(updated.pending_review ? t('review.toast.saved_as_draft') : t('layout.toast.saved'), 'success');
       renderApprovalBar(document.getElementById('layoutApprovalBar'), { type: 'layout', id: layoutId, name: layout.name, onChanged: () => renderEditor(container, layoutId, wallId) });
       renderZones();
@@ -467,6 +591,7 @@ async function renderEditor(container, layoutId, wallId = null) {
     };
   });
 
+  paintVariantBar();
   renderZones();
   renderApprovalBar(document.getElementById('layoutApprovalBar'), { type: 'layout', id: layoutId, name: layout.name, onChanged: () => renderEditor(container, layoutId, wallId) });
 }

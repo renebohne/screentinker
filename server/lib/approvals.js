@@ -116,8 +116,12 @@ function updateSettings(db, { workspaceId, requireApproval, reviewerIds, actor, 
           // Turning approval off never publishes what was waiting: every open submission is closed
           // as cancelled, its history kept, and the creator publishes through the normal path.
           const now = nowSec();
-          cancelled = db.prepare(`UPDATE submissions SET status = 'cancelled', comment = COALESCE(comment, '') || ?, decided_at = ?, updated_at = ?, version = version + 1
-                                   WHERE workspace_id = ? AND status IN ('submitted','changes_requested','approved')`)
+          //
+        // ⚠️ Except content requests (lib/content-requests.js). A request comes from someone with no
+        // account and no way to publish it themselves, and it always needs an explicit approve step
+        // whether or not the workspace requires approval — so it stays in the queue.
+        cancelled = db.prepare(`UPDATE submissions SET status = 'cancelled', comment = COALESCE(comment, '') || ?, decided_at = ?, updated_at = ?, version = version + 1
+                                   WHERE workspace_id = ? AND status IN ('submitted','changes_requested','approved') AND request_id IS NULL`)
             .run(' [Approval was turned off for this workspace; the submission was closed without publishing]', now, now, workspaceId).changes;
         }
         audit(want ? 'approval:enabled' : 'approval:disabled', { userId: actor && actor.userId, workspaceId, ip, details: { cancelled_submissions: cancelled } });
@@ -138,13 +142,18 @@ function resourceOf(db, type, id) {
   return row;
 }
 
-function submit(db, { type, id, workspaceId, actor, note, ip }) {
+/*
+ * `requestId` (lib/content-requests.js): this submission reviews a content request from someone
+ * without an account. Freshly uploaded content has no draft — its live state IS its current state —
+ * so "nothing to submit" does not apply: what is under review is whether it may go on screens at all.
+ */
+function submit(db, { type, id, workspaceId, actor, note, ip, requestId = null }) {
   const row = resourceOf(db, type, id);
   if (row.workspace_id !== workspaceId) throw new ApprovalError('Not found', 404);
   const cap = revisions.captureState(db, type, id);
   const hash = revisions.hashState(cap.state);
   const live = revisions.captureLiveState(db, type, id);
-  if (live && revisions.hashState(live) === hash && type !== 'slide_deck') {
+  if (!requestId && live && revisions.hashState(live) === hash && type !== 'slide_deck') {
     throw new ApprovalError('There are no unpublished changes to submit', 400, 'nothing_to_submit');
   }
   const now = nowSec();
@@ -156,10 +165,10 @@ function submit(db, { type, id, workspaceId, actor, note, ip }) {
     sub = {
       id: crypto.randomUUID(), workspace_id: workspaceId, resource_type: type, resource_id: id, revision_id: rev.id, state_hash: hash,
       deps: JSON.stringify(policy.depsOf(db, type, id)), note: note ? String(note).slice(0, 2000) : null,
-      submitted_by: actor && actor.userId || null, submitted_at: now, status: 'submitted', updated_at: now,
+      submitted_by: actor && actor.userId || null, submitted_at: now, status: 'submitted', updated_at: now, request_id: requestId || null,
     };
-    db.prepare(`INSERT INTO submissions (id, workspace_id, resource_type, resource_id, revision_id, state_hash, deps, note, submitted_by, submitted_at, status, updated_at)
-                VALUES (@id, @workspace_id, @resource_type, @resource_id, @revision_id, @state_hash, @deps, @note, @submitted_by, @submitted_at, @status, @updated_at)`).run(sub);
+    db.prepare(`INSERT INTO submissions (id, workspace_id, resource_type, resource_id, revision_id, state_hash, deps, note, submitted_by, submitted_at, status, updated_at, request_id)
+                VALUES (@id, @workspace_id, @resource_type, @resource_id, @revision_id, @state_hash, @deps, @note, @submitted_by, @submitted_at, @status, @updated_at, @request_id)`).run(sub);
     db.prepare('UPDATE revisions SET submission_id = ? WHERE id = ?').run(sub.id, rev.id);
   });
   txn();
@@ -167,10 +176,18 @@ function submit(db, { type, id, workspaceId, actor, note, ip }) {
   return getSubmission(db, sub.id);
 }
 
+/*
+ * A content request (lib/content-requests.js) has no submitting user: the person is on the request
+ * row. These columns let the queue say "Request from <name, email>" with the screens and dates,
+ * without a second query per row. NULL for every ordinary submission.
+ */
+const REQUEST_COLS = `cr.ref AS request_ref, cr.requester_name AS request_name, cr.requester_email AS request_email,
+  cr.start_date AS request_start, cr.end_date AS request_end, cr.targets AS request_targets, cr.status AS request_status`;
+
 function getSubmission(db, submissionId) {
-  return db.prepare(`SELECT s.*, su.email AS submitter_email, su.name AS submitter_name, ru.email AS reviewer_email, ru.name AS reviewer_name, r.rev_no
+  return db.prepare(`SELECT s.*, su.email AS submitter_email, su.name AS submitter_name, ru.email AS reviewer_email, ru.name AS reviewer_name, r.rev_no, ${REQUEST_COLS}
                        FROM submissions s LEFT JOIN users su ON su.id = s.submitted_by LEFT JOIN users ru ON ru.id = s.reviewer_id
-                       LEFT JOIN revisions r ON r.id = s.revision_id WHERE s.id = ?`).get(submissionId) || null;
+                       LEFT JOIN revisions r ON r.id = s.revision_id LEFT JOIN content_requests cr ON cr.id = s.request_id WHERE s.id = ?`).get(submissionId) || null;
 }
 
 function withdraw(db, { submissionId, actor, isAdmin, ip }) {
@@ -198,10 +215,21 @@ function authorsOf(db, sub) {
   return s;
 }
 
-function decide(db, { submissionId, decision, reviewer, comment, expectedVersion, ip }) {
+/*
+ * `writer` is the caller's canWrite(), passed by the route. It matters for ONE case: a content
+ * request in a workspace that does not require approval. Such a request still needs an explicit
+ * decision (a request never goes live unreviewed), but there is no reviewer list to draw on, so any
+ * member who could publish anyway may make it. With approval on, the reviewer list applies as always.
+ */
+function mayDecide(db, sub, reviewer, writer) {
+  if (isReviewer(db, sub.workspace_id, reviewer && reviewer.userId)) return true;
+  return !!(writer && sub.request_id && reviewer && reviewer.userId && !policy.approvalRequired(db, sub.workspace_id));
+}
+
+function decide(db, { submissionId, decision, reviewer, comment, expectedVersion, ip, writer = false }) {
   const sub = getSubmission(db, submissionId);
   if (!sub) throw new ApprovalError('Submission not found', 404);
-  if (!isReviewer(db, sub.workspace_id, reviewer && reviewer.userId)) throw new ApprovalError('You are not an assigned reviewer for this workspace, or no longer have edit access', 403, 'not_reviewer');
+  if (!mayDecide(db, sub, reviewer, writer)) throw new ApprovalError('You are not an assigned reviewer for this workspace, or no longer have edit access', 403, 'not_reviewer');
   if (authorsOf(db, sub).has(reviewer.userId)) throw new ApprovalError('You cannot approve your own changes. Another reviewer has to look at this one.', 403, 'self_approval');
   if (sub.status !== 'submitted') throw new ApprovalError(`This submission is ${sub.status.replace('_', ' ')}; it is no longer waiting for review`, 409, 'not_pending');
   if (expectedVersion != null && Number(expectedVersion) !== sub.version) throw new ApprovalError('This submission changed while you were reviewing it. Reload and look again.', 409, 'version_conflict');
@@ -253,9 +281,9 @@ function queue(db, workspaceId, { status = 'open', userId = null } = {}) {
   if (status === 'open') clauses.push("s.status IN ('submitted','changes_requested','approved')");
   else if (status !== 'all') { clauses.push('s.status = ?'); params.push(status); }
   if (userId) { clauses.push('s.submitted_by = ?'); params.push(userId); }
-  const rows = db.prepare(`SELECT s.*, su.email AS submitter_email, su.name AS submitter_name, ru.email AS reviewer_email, ru.name AS reviewer_name, r.rev_no
+  const rows = db.prepare(`SELECT s.*, su.email AS submitter_email, su.name AS submitter_name, ru.email AS reviewer_email, ru.name AS reviewer_name, r.rev_no, ${REQUEST_COLS}
                              FROM submissions s LEFT JOIN users su ON su.id = s.submitted_by LEFT JOIN users ru ON ru.id = s.reviewer_id
-                             LEFT JOIN revisions r ON r.id = s.revision_id
+                             LEFT JOIN revisions r ON r.id = s.revision_id LEFT JOIN content_requests cr ON cr.id = s.request_id
                             WHERE ${clauses.join(' AND ')}
                             ORDER BY s.submitted_at DESC LIMIT 200`).all(...params);
   return rows.map((s) => {
@@ -265,4 +293,4 @@ function queue(db, workspaceId, { status = 'open', userId = null } = {}) {
   });
 }
 
-module.exports = { ApprovalError, OPEN, eligibleMembers, reviewers, isReviewer, settings, updateSettings, submit, withdraw, decide, getSubmission, queue, affectedDevices, authorsOf };
+module.exports = { ApprovalError, OPEN, eligibleMembers, reviewers, isReviewer, mayDecide, settings, updateSettings, submit, withdraw, decide, getSubmission, queue, affectedDevices, authorsOf };

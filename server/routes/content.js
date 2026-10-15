@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 
 // Smart playlists select content by rule, so any successful content write can change what they
 // play. Notify once per write; lib/smart-playlist debounces per workspace and republishes only the
@@ -21,6 +23,7 @@ const { devicesPlayingContent } = require('../lib/devices-playing');
 const upload = require('../middleware/upload');
 const multer = require('multer');   // for MulterError only — the configured instance is `upload` above
 const config = require('../config');
+const { resolveWithin } = require('../lib/safe-path');
 const replicaProxy = require('../lib/replica-proxy');
 const { checkStorageLimit, checkRemoteUrl } = require('../middleware/subscription');
 const { cleanUserText } = require('../middleware/sanitize');
@@ -279,7 +282,9 @@ function discardUploads(req, files = null) {
     ...(Array.isArray(req.files) ? req.files : Object.values(req.files || {}).flat()),
   ];
   for (const f of list) {
-    if (f && f.path) { try { fs.unlinkSync(f.path); } catch (_) { /* already gone */ } }
+    // Every uploader on this router writes into contentDir; never unlink anything outside it.
+    const staged = f && f.path ? resolveWithin(config.contentDir, f.path) : null;
+    if (staged) { try { fs.unlinkSync(staged); } catch (_) { /* already gone */ } }
   }
 }
 
@@ -295,7 +300,14 @@ function uploadPreflight(req, res, next) {
 }
 
 router.post('/', checkStorageLimit, uploadPreflight, uploadContentFilesGuarded, async (req, res) => {
-  const files = [...((req.files && req.files.files) || []), ...((req.files && req.files.file) || [])];
+  // Only ever arrays multer built (upload.fields caps each), checked as such rather than assumed, and
+  // the total bounded again here so the ingest loop below never runs on a length nobody vetted.
+  const field = (name) => (req.files && Array.isArray(req.files[name]) ? req.files[name] : []);
+  const files = [...field('files'), ...field('file')];
+  if (files.length > MAX_FILES_PER_UPLOAD + 1) {
+    discardUploads(req);
+    return res.status(400).json({ error: `Too many files in one upload (at most ${MAX_FILES_PER_UPLOAD}).` });
+  }
   // Index of the first file NOT yet ingested; everything from here on is still a `.part` on disk.
   let next = 0;
   try {
@@ -491,7 +503,17 @@ router.patch('/uploads/:id',
       return res.status(400).json({ error: 'Upload-Offset header is required' });
     }
 
-    const result = uploadSession.append(session, declaredOffset, req.body);
+    /*
+     * express.raw leaves an already-parsed body alone, so a chunk sent as application/json arrives
+     * as whatever JSON it was. An empty body is still `{}` (body-parser's default) and means "no
+     * bytes", exactly as before; anything else that is not a Buffer is refused, not appended.
+     */
+    let chunk = null;
+    if (Buffer.isBuffer(req.body)) chunk = req.body;
+    else if (req.body != null && (typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length > 0)) {
+      return res.status(400).json({ error: 'Send the chunk as raw bytes (Content-Type: application/octet-stream)', offset: uploadSession.offsetOf(session) });
+    }
+    const result = uploadSession.append(session, declaredOffset, chunk);
     if (!result.ok) {
       // The refusal NAMES the offset, so a client that lost a response corrects itself in one
       // round trip instead of starting again.
@@ -879,6 +901,8 @@ function purgeContentRow(content) {
   unlinkIfUnreferenced(content.filepath, id, 'filepath');
   unlinkIfUnreferenced(content.thumbnail_path, id, 'thumbnail_path');
   unlinkIfUnreferenced(content.subtitle_url, id, 'subtitle_url'); // #216 sidecar (no-op pre-#216)
+  // 3.0 TV-safe copies of a tall video (lib/video-variants.js): named per content id, never shared.
+  try { require('../lib/video-variants').removeFor(id); } catch (_) { /* the orphan sweep gets them */ }
 
   /*
    * ⚠️ And the provenance row goes with it, because nothing else will take it. The table declares
@@ -1056,6 +1080,26 @@ router.post('/batch/tags', (req, res) => {
 });
 
 // Get content metadata
+/*
+ * 3.0 TV-safe video (lib/video-variants.js): whether this video is tall, whether it is marked
+ * pre-rotated, which copies the workspace's TVs need and how each is coming along. Read access.
+ */
+router.get('/:id/tv-copies', (req, res) => {
+  const content = checkContentRead(req, res);
+  if (!content) return;
+  const vv = require('../lib/video-variants');
+  res.json({ ...vv.describe(content), enabled: vv.getSettings().enabled });
+});
+
+// Try the failed (or allowance-refused) copies again. Write access: it spends server CPU.
+router.post('/:id/tv-copies/retry', (req, res) => {
+  const content = checkContentWrite(req, res);
+  if (!content) return;
+  const vv = require('../lib/video-variants');
+  const requeued = vv.retry(content.id);
+  res.json({ requeued, ...vv.describe(content) });
+});
+
 router.get('/:id', (req, res) => {
   const content = checkContentRead(req, res);
   if (!content) return;
@@ -1070,7 +1114,7 @@ router.put('/:id', (req, res) => {
   if (!content) return;
 
   const { filename, mime_type, remote_url, folder, folder_id, expires_at, unstable_connection,
-          captions_enabled, captions_lang, subtitle_url, subtitle_lang, tags, meta } = req.body;
+          captions_enabled, captions_lang, subtitle_url, subtitle_lang, tags, meta, video_prerotated } = req.body;
   const updates = [];
   const values = [];
   /*
@@ -1197,6 +1241,16 @@ router.put('/:id', (req, res) => {
     set('subtitle_url', subtitle_url ? String(subtitle_url).slice(0, 255) : null);
   }
   if (subtitle_lang !== undefined) set('subtitle_lang', subtitle_lang ? String(subtitle_lang).slice(0, 10) : null);
+  /*
+   * 3.0 TV-safe video: "this file is already turned for portrait screens". Applied LIVE, not via the
+   * approval draft: it changes no pixel of the file, only whether a portrait screen turns it again,
+   * and the operator sets it precisely because a screen shows it sideways right now.
+   */
+  let prerotatedChanged = false;
+  if (video_prerotated !== undefined) {
+    const v = video_prerotated ? 1 : 0;
+    if (v !== Number(content.video_prerotated || 0)) { updates.push('video_prerotated = ?'); values.push(v); prerotatedChanged = true; }
+  }
 
   if (updates.length > 0) {
     values.push(req.params.id);
@@ -1211,6 +1265,10 @@ router.put('/:id', (req, res) => {
     return res.json({ ...db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id), draft: true, pending_review: true });
   }
   revisionsLib.recordCurrent(db, 'content', req.params.id, { actor, summary: 'Updated details' });
+  if (prerotatedChanged) {
+    // Screens showing it pick the change up now: the flag is read at send time (ws/deviceSocket.js).
+    try { pushContentUpdates(req, require('../lib/devices-playing').devicesPlayingContent(req.params.id)); } catch (_) { /* next payload */ }
+  }
   res.json(db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id));
 });
 
@@ -1242,7 +1300,7 @@ router.post('/:id/subtitle', upload.subtitleUpload.single('subtitle'), async (re
   const content = checkContentWrite(req, res);
   if (!content) {
     // checkContentWrite already sent the response; clean up the orphaned upload.
-    if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} }
+    discardUploads(req);
     return;
   }
   if (!req.file) return res.status(400).json({ error: 'No subtitle file provided' });

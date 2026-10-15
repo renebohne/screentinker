@@ -112,6 +112,8 @@ class ScreenshotCapture {
                 redrawAbove(tv, view, canvas)
             }
 
+            drawScreenShare(view, canvas)
+
             Log.i("ScreenshotCapture", "Composite capture: ${w}x${h}, ${textureViews.size} TextureView(s), ${liveInputs.size} live input(s)")
             encodeBitmap(bitmap, quality)
         } catch (e: Exception) {
@@ -221,6 +223,30 @@ class ScreenshotCapture {
         canvas.drawText("Live HDMI input", w / 2f, h / 2f, p)
         p.isFakeBoldText = false; p.textSize *= 0.5f; p.color = android.graphics.Color.rgb(150, 150, 150)
         canvas.drawText("${w.toInt()}\u00d7${h.toInt()} \u00b7 can\u2019t be captured", w / 2f, h / 2f + p.textSize * 2f, p)
+    }
+
+    /*
+     * 3.0 screen share: while a share is up the screen IS the share (ScreenShareOverlay), the same
+     * rule as the web player's drawScreenShare. The TextureView pass above pasted the PAUSED content
+     * video over the overlay's black, and the share's own frame over its badge, so draw the overlay
+     * again on top: its black + "Connecting to …"/badge, the shared frame, then the views above it.
+     */
+    private fun drawScreenShare(root: View, canvas: Canvas) {
+        val overlay = root.findViewWithTag<View>(ScreenShareOverlay.TAG) ?: return
+        if (overlay.visibility != View.VISIBLE || overlay.width <= 0 || overlay.height <= 0) return
+        canvas.save()
+        canvas.concat(matrixTo(overlay, root))
+        overlay.draw(canvas)
+        canvas.restore()
+        val sv = (0 until ((overlay as? ViewGroup)?.childCount ?: 0)).map { (overlay as ViewGroup).getChildAt(it) }
+            .firstOrNull { it is ShareVideoView } as? ShareVideoView ?: return
+        if (!sv.isAvailable || sv.visibility != View.VISIBLE) return
+        val bmp = sv.bitmap ?: return
+        val m = matrixTo(sv, root)
+        if (bmp.width > 0 && bmp.height > 0) m.preScale(sv.width.toFloat() / bmp.width, sv.height.toFloat() / bmp.height)
+        canvas.drawBitmap(bmp, m, null)
+        bmp.recycle()
+        redrawAbove(sv, root, canvas)   // the badge, and anything layered above the overlay
     }
 
     private fun findAllTextureViews(view: View, result: MutableList<TextureView>) {

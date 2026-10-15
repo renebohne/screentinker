@@ -5,6 +5,8 @@
 
 const express = require('express');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const { db } = require('../db/database');
 const { canWrite, canAdmin, requireWorkspaceWrite, requireWorkspaceAdmin, requireWorkspaceRead } = require('../lib/permissions');
 const approvals = require('../lib/approvals');
@@ -89,6 +91,9 @@ router.get('/:id', requireWorkspaceRead, (req, res) => {
     authors: [...approvals.authorsOf(db, s)],
     is_reviewer: approvals.isReviewer(db, req.workspaceId, req.user.id),
     ...publishRight(req, s),
+    // A content request: who sent it, where and when it should show, and whether this member may
+    // decide it (with approval off, any editor may; see approvals.mayDecide).
+    request: (() => { const r = requestOf(s); return r ? require('../lib/content-requests').requestDetail(r, req) : null; })(),
   });
 });
 
@@ -107,15 +112,42 @@ function publishRight(req, s) {
   return { can_publish: write && author, waiting_for_author: !author, corporate: true };
 }
 
+/*
+ * 3.0 content requests (lib/content-requests.js). A submission that reviews a request is decided in
+ * the queue like any other, but the request is what the reviewer is deciding: approving puts it on its
+ * screens for its dates (through the release gate), asking for changes rejects it and mails the
+ * requester the reason, and withdrawing cancels it. So those three hand over to the request's own
+ * handlers, which call approvals.decide themselves — nothing here decides twice.
+ */
+function requestOf(sub) {
+  const r = sub && sub.request_id ? require('../lib/content-requests').getRequest(sub.request_id, sub.workspace_id) : null;
+  return r && r.submission_id === sub.id ? r : null;
+}
+
 router.post('/:id/withdraw', requireWorkspaceWrite, (req, res) => {
-  if (!loadSubmission(req, res)) return;
+  const sub = loadSubmission(req, res);
+  if (!sub) return;
+  const r = requestOf(sub);
+  if (r && r.status === 'pending') {
+    // Staff withdrawing a request from the queue cancels it; the requester's status link says so.
+    require('../lib/content-requests').cancelRequest(r, { by: req.user.id, ip: req.ip });
+    return res.json(approvals.getSubmission(db, sub.id));
+  }
   try { res.json(approvals.withdraw(db, { submissionId: req.params.id, actor: actor(req), isAdmin: canAdmin(req), ip: req.ip })); }
   catch (e) { fail(res, e); }
 });
 
-router.post('/:id/approve', requireWorkspaceWrite, (req, res) => {
+router.post('/:id/approve', requireWorkspaceWrite, async (req, res) => {
   const sub = loadSubmission(req, res);
   if (!sub) return;
+  const r = requestOf(sub);
+  if (r) {
+    try {
+      const out = await require('../lib/content-requests').approveRequest(req, r.id, { comment: req.body && req.body.comment, version: req.body && req.body.version });
+      automationEvent(sub, 'content_approved');
+      return res.json({ ...approvals.getSubmission(db, sub.id), request: out.request, all_published: out.all_published });
+    } catch (e) { return fail(res, e); }
+  }
   try {
     const out = approvals.decide(db, { submissionId: req.params.id, decision: 'approve', reviewer: actor(req), comment: req.body && req.body.comment, expectedVersion: req.body && req.body.version, ip: req.ip });
     automationEvent(sub, 'content_approved');
@@ -136,7 +168,16 @@ function automationEvent(sub, type) {
 }
 
 router.post('/:id/request-changes', requireWorkspaceWrite, (req, res) => {
-  if (!loadSubmission(req, res)) return;
+  const sub = loadSubmission(req, res);
+  if (!sub) return;
+  const r = requestOf(sub);
+  if (r) {
+    // A requester cannot edit and resubmit, so "changes requested" on a request is a decline with a reason.
+    try {
+      require('../lib/content-requests').rejectRequest(req, r.id, { reason: req.body && req.body.comment, version: req.body && req.body.version });
+      return res.json(approvals.getSubmission(db, sub.id));
+    } catch (e) { return fail(res, e); }
+  }
   try { res.json(approvals.decide(db, { submissionId: req.params.id, decision: 'request_changes', reviewer: actor(req), comment: req.body && req.body.comment, expectedVersion: req.body && req.body.version, ip: req.ip })); }
   catch (e) { fail(res, e); }
 });
@@ -146,10 +187,17 @@ router.post('/:id/request-changes', requireWorkspaceWrite, (req, res) => {
  * approved revision to screens, and only a member who could publish anyway may do it. The gate
  * is re-run here, so an edit or an asset change between approval and this click is refused.
  */
-router.post('/:id/publish', requireWorkspaceWrite, (req, res) => {
+router.post('/:id/publish', requireWorkspaceWrite, async (req, res) => {
   const s = loadSubmission(req, res);
   if (!s) return;
   if (s.status !== 'approved') return res.status(409).json({ error: `This submission is ${s.status.replace('_', ' ')}; only an approved submission can be published`, code: 'not_approved' });
+  const r = requestOf(s);
+  if (r) {
+    try {
+      const out = await require('../lib/content-requests').publishRequest(req, r.id);
+      return res.json({ submission: approvals.getSubmission(db, s.id), released: out.all_published, request: out.request });
+    } catch (e) { return fail(res, e); }
+  }
   try {
     const out = releases.releaseDraft(db, s.resource_type, s.resource_id, req, { actor: actor(req) });
     if (s.resource_type === 'playlist') automationEvent(s, 'playlist_published');

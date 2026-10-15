@@ -15,6 +15,8 @@
 const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const { db } = require('../db/database');
 const { resourceAccess } = require('../lib/tenancy');
 const { logActivity, getClientIp } = require('../services/activity');
@@ -38,7 +40,7 @@ function access(req, res, { write = false } = {}) {
  */
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch((err) => {
-    console.error(`[automation] unhandled error in ${req.method} ${req.path}:`, err && err.message);
+    console.error('[automation] unhandled error in %s %s:', req.method, req.path, err && err.message);
     try {
       if (!res.headersSent) res.status(500).json({ error: 'Something went wrong' });
     } catch (e2) {

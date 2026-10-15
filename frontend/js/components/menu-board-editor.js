@@ -39,6 +39,8 @@ const STARTERS = {
 
 let state = null;
 let dataSources = [];
+let loadSources = async () => [];
+const POS = new Set(['square', 'shopify']);
 
 function defaults(c) {
   return {
@@ -52,7 +54,10 @@ function defaults(c) {
 export async function mountMenuEditor(host, config, { apiGet }) {
   state = defaults(config);
   for (const s of state.sections) { s.id = s.id || uid('s'); for (const it of s.items || []) it.id = it.id || uid('i'); }
-  try { dataSources = (await apiGet('/data-sources')) || []; if (!Array.isArray(dataSources)) dataSources = dataSources.data_sources || []; } catch { dataSources = []; }
+  loadSources = async () => {
+    try { const r = (await apiGet('/data-sources')) || []; return Array.isArray(r) ? r : r.data_sources || []; } catch { return []; }
+  };
+  dataSources = await loadSources();
   paint(host);
 }
 
@@ -103,11 +108,21 @@ function paint(host) {
         <option value="">${esc(t('menu.items_from_editor'))}</option>
         ${dataSources.map((d) => `<option value="${esc(d.slug)}" ${fromData && s.source.slug === d.slug ? 'selected' : ''}>${esc(t('menu.items_from_ds', { name: d.name || d.slug }))}</option>`).join('')}
       </select>
-      ${fromData ? `<div style="font-size:12px;color:var(--text-muted);margin-top:6px">${esc(t('menu.ds_hint'))}</div>` : ''}
+      ${fromData ? `<div style="font-size:12px;color:var(--text-muted);margin-top:6px">${esc(t(POS.has(sourceType(s.source.slug)) ? 'pos.menu_ds_hint' : 'menu.ds_hint'))}</div>` : ''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
+        <span style="font-size:12px;color:var(--text-muted)">${esc(t('pos.menu_from_pos'))}</span>
+        <button type="button" class="btn btn-secondary btn-sm" data-pos="square">${esc(t('pos.menu_from_square'))}</button>
+        <button type="button" class="btn btn-secondary btn-sm" data-pos="shopify">${esc(t('pos.menu_from_shopify'))}</button>
+      </div>
     </div>
     ${fromData ? '' : `<div id="mbSections">${s.sections.map(sectionHtml).join('')}</div>
       <button type="button" class="btn btn-secondary btn-sm" data-act="add-section">${esc(t('menu.add_section'))}</button>`}`;
   wire(host);
+}
+
+function sourceType(slug) {
+  const d = dataSources.find((x) => x.slug === slug);
+  return d ? d.type : '';
 }
 
 function imgPicker(key, url) {
@@ -171,6 +186,19 @@ function wire(host) {
     if (url) { state[b.dataset.pick] = url; paint(host); }
   }));
   host.querySelectorAll('[data-clear]').forEach((b) => b.addEventListener('click', () => { state[b.dataset.clear] = ''; paint(host); }));
+  // "Menu from Square / Shopify": the data-source connect dialog, then this board reads it.
+  host.querySelectorAll('[data-pos]').forEach((b) => b.addEventListener('click', async () => {
+    const { openConnectModal } = await import('../views/data-sources.js');
+    openConnectModal(b.dataset.pos, {
+      onSaved: async (created) => {
+        if (!created || !created.slug) return;
+        dataSources = await loadSources();
+        if (!dataSources.some((d) => d.slug === created.slug)) dataSources.push({ slug: created.slug, name: created.name, type: created.type });
+        state.source = { slug: created.slug };
+        paint(host);
+      },
+    });
+  }));
   const src = host.querySelector('#mbSource');
   if (src) src.addEventListener('change', () => { state.source = src.value ? { slug: src.value } : null; paint(host); });
   const addSec = host.querySelector('[data-act="add-section"]');

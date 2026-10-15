@@ -22,7 +22,13 @@ const crypto = require('crypto');
 function dbOf() { return require('../db/database').db; }
 
 const KINDS = ['email', 'slack', 'teams', 'pagerduty', 'webhook'];
-const EVENTS = ['device_offline', 'device_online'];
+/*
+ * screen_problem / screen_ok come from screen verification (lib/screen-verify): a screen that is
+ * online but showing a blank or frozen picture, the wrong thing, or has its panel switched off —
+ * and the matching "it is fine again". Opt-in per channel like the other two; a channel created
+ * without an explicit list gets all four.
+ */
+const EVENTS = ['device_offline', 'device_online', 'screen_problem', 'screen_ok'];
 const SCOPE_KINDS = new Set(['workspace', 'group', 'device']);
 const PAGERDUTY_URL = 'https://events.pagerduty.com/v2/enqueue';
 const MAX_EMAILS = 20;
@@ -163,8 +169,31 @@ function present(db, row) {
 
 /* ============================== messages ============================== */
 
-function describe(event, device, { minutes, dashboardUrl }) {
+const SCREEN_PROBLEM_TEXT = {
+  blank: 'is showing a blank screen',
+  frozen: 'appears frozen (the picture has stopped changing)',
+  unexpected: 'is not showing what it is scheduled to show',
+  panel_off: 'has its display panel switched off',
+};
+const SCREEN_PROBLEM_TITLE = { blank: 'Blank screen', frozen: 'Frozen screen', unexpected: 'Unexpected content', panel_off: 'Panel off' };
+
+function describe(event, device, { minutes, dashboardUrl, check, reason }) {
   const name = device.name || device.id;
+  const mins = (n) => `${n} minute${n === 1 ? '' : 's'}`;
+  if (event === 'screen_problem') {
+    return { title: `${SCREEN_PROBLEM_TITLE[check] || 'Screen problem'}: ${name}`,
+      text: `The screen "${name}" ${SCREEN_PROBLEM_TEXT[check] || 'has a problem'}${minutes ? ` and has for ${mins(minutes)}` : ''}. It is online and answering, so this would not show up as an offline alert.`,
+      severity: 'warning' };
+  }
+  if (event === 'screen_ok') {
+    if (reason === 'offline') {
+      return { title: `Verification paused: ${name}`, text: `The screen "${name}" went offline, so its ${(SCREEN_PROBLEM_TITLE[check] || 'screen problem').toLowerCase()} is no longer being watched. Offline alerts take over from here.`, severity: 'info' };
+    }
+    if (reason === 'scheduled') {
+      return { title: `Scheduled sleep: ${name}`, text: `The screen "${name}" is now in its scheduled power-off window, so its ${(SCREEN_PROBLEM_TITLE[check] || 'screen problem').toLowerCase()} is closed.`, severity: 'info' };
+    }
+    return { title: `Screen OK: ${name}`, text: `The screen "${name}" is showing its content again${minutes ? ` after ${mins(minutes)}` : ''}.`, severity: 'info' };
+  }
   if (event === 'device_offline') {
     return { title: `Offline: ${name}`, text: `The screen "${name}" has been offline for ${minutes} minute${minutes === 1 ? '' : 's'}.`, severity: 'error' };
   }
@@ -188,7 +217,7 @@ function buildMessage(channel, ctx) {
       return { kind: 'email', to: cfg.emails || [], subject: d.title, text: `${d.text}${ws ? `\n\nWorkspace: ${ws}` : ''}${link ? `\n\n${link}` : ''}\n\n- ScreenTinker` };
     case 'slack':
       return { kind: 'http', url: cfg.url, body: {
-        text: `${d.severity === 'error' ? ':red_circle:' : ':large_green_circle:'} ${d.title}`,
+        text: `${d.severity === 'error' ? ':red_circle:' : d.severity === 'warning' ? ':large_yellow_circle:' : ':large_green_circle:'} ${d.title}`,
         blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `*${slackEsc(d.title)}*\n${slackEsc(d.text)}${ws ? `\n_${slackEsc(ws)}_` : ''}${link ? `\n<${link}|Open in ScreenTinker>` : ''}` } }],
       } };
     case 'teams':
@@ -198,7 +227,7 @@ function buildMessage(channel, ctx) {
         attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: {
           $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', type: 'AdaptiveCard', version: '1.4',
           body: [
-            { type: 'TextBlock', size: 'Medium', weight: 'Bolder', text: d.title, color: d.severity === 'error' ? 'Attention' : 'Good', wrap: true },
+            { type: 'TextBlock', size: 'Medium', weight: 'Bolder', text: d.title, color: d.severity === 'error' ? 'Attention' : d.severity === 'warning' ? 'Warning' : 'Good', wrap: true },
             { type: 'TextBlock', text: d.text, wrap: true },
             ...(ws ? [{ type: 'TextBlock', text: ws, isSubtle: true, spacing: 'None', wrap: true }] : []),
           ],
@@ -206,14 +235,15 @@ function buildMessage(channel, ctx) {
         } }],
       } };
     case 'pagerduty':
-      return { kind: 'http', url: PAGERDUTY_URL, body: ctx.event === 'device_online'
+      // screen_ok resolves the screen_problem incident the same way device_online resolves an outage.
+      return { kind: 'http', url: PAGERDUTY_URL, body: (ctx.event === 'device_online' || ctx.event === 'screen_ok')
         ? { routing_key: cfg.routing_key, event_action: 'resolve', dedup_key: ctx.dedupKey }
         : { routing_key: cfg.routing_key, event_action: 'trigger', dedup_key: ctx.dedupKey,
-            payload: { summary: d.title, source: (ctx.device && ctx.device.name) || 'ScreenTinker', severity: ctx.event === 'test' ? 'info' : 'error',
+            payload: { summary: d.title, source: (ctx.device && ctx.device.name) || 'ScreenTinker', severity: ctx.event === 'test' ? 'info' : (d.severity === 'warning' ? 'warning' : 'error'),
               component: 'screen', group: ws || undefined, timestamp: ctx.nowIso, custom_details: { message: d.text, device_id: ctx.device && ctx.device.id } },
             ...(link ? { links: [{ href: link, text: 'Open in ScreenTinker' }] } : {}) } };
     case 'webhook': {
-      const body = { event: ctx.event, title: d.title, message: d.text, workspace: ws || null,
+      const body = { event: ctx.event, ...(ctx.check ? { check: ctx.check } : {}), title: d.title, message: d.text, workspace: ws || null,
         device: ctx.device ? { id: ctx.device.id, name: ctx.device.name } : null, minutes: ctx.minutes ?? null, url: link, sent_at: ctx.nowIso };
       const raw = JSON.stringify(body);
       const headers = {};
@@ -352,4 +382,6 @@ function _setSender(fn) { sendOverride = fn || null; }
 module.exports = {
   KINDS, EVENTS, normaliseInput, validateScopes, setScopes, scopesOf, inScope, present, buildMessage, deliver, tick, sendTest,
   checkWebhookUrl, _setSender,
+  // Shared with lib/screen-verify, which delivers its own incidents through these channels.
+  parseEvents, dashboardUrl, recordResult,
 };

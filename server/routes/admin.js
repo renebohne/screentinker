@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
@@ -350,6 +352,8 @@ router.put('/users/:id/workspace', requirePlatformAdmin, (req, res) => {
     releaseWorkspaceMember(db, { userId: target.id, workspaceIds: memberships.map(m => m.workspace_id).filter(id => id !== ws.id) });
   });
   txn();
+  // A move leaves the old workspace's socket room behind on any open dashboard; drop it.
+  for (const m of memberships) if (m.workspace_id !== ws.id) try { require('../ws/dashboardSocket').dropUserFromWorkspace(target.id, m.workspace_id); } catch (_) { /* best-effort: writes are re-checked live anyway */ }
 
   logActivity(req.user.id, 'admin_set_user_workspace', `target: ${target.email}, workspace: ${ws.id}`, null, getClientIp(req), ws.id);
 
@@ -484,6 +488,8 @@ router.delete('/users/:id/workspaces/:workspaceId', requirePlatformAdmin, (req, 
     db.prepare('DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?').run(req.params.workspaceId, req.params.id);
     releaseWorkspaceMember(db, { userId: req.params.id, workspaceIds: [req.params.workspaceId] });
   })();
+  // Their open dashboards joined this workspace's socket room at connect; take them out of it.
+  try { require('../ws/dashboardSocket').dropUserFromWorkspace(req.params.id, req.params.workspaceId); } catch (_) { /* best-effort: writes are re-checked live anyway */ }
   req.workspaceId = req.params.workspaceId;
   const target = db.prepare('SELECT email FROM users WHERE id = ?').get(req.params.id);
   logActivity(req.user.id, 'admin_remove_user_workspace', `target: ${target?.email}, workspace: ${req.params.workspaceId}`, null, getClientIp(req), req.params.workspaceId);
@@ -555,6 +561,21 @@ router.put('/status-debug', requirePlatformAdmin, (req, res) => {
   res.json({ enabled });
 });
 
+// ===================== Screen share: presenters at once (3.0) =====================
+// Platform-admin only. How many people may present on one screen at once where a workspace admin has
+// turned "several people at once" on (1-4; docs/screen-share.md). Persisted in app_settings, so it
+// takes effect on the next join; SCREEN_SHARE_MAX_PRESENTERS is the default until it is set.
+router.get('/screen-share', requirePlatformAdmin, (req, res) => {
+  res.json({ max_presenters: require('../lib/screen-share').maxPresenters(), env_default: config.screenShareMaxPresenters });
+});
+router.put('/screen-share', requirePlatformAdmin, (req, res) => {
+  const n = parseInt(req.body && req.body.max_presenters, 10);
+  if (!Number.isInteger(n) || n < 1 || n > 4) return res.status(400).json({ error: 'max_presenters must be 1 to 4' });
+  appSettings.set('screen_share_max_presenters', String(n));
+  logActivity(req.user.id, 'admin_set_screen_share_presenters', `max_presenters: ${n}`, null, getClientIp(req), null);
+  res.json({ max_presenters: n });
+});
+
 // ===================== Opt-in install statistics =====================
 // Returns the decision state, the EXACT payload that would be sent, and what was last actually
 // sent. Handing over the real payload rather than a description is the point: an operator can
@@ -607,6 +628,7 @@ router.put('/telemetry', requirePlatformAdmin, async (req, res) => {
 
 const ghcrCheck = require('../lib/ghcr-check');
 const VERSION = require('../version');
+const { trimTrailing } = require('../lib/trim-trailing');
 
 // POST /api/admin/check-update — force a fresh GHCR poll (bypasses cache)
 // and return version comparison.
@@ -842,6 +864,33 @@ router.delete('/promotions/:id', requirePlatformAdmin, async (req, res) => {
 // The numbers an operator checks first plus the things waiting on them. Counts only — no names,
 // no emails. Each count is independent and tolerant: a table an older install lacks reads as 0
 // instead of failing the whole page.
+// 3.0: the machine this server runs on — disk, CPU, memory (lib/host-stats.js). Platform admins only:
+// hostname, paths and load are about the box, not about any tenant. Polled by Platform → Overview.
+router.get('/host', requirePlatformAdmin, async (req, res) => {
+  try {
+    const out = await require('../lib/host-stats').sample();
+    // 3.0 TV-safe video copies: the encode queue sits beside the CPU it spends.
+    try { out.video_variants = require('../lib/video-variants').stats(); } catch (_) { out.video_variants = null; }
+    res.json(out);
+  }
+  catch (e) { res.status(500).json({ error: 'Could not read server stats' }); }
+});
+
+// ===================== TV-safe video copies (3.0, lib/video-variants.js) =====================
+// Platform-admin only: how much of THIS server's CPU goes to re-encoding tall videos for Tizen TVs.
+// Each value also has an env default (VIDEO_VARIANTS_*) for self-hosters who configure by env.
+router.get('/video-variants', requirePlatformAdmin, (req, res) => {
+  const vv = require('../lib/video-variants');
+  res.json({ settings: vv.getSettings(), stats: vv.stats(), self_hosted: !!config.selfHosted });
+});
+router.put('/video-variants', requirePlatformAdmin, (req, res) => {
+  const vv = require('../lib/video-variants');
+  const out = vv.saveSettings(req.body || {});
+  if (out.error) return res.status(400).json({ error: out.error });
+  logActivity(req.user.id, 'admin_set_video_variants', JSON.stringify(out.settings), null, getClientIp(req), null);
+  res.json({ settings: out.settings, stats: vv.stats(), self_hosted: !!config.selfHosted });
+});
+
 router.get('/overview', requirePlatformAdmin, (req, res) => {
   const n = (sql, ...args) => { try { return db.prepare(sql).get(...args).n || 0; } catch (_) { return 0; } };
   const now = Math.floor(Date.now() / 1000);
@@ -852,6 +901,8 @@ router.get('/overview', requirePlatformAdmin, (req, res) => {
     version: VERSION,
     latest_version: latest || null,
     update_available: cmp > 0,
+    // 3.0: this machine running out of disk or memory (lib/host-stats.js), for "Needs your attention".
+    host_warnings: (() => { try { return require('../lib/host-stats').warningsNow(); } catch (_) { return []; } })(),
     users: n('SELECT COUNT(*) AS n FROM users'),
     platform_staff: n("SELECT COUNT(*) AS n FROM users WHERE role IN ('platform_admin','superadmin','platform_operator')"),
     organizations: n('SELECT COUNT(*) AS n FROM organizations'),
@@ -978,7 +1029,8 @@ router.post('/cleanup/stale-accounts/warn', requirePlatformAdmin, async (req, re
   if (!isConfigured()) {
     return res.status(503).json({ error: 'Email is not configured on this server, so no notice can be sent. Configure email, or delete without notice.' });
   }
-  const appUrl = String(process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+  // Emailed to customers: lib/public-origin, never the raw Host header.
+  const appUrl = trimTrailing(require('../lib/public-origin').publicOrigin(req), '/');
   const { ids, days, notice_days: noticeDays } = req.body || {};
   try {
     const out = await cleanup.warn(db, {

@@ -189,15 +189,28 @@ function iceServers() {
   const out = [];
   for (const u of config.go2rtcStunUrls) out.push({ urls: u });
   if (config.go2rtcTurnUrl) {
-    const s = { urls: config.go2rtcTurnUrl };
-    if (config.go2rtcTurnUser) { s.username = config.go2rtcTurnUser; s.credential = config.go2rtcTurnPass; }
+    const urls = String(config.go2rtcTurnUrl).split(',').map((u) => u.trim()).filter(Boolean);
+    const s = { urls: urls.length === 1 ? urls[0] : urls };
+    if (config.go2rtcTurnSecret) Object.assign(s, turnCredentials(config.go2rtcTurnSecret, config.go2rtcTurnTtl));
+    else if (config.go2rtcTurnUser) { s.username = config.go2rtcTurnUser; s.credential = config.go2rtcTurnPass; }
     out.push(s);
   }
   return out;
 }
 
+/*
+ * Time-limited TURN credentials (draft-uberti-behave-turn-rest; coturn `use-auth-secret`): the
+ * username is "<unix expiry>:screentinker" and the password is base64(HMAC-SHA1(secret, username)).
+ * The TURN server checks both without asking us, and refuses them after the expiry.
+ */
+function turnCredentials(secret, ttlSec, now = Date.now()) {
+  const username = `${Math.floor(now / 1000) + ttlSec}:screentinker`;
+  const credential = require('crypto').createHmac('sha1', String(secret)).update(username).digest('base64');
+  return { username, credential };
+}
+
 module.exports = {
-  streamName, streamBelongsTo, talkStreamName, talkStreamBelongsTo, broadcastTalkStreamName, enabled, healthy, iceServers,
+  streamName, streamBelongsTo, talkStreamName, talkStreamBelongsTo, broadcastTalkStreamName, enabled, healthy, iceServers, turnCredentials,
   putStream, deleteStream, hasStream, ensureStream, hasActiveProducer, webrtcExchange,
   _call: call, _resetHealth, _adminHeaders: adminHeaders,
 };

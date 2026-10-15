@@ -124,7 +124,9 @@ test('ONLY the senders gated by email_alerts pass unsubscribeUserId', () => {
    */
   const SERVICES = path.join(__dirname, '..', 'services');
   const ROUTES = path.join(__dirname, '..', 'routes');
-  const MAY = new Set(['alerts.js', 'trialExpiry.js', 'activationNudge.js']);
+  // freshness-digest.js: the weekly freshness digest, gated by email_alerts AND its own opt-out, and its
+  // link is bound to the 'freshness' list so it cannot switch alert email off (lib/unsubscribe-token.js).
+  const MAY = new Set(['alerts.js', 'trialExpiry.js', 'activationNudge.js', 'freshness-digest.js']);
 
   const files = [
     ...fs.readdirSync(SERVICES).filter((f) => f.endsWith('.js')).map((f) => ['services', f, path.join(SERVICES, f)]),
@@ -171,7 +173,7 @@ test('a bad token and an unknown user give the SAME answer', () => {
   // Otherwise the endpoint is an oracle for "is this id a customer", and it is public by design.
   assert.equal((ROUTE.match(/REFUSAL/g) || []).length >= 3, true, 'one shared refusal, used by both handlers');
   const resolve = ROUTE.slice(ROUTE.indexOf('function resolve'), ROUTE.indexOf('const REFUSAL'));
-  assert.match(resolve, /if \(!verify\(userId, token\)\) return null;/);
+  assert.match(resolve, /if \(!verify\(userId, token(, listOf\(req\))?\)\) return null;/);
   assert.match(resolve, /\|\| null;/, 'a missing user resolves to the same null as a bad token');
 });
 

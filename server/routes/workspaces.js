@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const crypto = require('crypto');
 const { db } = require('../db/database');
 const { canAdminWorkspace, canAccessWorkspace } = require('../lib/permissions');
@@ -520,7 +522,8 @@ router.post('/:id/invites', async (req, res) => {
   // lives at /app, so a bare /#/accept-invite/<id> would land on the
   // marketing landing page in dev (and rely on the DISABLE_HOMEPAGE
   // redirect in prod). /app is explicit.
-  const publicBase = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+  // ⚠️ lib/public-origin, never the raw Host header (host-header poisoning of an emailed link).
+  const publicBase = require('../lib/public-origin').publicOrigin(req);
   const acceptUrl = `${publicBase}/app#/accept-invite/${inviteId}`;
   const org = db.prepare('SELECT name FROM organizations WHERE id = ?').get(ws.organization_id);
   const { subject, text } = buildInviteEmail({
@@ -542,7 +545,10 @@ router.post('/:id/invites', async (req, res) => {
     return res.status(502).json({ error: 'Email send failed - invite not created' });
   }
 
-  res.status(201).json({ id: inviteId, email, role, expires_at: expiresAt });
+  // 3.0 (additive): whether the email actually went out, and the link itself, so the inviter can pass
+  // it on when it did not (no mail transport on a self-hosted server) or from a phone. The link only
+  // works for the invited email address (accept-invite checks it).
+  res.status(201).json({ id: inviteId, email, role, expires_at: expiresAt, email_sent: !!sendResult.sent, accept_url: acceptUrl });
 });
 
 // DELETE /:id/invites/:inviteId - admin only. Cancels a pending invite.
@@ -567,6 +573,22 @@ router.put('/:id/members/:userId', (req, res) => {
   const member = db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
     .get(ws.id, req.params.userId);
   if (!member) return res.status(404).json({ error: 'Member not found' });
+  // ⚠️ The DELETE below refuses to remove the org owner; this is the same guard for a role change,
+  // widened to org_admin. A direct workspace_members row WINS over org-level access in
+  // accessContext, so a workspace_admin demoting an org_owner/org_admin's row to viewer here made
+  // their senior locked out of writing in this workspace. Only someone at org level (or the
+  // platform owner) may change an org-level member's row.
+  if (newRole !== 'workspace_admin') {
+    const targetOrg = db.prepare(
+      "SELECT 1 FROM organization_members WHERE organization_id = ? AND user_id = ? AND role IN ('org_owner', 'org_admin')"
+    ).get(ws.organization_id, req.params.userId);
+    if (targetOrg && !isPlatformRole(req.user.role)) {
+      const callerOrg = db.prepare(
+        "SELECT 1 FROM organization_members WHERE organization_id = ? AND user_id = ? AND role IN ('org_owner', 'org_admin')"
+      ).get(ws.organization_id, req.user.id);
+      if (!callerOrg) return res.status(403).json({ error: 'Cannot change the role of an organization owner or admin' });
+    }
+  }
   if (member.role === 'workspace_admin' && newRole !== 'workspace_admin') {
     if (countWorkspaceAdmins(ws.id) <= 1) {
       return res.status(409).json({ error: 'Cannot demote the last admin' });
@@ -603,6 +625,8 @@ router.delete('/:id/members/:userId', (req, res) => {
       .run(ws.id, req.params.userId);
     releaseWorkspaceMember(db, { userId: req.params.userId, workspaceIds: [ws.id] });
   })();
+  // Their open dashboards joined this workspace's socket room at connect; take them out of it.
+  try { require('../ws/dashboardSocket').dropUserFromWorkspace(req.params.userId, ws.id); } catch (_) { /* best-effort: writes are re-checked live anyway */ }
   res.json({ success: true });
 });
 

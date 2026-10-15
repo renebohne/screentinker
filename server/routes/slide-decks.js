@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
 const { resourceAccess } = require('../lib/tenancy');
@@ -223,6 +225,10 @@ function publishDeckNow(deck, req) {
 router.post('/:id/publish', (req, res) => {
   const deck = checkDeckAccess(req, res, true);
   if (!deck) return;
+
+  // 3.0 accessibility: the opt-in "do not publish with accessibility errors" policy (lib/a11y).
+  const gate = require('../lib/a11y').publishGate(db, deck.workspace_id, 'slide_deck', deck.id);
+  if (gate) return res.status(gate.status).json({ error: gate.error, code: gate.code, errors: gate.check.errors });
 
   let out;
   try {

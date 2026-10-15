@@ -15,6 +15,7 @@ import { openInviteMemberModal } from '../components/workspace-members-invite-mo
 import { openAddUserModal } from '../components/workspace-members-add-user-modal.js';
 import { renderApprovalSettings } from '../components/approval-settings.js';
 import { renderLiveVideoSettings } from '../components/live-video-settings.js';
+import { renderScreenShareSettings } from '../components/screen-share.js';   // 3.0 screen share
 
 export async function render(container, workspaceId) {
   container.innerHTML = `
@@ -122,11 +123,13 @@ export async function render(container, workspaceId) {
     }) : ''}
     <div id="approvalSettingsCard"></div>
     <div id="liveVideoSettingsCard"></div>
+    <div id="screenShareSettingsCard"></div>
   `;
 
   if (canAdmin) attachMutationHandlers(container, workspaceId);
   if (canAdmin) renderApprovalSettings(content.querySelector('#approvalSettingsCard'));
   if (canAdmin) renderLiveVideoSettings(content.querySelector('#liveVideoSettingsCard'), { workspaceId, workspace: meWorkspace });
+  if (canAdmin) renderScreenShareSettings(content.querySelector('#screenShareSettingsCard'), { workspaceId });
 }
 
 function renderSection({ titleKey, count, emptyKey, rows }) {

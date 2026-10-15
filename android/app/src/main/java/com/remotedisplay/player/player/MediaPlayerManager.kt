@@ -42,9 +42,32 @@ class MediaPlayerManager(
     private val onImageError: (() -> Unit)? = null,
     // feat/transition-engine: the full-screen GL overlay that plays a from->to wipe. Null = no
     // transitions (every render hard-cuts, exactly as before).
-    private val transitionView: TransitionGLView? = null
+    private val transitionView: TransitionGLView? = null,
+    // #624 play to end: the YouTube wrapper reported the video's length (seconds) / that it ended.
+    // Only for the page currently mounted (see YoutubeBridge); always on the main thread.
+    private val onYoutubeLength: (Double) -> Unit = {},
+    private val onYoutubeEnded: () -> Unit = {}
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /*
+     * #624: the wrapper page's way to report a play-to-end video's length and end (PlayToEnd.bridgeScript).
+     * Each page carries the mountGeneration it was loaded under, so a call from a page that has since
+     * been replaced (or from a stale timer inside it) changes nothing. JavaScript bridges are also
+     * reachable from the YouTube iframe; the worst such a call could do is move the playlist on.
+     */
+    private inner class YoutubeBridge {
+        @android.webkit.JavascriptInterface
+        fun duration(token: Long, sec: Double) {
+            mainHandler.post { if (token == mountGeneration && currentType == MediaType.YOUTUBE) onYoutubeLength(sec) }
+        }
+
+        @android.webkit.JavascriptInterface
+        fun ended(token: Long) {
+            mainHandler.post { if (token == mountGeneration && currentType == MediaType.YOUTUBE) onYoutubeEnded() }
+        }
+    }
+    private var youtubeBridgeInstalled = false
     private var exoPlayer: ExoPlayer? = null
     private var currentType: MediaType = MediaType.NONE
     // The URL the widget WebView currently has loaded, so re-showing the same widget can be a
@@ -496,8 +519,8 @@ class MediaPlayerManager(
         youtubeWebView?.loadUrl("about:blank")
     }
 
-    fun playYoutube(embedUrl: String, durationSec: Int = 0, muted: Boolean = false) {
-        Log.i("MediaPlayerManager", "Playing YouTube: $embedUrl (muted=$muted)")
+    fun playYoutube(embedUrl: String, durationSec: Int = 0, muted: Boolean = false, playToEnd: Boolean = false) {
+        Log.i("MediaPlayerManager", "Playing YouTube: $embedUrl (muted=$muted, playToEnd=$playToEnd)")
         mountGeneration++
         stopLiveInputIfPlaying()
         currentType = MediaType.YOUTUBE
@@ -513,9 +536,12 @@ class MediaPlayerManager(
         youtubeWebView?.apply {
             com.remotedisplay.player.util.WebViewSupport.configure(this, "YouTube", webLoadState)
             setBackgroundColor(android.graphics.Color.BLACK)
+            // Installed once; it takes effect from the next page load, which is the one below.
+            if (!youtubeBridgeInstalled) { addJavascriptInterface(YoutubeBridge(), PlayToEnd.BRIDGE); youtubeBridgeInstalled = true }
             // Load via an embed wrapper with a valid youtube.com origin (Error 153 fix).
             // #129: initial mute comes from the per-item flag (no longer hardcoded).
-            val html = com.remotedisplay.player.util.WebViewSupport.youtubeEmbedHtml(embedUrl, youtubeMuted)
+            // #624: a play-to-end page reports back under this mount's generation.
+            val html = com.remotedisplay.player.util.WebViewSupport.youtubeEmbedHtml(embedUrl, youtubeMuted, if (playToEnd) mountGeneration else null)
             if (html != null) loadDataWithBaseURL(com.remotedisplay.player.util.WebViewSupport.EMBED_BASE, html, "text/html", "UTF-8", null)
             else loadUrl(embedUrl)
         }
@@ -956,6 +982,33 @@ class MediaPlayerManager(
         videoLooping = loop
         exoPlayer?.repeatMode = if (loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         preloadPlayer?.repeatMode = if (loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+    }
+
+    /**
+     * 3.0 TV-safe video: turn the video view back by [deg] (90 / 270) inside the rotated stage, so a
+     * file the operator already turned for portrait screens fills the physical [screenW]x[screenH]
+     * panel upright instead of being turned a second time. 0 restores the normal full-stage view.
+     * The view is sized to the SCREEN and centred on the stage (which is [screenH]x[screenW] when
+     * swapped); rotating about its own centre then cancels the stage's turn exactly.
+     */
+    fun setVideoCounterTurn(deg: Float, screenW: Int, screenH: Int) {
+        val lp = playerView.layoutParams ?: return
+        if (deg == 0f) {
+            if (playerView.rotation == 0f && lp.width == android.view.ViewGroup.LayoutParams.MATCH_PARENT) return
+            lp.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            lp.height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            playerView.layoutParams = lp
+            playerView.rotation = 0f
+            playerView.translationX = 0f
+            playerView.translationY = 0f
+            return
+        }
+        lp.width = screenW
+        lp.height = screenH
+        playerView.layoutParams = lp
+        playerView.translationX = (screenH - screenW) / 2f
+        playerView.translationY = (screenW - screenH) / 2f
+        playerView.rotation = -deg
     }
 
     /**

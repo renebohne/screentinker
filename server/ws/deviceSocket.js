@@ -8,9 +8,15 @@ const config = require('../config');
 const heartbeat = require('../services/heartbeat');
 const bootDefer = require('../lib/boot-defer');   // 2.0.1 first-boot player defer
 const enrolKey = require('../lib/enrol-key');     // #313 URL-carried display identity
+const mirrors = require('../lib/mirrors');         // 3.0 display-link mirrors
+// A display whose socket has sent nothing for this long is treated as going away (players beat every
+// 15s): a new opening replaces it rather than becoming its mirror.
+const MIRROR_LIVE_MS = 40 * 1000;
 const liveness = require('../lib/liveness'); // v4 core pass: pure ack/liveness/identity helpers
 const commandQueue = require('../lib/command-queue');
 const nowPlaying = require('../lib/now-playing');
+// 3.0 screen verification: judges the screenshots that pass through ingestScreenshot below.
+const screenVerify = require('../lib/screen-verify');
 const reconnectThrottle = require('../lib/reconnect-throttle');
 const contentAckLimiter = require('../lib/content-ack-limiter');
 const statusLogWriter = require('../lib/status-log-writer');
@@ -127,6 +133,21 @@ const _insertPlay = db.prepare(`
   INSERT INTO play_logs (device_id, content_id, widget_id, zone_id, content_name, started_at, trigger_type, workspace_id)
   VALUES (?, ?, ?, ?, ?, ?, 'playlist', (SELECT workspace_id FROM devices WHERE id = ?))
 `);
+
+/*
+ * 3.0 campaigns (lib/campaign.js): a layout step's own proof-of-play row, and the layout a zone
+ * item played in. The layout must be one this device's workspace may show (its own, or a template):
+ * a player cannot attribute plays to another tenant's layout by naming its id.
+ */
+// Prepared on first use, not at load: a hand-built test schema without play_logs.layout_id must
+// still be able to load this module.
+const _layoutForPlay = { get: (...a) => db.prepare(`SELECT l.id, l.name FROM layouts l WHERE l.id = ?
+  AND (l.is_template = 1 OR l.workspace_id = (SELECT workspace_id FROM devices WHERE id = ?))`).get(...a) };
+const _insertLayoutPlay = { run: (...a) => db.prepare(`
+  INSERT INTO play_logs (device_id, content_id, widget_id, zone_id, content_name, started_at, trigger_type, workspace_id, layout_id)
+  VALUES (?, NULL, NULL, NULL, ?, ?, 'layout', (SELECT workspace_id FROM devices WHERE id = ?), ?)
+`).run(...a) };
+const lastLayoutLogAt = new Map();
 
 /* Close by rowid — the whole point of remembering it. */
 const _closePlayById = db.prepare(`
@@ -311,10 +332,28 @@ function validateDeviceToken(deviceId, token) {
   }
 }
 
+/*
+ * 3.0: the device's address, resolved with the SAME trust list Express uses for req.ip
+ * (config/cloudflareIps trustedProxies). This used to take the first X-Forwarded-For entry from
+ * anyone, so a device could claim 127.0.0.1 — and devices.ip_address being loopback is what tells
+ * a server-on-a-player that this is its own screen and lets the dashboard capture the host's
+ * framebuffer for it (dashboardSocket bsCapture.isLoopback). Now a forwarded address counts only
+ * when it arrived through a proxy we trust; a direct connection is its peer address.
+ */
+let _trustProxy = null;
 function getClientIp(socket) {
+  const peer = socket.handshake.address;
   const forwarded = socket.handshake.headers['x-forwarded-for'];
-  if (forwarded) return forwarded.split(',')[0].trim();
-  return socket.handshake.address;
+  if (!forwarded) return peer;
+  try {
+    if (!_trustProxy) {
+      const proxyaddr = require('proxy-addr');
+      _trustProxy = proxyaddr.compile(require('../config/cloudflareIps').trustedProxies);
+    }
+    return require('proxy-addr')({ connection: { remoteAddress: peer }, headers: { 'x-forwarded-for': forwarded } }, _trustProxy);
+  } catch {
+    return peer;
+  }
 }
 
 // #146: route status transitions through the batched, coalescing writer instead of
@@ -490,7 +529,8 @@ function refreshWidgetRevs(assignments, deviceId = null) {
  * revision stable and truthful rather than collapsing every new upload onto the same "0".
  */
 const contentFactsOf = db.prepare(`
-  SELECT COALESCE(NULLIF(updated_at, 0), created_at) AS rev, filepath, mime_type, file_size, bundle_entry
+  SELECT COALESCE(NULLIF(updated_at, 0), created_at) AS rev, filepath, mime_type, file_size, bundle_entry,
+         width, height, video_prerotated
     FROM content WHERE id = ?
 `);
 function refreshContentRevs(assignments) {
@@ -514,6 +554,12 @@ function refreshContentRevs(assignments) {
        * different start file. A player holding the old one would load a page that is no longer
        * there. */
       if (row.bundle_entry != null) a.bundle_entry = row.bundle_entry;
+      /* 3.0 TV-safe video (lib/video-variants.js): the asset's display size, so a player can tell a
+       * tall video from a wide one before it opens it, and the operator's "already rotated for
+       * portrait screens" flag, which tells a portrait screen to play the file as-is. Read here,
+       * at send time, so neither needs a republish. */
+      if (row.width > 0 && row.height > 0) { a.width = row.width; a.height = row.height; }
+      if (Number(row.video_prerotated) === 1) a.video_prerotated = 1; else delete a.video_prerotated;
     } catch (_) { /* keep published */ }
   }
 }
@@ -551,7 +597,52 @@ function stampFileUrls(items, deviceId) {
 
 const { triggersForDevice, projectTrigger } = require('../lib/device-triggers');
 
-function buildPlaylistPayloadUnchecked(deviceId) {
+/*
+ * `opts` is for the "what will this screen show at…" preview (lib/device-simulate.js) ONLY. Every
+ * delivery path calls this with no options and gets exactly what it always got:
+ *   - resolved: { playlist_id, source, layout_id, scheduled_layout_id } — what the resolver view
+ *     WOULD say at the simulated instant, in place of what it says now (the scheduler writes the
+ *     schedule columns on its tick; a forecast cannot wait for a tick that has not happened);
+ *   - forecast: true — leave out the LIVE-ONLY overrides (an emergency alert, a CAP feed, an
+ *     automation override). They are states of the present, not rules about the future, and the
+ *     preview reports them separately rather than projecting them forward;
+ *   - weather: a reading that replaces the cached one for weather conditions ("and if it rains?");
+ *   - trace: an object the builder fills with what it left out (items this player cannot play, and
+ *     the items before the weather/area filter), so the preview can say WHY rather than guess.
+ */
+/*
+ * 3.0 display-link mirrors (lib/mirrors.js): a mirror follows its original — playlist, layout,
+ * schedules, power schedule, background, orientation, overrides, everything about CONTENT is the
+ * original's, resolved at payload time like a group member inherits its group's. What stays the
+ * mirror's own is what belongs to a physical screen in one place:
+ *   - wall_config: the mirror is not a tile of the original's wall and never gets its wall:sync;
+ *   - trigger_config / local_api: LAN listener secrets for the original's network, not this one;
+ *   - site_cache: a token minted for the original's LAN box;
+ *   - audience: counted per screen.
+ * Capability filtering is the original's (the mirror is nearly always a browser showing a browser's
+ * link). `mirror_of` is additive; players ignore it.
+ */
+function asMirrorPayload(p, mirrorId, sourceId) {
+  if (!p || typeof p !== 'object' || p.suspended) return p;
+  p.wall_config = null;
+  p.trigger_config = null;
+  p.local_api = null;
+  delete p.site_cache;
+  try { p.audience = require('../lib/audience').payloadConfig(mirrorId); } catch (e) { p.audience = null; }
+  p.mirror_of = sourceId;
+  return p;
+}
+
+function buildPlaylistPayloadUnchecked(deviceId, opts = {}) {
+  if (!opts._mirrorHop) {
+    const mirrorSource = require('../lib/mirrors').sourceOf(deviceId);
+    if (mirrorSource) {
+      // A forecast's `resolved` describes the MIRROR's own (empty) resolution, which a mirror never
+      // plays; the original's is resolved afresh.
+      const { resolved, ...rest } = opts;
+      return asMirrorPayload(buildPlaylistPayloadUnchecked(mirrorSource, { ...rest, _mirrorHop: true }), deviceId, mirrorSource);
+    }
+  }
   /*
    * ⚠️ playlist_id comes from the RESOLVER, not from the devices row.
    *
@@ -575,9 +666,18 @@ function buildPlaylistPayloadUnchecked(deviceId) {
       d.trigger_udp_port, d.trigger_multicast_group, d.trigger_clear_all_token,
       d.local_api_enabled, d.local_api_secret,
       d.default_content_id, d.workspace_id, d.latitude, d.longitude,
-      d.capabilities, d.platform, d.android_version, d.client_type
+      d.capabilities, d.platform, d.android_version, d.client_type,
+      d.screen_width, d.screen_height, -- 3.0: which orientation version of a layout this screen gets
+      d.id -- an experiment's per-screen variant condition (lib/local-conditions 'screens') needs it
       FROM devices d JOIN device_resolved_playlist r ON r.device_id = d.id
       WHERE d.id = ?`).get(deviceId);
+  if (device && opts.resolved) {
+    device.playlist_id = opts.resolved.playlist_id ?? null;
+    device.playlist_source = opts.resolved.source ?? null;
+    device.layout_id = opts.resolved.layout_id ?? null;
+  }
+  const trace = opts.trace && typeof opts.trace === 'object' ? opts.trace : null;
+  if (trace) trace.unsupported = [];
 
   /*
    * P2 (additive): a live item must never reach a device that cannot decode it. HLS (video/hls) is
@@ -595,20 +695,25 @@ function buildPlaylistPayloadUnchecked(deviceId) {
   // A hold (lib/hold-item.js) is not live, but it rides the same strip for the same reason: a player
   // that does not know it would skip it, and skipping a hold silently shortens a timeline.
   const deviceSupportsHold = capsLib.supports(device, 'playback.hold');
-  const dropLiveIfUnsupported = (items) => {
+  // `sink` (preview trace only) collects what was left out; the base playlist passes it, triggers don't.
+  const dropLiveIfUnsupported = (items, sink = null) => {
     if (!Array.isArray(items) || (deviceSupportsHls && deviceSupportsRtsp && deviceSupportsHdmiIn && deviceSupportsHold)) return items;
     return items.filter((a) => {
       if (!a) return true;
-      if (a.mime_type === 'video/hls') return deviceSupportsHls;
-      if (a.mime_type === 'video/rtsp') return deviceSupportsRtsp;
-      if (a.mime_type === 'video/hdmi-in') return deviceSupportsHdmiIn;
-      if (a.mime_type === 'application/x-st-hold') return deviceSupportsHold;
-      return true;
+      let keep = true;
+      if (a.mime_type === 'video/hls') keep = deviceSupportsHls;
+      else if (a.mime_type === 'video/rtsp') keep = deviceSupportsRtsp;
+      else if (a.mime_type === 'video/hdmi-in') keep = deviceSupportsHdmiIn;
+      else if (a.mime_type === 'application/x-st-hold') keep = deviceSupportsHold;
+      if (!keep && sink) sink.push(a);
+      return keep;
     });
   };
+  const baseSink = trace ? trace.unsupported : null;
 
   let assignments = [];
   let playback_order = 'sequential';
+  let campaignRaw = null;
   /*
    * ⚠️ CORPORATE: a head office mandate drives this screen (source 'corporate', with or without a
    * playlist — a DARK mandate has none). Three things differ from an ordinary payload:
@@ -633,7 +738,7 @@ function buildPlaylistPayloadUnchecked(deviceId) {
    * One Map.size test when nothing is live (lib/corporate/emergency-live.js).
    */
   let emergencyNow = null;
-  try { emergencyNow = require('../lib/corporate/emergency-live').activationFor(db, deviceId); } catch (e) {
+  if (!opts.forecast) try { emergencyNow = require('../lib/corporate/emergency-live').activationFor(db, deviceId); } catch (e) {
     console.warn(`[emergency] activation check failed for ${deviceId}: ${e && e.message}`);
     emergencyNow = null;
   }
@@ -643,7 +748,7 @@ function buildPlaylistPayloadUnchecked(deviceId) {
    * office's own alert outranks it. One Map.size test when nothing is live anywhere.
    */
   let capNow = null;
-  if (!emergencyNow) {
+  if (!emergencyNow && !opts.forecast) {
     try { capNow = require('../lib/cap/feeds').overrideFor(db, deviceId); } catch (e) {
       console.warn(`[cap] override check failed for ${deviceId}: ${e && e.message}`);
       capNow = null;
@@ -656,7 +761,7 @@ function buildPlaylistPayloadUnchecked(deviceId) {
    * a head office (corporate) playlist — automation is not a way round a locked playlist.
    */
   let hookNow = null;
-  if (!overrideNow && !corporateSource) {
+  if (!overrideNow && !corporateSource && !opts.forecast) {
     try { hookNow = require('../lib/automation/overrides').overrideFor(db, deviceId); } catch (e) {
       console.warn(`[automation] override check failed for ${deviceId}: ${e && e.message}`);
       hookNow = null;
@@ -719,14 +824,29 @@ function buildPlaylistPayloadUnchecked(deviceId) {
     }
     refreshWidgetRevs(assignments, deviceId);
     refreshContentRevs(assignments);   // re-stamps a.mime_type, so strip live AFTER it
-    assignments = dropLiveIfUnsupported(assignments);
+    assignments = dropLiveIfUnsupported(assignments, baseSink);
   } else if (device?.playlist_id) {
     const playlist = db.prepare('SELECT published_snapshot, published_playback_order, workspace_id FROM playlists WHERE id = ?').get(device.playlist_id);
+    // 3.0 campaigns (lib/campaign.js): the stored structure, read only for a player that can use it.
+    if (playlist && capsLib.supports(device, 'layout.campaign')) {
+      try { campaignRaw = (db.prepare('SELECT published_campaign FROM playlists WHERE id = ?').get(device.playlist_id) || {}).published_campaign || null; }
+      catch (_) { campaignRaw = null; }   // pre-migration schema
+    }
     if (playlist?.published_snapshot) {
       try { assignments = JSON.parse(playlist.published_snapshot); } catch (e) { assignments = []; }
+      /*
+       * 3.0 auto-translate (lib/sign-translate.js): a screen set to a language plays the approved
+       * translation of a slide in place of the original, or after it when rotating. Ordinary
+       * playlists only — head office, emergency and automation playlists play as published — and
+       * never fatal: the loop as published is always the fallback.
+       */
+      if (device.workspace_id) {
+        try { assignments = require('../lib/sign-translate').applyScreenLanguage(db, deviceId, device.workspace_id, assignments); }
+        catch (e) { console.warn(`[translate] screen language skipped for ${deviceId}: ${e && e.message}`); }
+      }
       refreshWidgetRevs(assignments, deviceId);
       refreshContentRevs(assignments);   // re-stamps a.mime_type, so strip live AFTER it
-      assignments = dropLiveIfUnsupported(assignments);
+      assignments = dropLiveIfUnsupported(assignments, baseSink);
     }
     if (playlist && playlist.published_playback_order) playback_order = playlist.published_playback_order;
   }
@@ -815,10 +935,13 @@ function buildPlaylistPayloadUnchecked(deviceId) {
 
   let layout = null;
   if (device?.layout_id && !overrideNow && !hookNow) {
-    layout = db.prepare('SELECT * FROM layouts WHERE id = ?').get(device.layout_id);
-    if (layout) {
-      layout.zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(layout.id);
-    }
+    /*
+     * The layout the resolver chose (the device's, a schedule's, its playlist's, or head office's),
+     * in the version for THIS screen's shape: a portrait screen gets the portrait version when the
+     * layout has one, else the default geometry exactly as before (lib/layout-variants.js).
+     */
+    layout = require('../lib/playlist-layout').layoutForPayload(db, device.layout_id,
+      require('../lib/layout-variants').canvasVariant(device));
   }
 
   // Wall membership flips the player into wall mode. The renderer needs two
@@ -891,12 +1014,14 @@ function buildPlaylistPayloadUnchecked(deviceId) {
        */
       // A wall schedule's layout (devices.scheduled_layout_id — only wall schedules set it on a
       // panel, see services/scheduler.js) is the wall's layout while it runs.
-      const scheduledWallLayout = db.prepare('SELECT scheduled_layout_id FROM devices WHERE id = ?').get(deviceId)?.scheduled_layout_id || null;
+      const scheduledWallLayout = opts.resolved
+        ? (opts.resolved.scheduled_layout_id || null)
+        : (db.prepare('SELECT scheduled_layout_id FROM devices WHERE id = ?').get(deviceId)?.scheduled_layout_id || null);
       const wallLayoutId = scheduledWallLayout || wall.layout_id;
       if (wallLayoutId && !overrideNow && !hookNow && !corporateSource) {
-        const wl = db.prepare('SELECT * FROM layouts WHERE id = ?').get(wallLayoutId);
+        // A wall's own geometry: never an orientation version (the wall is the canvas, not a panel).
+        const wl = require('../lib/playlist-layout').layoutForPayload(db, wallLayoutId, null);
         if (wl) {
-          wl.zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(wl.id);
           const wallLayout = require('../lib/wall-layout');
           if (wallLayout.isZonedLayout(wl)) {
             layout = wl;
@@ -984,9 +1109,13 @@ function buildPlaylistPayloadUnchecked(deviceId) {
   }
   stampFileUrls(assignments, deviceId);
   if (default_content) stampFileUrls([default_content], deviceId);
+  // 3.0 TV-safe video: ready copies of tall videos, and for a screen that plays them, queue a missing
+  // one now. Never from the forecast preview, which must not spend CPU on a "what if".
+  try { require('../lib/video-variants').stampItems(assignments, device, { lazy: !opts.forecast }); } catch (_) { /* keep the payload playable */ }
 
   // Weather and area conditions are decided here, for this screen (lib/local-conditions.js).
-  assignments = require('../lib/local-conditions').filterItems(assignments, device);
+  if (trace) trace.before_local = assignments;
+  assignments = require('../lib/local-conditions').filterItems(assignments, device, opts.weather || undefined);
   const assembled = assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', background_color: device?.background_color || null, workspace_id: device?.workspace_id || null, wall_config, group_sync, timezone, triggers, trigger_config, local_api, playback_order, default_content, power_schedule, endpoints: deviceEndpoints });
   /*
    * Audience counting (lib/audience.js). Top-level and outside the item list, so switching it on or
@@ -994,6 +1123,32 @@ function buildPlaylistPayloadUnchecked(deviceId) {
    * missed the change still stops counting on its next payload.
    */
   assembled.audience = require('../lib/audience').payloadConfig(deviceId);
+  /*
+   * 3.0 CAMPAIGNS (lib/campaign.js, docs/layouts-and-campaigns.md): a player that declares
+   * layout.campaign also gets the structure — whole layouts switching with full-screen items — while
+   * `assignments` above stays the documented fallback. Every zone item goes through the same
+   * per-item pipeline as a playlist item (revisions, unsupported-media strip, weather/area, file URLs,
+   * data-source bag). Not on a wall or in a synced group (both run one shared item clock) and never
+   * under an emergency or automation override: those play the fallback. Never fatal.
+   */
+  if (campaignRaw && !wall_config && !group_sync && !overrideNow && !hookNow) {
+    try {
+      const processList = (list) => {
+        let l = Array.isArray(list) ? list : [];
+        refreshWidgetRevs(l, deviceId);
+        refreshContentRevs(l);
+        l = dropLiveIfUnsupported(l);
+        stampFileUrls(l, deviceId);
+        l = require('../lib/local-conditions').filterItems(l, device, opts.weather || undefined);
+        attachDataSourceBag(l, device.workspace_id || null);
+        return l;
+      };
+      const c = require('../lib/campaign').payloadCampaign(db, JSON.parse(campaignRaw), device, processList);
+      if (c) assembled.campaign = c;
+    } catch (e) {
+      console.warn(`[campaign] structure for ${deviceId} skipped: ${e && e.message}`);
+    }
+  }
   /*
    * The zone's UTC-offset table (lib/tz-table.js), for a player with no time-zone database of its
    * own (the Roku) — so it evaluates schedules and power windows in the zone `timezone` names, not
@@ -1013,6 +1168,21 @@ function buildPlaylistPayloadUnchecked(deviceId) {
    * a frame whose seconds stand still. Keyed by zone; only zones that are real and differ from the
    * screen's own; absent when there are none.
    */
+  /*
+   * 3.0 site cache (lib/site-cache/origin.js): where this screen's LAN cache is, a token for it, and
+   * the sha256 of each asset it may fetch from there. ONLY for a player that declares net.site_cache
+   * and only when one is assigned, so every other payload stays byte-for-byte what it was. Never in a
+   * forecast (the preview has no screen to hand a token to). Never fatal: a payload without it plays
+   * from this server exactly as before.
+   */
+  if (!opts.forecast && device && capsLib.supports(device, 'net.site_cache')) {
+    try {
+      const sc = require('../lib/site-cache/origin').payloadFor(db, deviceId, device, assembled);
+      if (sc) assembled.site_cache = sc;
+    } catch (e) {
+      console.warn(`[site-cache] payload for ${deviceId} failed: ${e && e.message}`);
+    }
+  }
   if (capsLib.supports(device, 'clock.tz_table')) {
     const zones = new Set();
     for (const it of Array.isArray(assembled.assignments) ? assembled.assignments : []) {
@@ -1290,6 +1460,12 @@ function buildPlaylistPayload(deviceId) {
   if (!access.allowed) {
     return { assignments: [], suspended: true, reason: access.reason, message: access.message, detail: access.detail };
   }
+  // A mirror is held to its own place in the plan (above) AND goes dark with its original.
+  const mirrorSource = require('../lib/mirrors').sourceOf(deviceId);
+  if (mirrorSource) {
+    const src = checkDeviceAccess(mirrorSource);
+    if (!src.allowed) return { assignments: [], suspended: true, reason: src.reason, message: src.message, detail: src.detail };
+  }
   return buildPlaylistPayloadUnchecked(deviceId);
 }
 
@@ -1371,6 +1547,25 @@ function persistIdentity(deviceId, data) {
  */
 let _dashboardNsRef = null;
 let _deviceNsRef = null;   // same idea, for the offline applier's wall re-push
+
+// The one row per screen in `screenshots`, and its file. Never throws.
+const SCREENSHOT_PERSIST_MS = 5 * 60 * 1000;
+const screenshotPersistedAt = new Map();   // deviceId -> ms of the last disk write (bounded: deleted on offline)
+function persistScreenshot(deviceId, imageB64) {
+  try {
+    const filename = `${deviceId}_latest.jpg`;
+    fs.writeFileSync(path.join(config.screenshotsDir, filename), Buffer.from(imageB64, 'base64'));
+    const existing = db.prepare('SELECT id FROM screenshots WHERE device_id = ?').get(deviceId);
+    if (existing) {
+      db.prepare('UPDATE screenshots SET filepath = ?, captured_at = strftime(\'%s\',\'now\') WHERE device_id = ?').run(filename, deviceId);
+    } else {
+      db.prepare('INSERT INTO screenshots (device_id, filepath) VALUES (?, ?)').run(deviceId, filename);
+    }
+  } catch (e) {
+    console.error('Failed to save screenshot:', e.message);
+  }
+}
+
 function ingestScreenshot(deviceId, imageB64) {
   if (!deviceId || !imageB64) return false;
   // Same cap as the socket path enforced: max 2MB base64 (~1.5MB image).
@@ -1379,6 +1574,19 @@ function ingestScreenshot(deviceId, imageB64) {
 
   if (!lastScreenshots) lastScreenshots = {};
   lastScreenshots[deviceId] = imageB64;
+  /*
+   * 3.0: also keep it on disk now and then while the screen is ONLINE. It used to be written only
+   * when the screen went offline, so a screen that had never disconnected — a new display-link
+   * mirror above all, which runs for days — had no `screenshots` row: the card said "No preview
+   * available" and the list carried no screenshot_at until it next dropped off. The first frame is
+   * kept at once, then at most one write per SCREENSHOT_PERSIST_MS (the 1 fps live view must not
+   * become a disk write a second).
+   */
+  const last = screenshotPersistedAt.get(deviceId) || 0;
+  if (Date.now() - last >= SCREENSHOT_PERSIST_MS) {
+    screenshotPersistedAt.set(deviceId, Date.now());
+    persistScreenshot(deviceId, imageB64);
+  }
 
   try {
     emitToDeviceWorkspace(_dashboardNsRef, deviceId, 'dashboard:screenshot-ready', {
@@ -1389,6 +1597,8 @@ function ingestScreenshot(deviceId, imageB64) {
   } catch (err) {
     console.error('Screenshot relay error:', err);
   }
+  // Screen verification looks at the same frame. Throttled and off-thread inside; never throws.
+  try { screenVerify.noteFrame(deviceId, imageB64); } catch (_) { /* verification is best-effort */ }
   return true;
 }
 
@@ -1418,6 +1628,8 @@ const EVENT_APPLIERS = Object.freeze({
   'info'(deviceId, data, ctx) {
     const di = data && data.device_info;
     if (di) { try { applyDeviceInfo(deviceId, di); } catch (e) { /* never crash the socket on a bad info blob */ } }
+    // Optional panel state (power / input), for a player that can ask its panel. See lib/screen-verify.
+    if (di && di.panel) { try { screenVerify.notePanelReport(deviceId, di.panel); } catch (_) { /* best effort */ } }
   },
 
   'trigger-status'(deviceId, data, ctx) {
@@ -1461,6 +1673,8 @@ const EVENT_APPLIERS = Object.freeze({
     // goes dark until a human reloads it; that happened to a live screen. A heartbeat for a
     // device that no longer exists is not worth killing a connection over — skip the write and
     // let the register path answer with unpaired, which is what actually helps it recover.
+    // Optional panel state (power / input) for screen verification; no column of its own here.
+    if (telemetry && telemetry.panel) { try { screenVerify.notePanelReport(device_id, telemetry.panel); } catch (_) { /* best effort */ } }
     if (telemetry && deviceExists(device_id)) {
       db.prepare(`
         INSERT INTO device_telemetry (device_id, battery_level, battery_charging, storage_free_mb, storage_total_mb,
@@ -1695,6 +1909,8 @@ const EVENT_APPLIERS = Object.freeze({
       db.prepare("INSERT INTO device_events (device_id, type, reason, detail) VALUES (?, ?, ?, ?)")
         .run(deviceId, type, reason ? String(reason).slice(0, 64) : null, detail ? String(detail).slice(0, 500) : null);
     } catch (_) { /* incident feed is best-effort; never crash the socket */ }
+    // display_on / display_off is the panel power signal screen verification uses where nothing better is reported.
+    try { screenVerify.noteDisplayEvent(deviceId, type, reason ? String(reason).slice(0, 64) : null); } catch (_) { /* best effort */ }
   },
 
   /*
@@ -1773,6 +1989,7 @@ const EVENT_APPLIERS = Object.freeze({
         // View-only viewers join the screen where it is (lib/now-playing.js). Before the throttle:
         // a viewer needs every start, proof-of-play does not.
         nowPlaying.noteStart(device_id, { content_id, widget_id, zone_id }, eventTimeMs(data, ctx));
+        try { screenVerify.notePlayStart(device_id, { content_id, widget_id, zone_id }, eventTimeMs(data, ctx)); } catch (_) { /* best effort */ }
         // Throttle proof-of-play inserts per device so a runaway player
         // (0-second items) can't flood play_logs. Skipped cycles simply
         // don't create a row; the dashboard progress event below still fires.
@@ -1804,6 +2021,10 @@ const EVENT_APPLIERS = Object.freeze({
           // (better-sqlite3 refuses positional .run() against ?1-style placeholders, so the
           // parameter cannot simply be reused by number.)
           const info = _insertPlay.run(device_id, cid, wid, zone_id || null, content_name || 'Unknown', Math.floor(nowMs / 1000), device_id);
+          // 3.0 campaigns: which layout this zone item played in (sent only by campaign players).
+          if (data.layout_id && typeof data.layout_id === 'string') {
+            try { if (_layoutForPlay.get(data.layout_id, device_id)) db.prepare('UPDATE play_logs SET layout_id = ? WHERE rowid = ?').run(data.layout_id, info.lastInsertRowid); } catch (_) { /* pre-migration */ }
+          }
           /*
            * ⚠️ #307: REMEMBER THE ROW WE JUST OPENED.
            *
@@ -1859,6 +2080,20 @@ const EVENT_APPLIERS = Object.freeze({
           duration_sec: typeof duration_sec === 'number' && duration_sec > 0 ? duration_sec : null,
           started_at: Date.now(),
         });
+      } else if (event === 'layout_start') {
+        /*
+         * 3.0 campaigns: a whole layout went on screen for a campaign step. Its own row (trigger_type
+         * 'layout', named after the layout), throttled like play_start but on its own clock, so a
+         * layout switch and the first zone item starting in the same second both count.
+         */
+        const nowMs = eventTimeMs(data, ctx);
+        if (nowMs - (lastLayoutLogAt.get(device_id) || 0) >= PLAY_LOG_MIN_GAP_MS && typeof data.layout_id === 'string') {
+          const l = _layoutForPlay.get(data.layout_id, device_id);
+          if (l) {
+            lastLayoutLogAt.set(device_id, nowMs);
+            try { _insertLayoutPlay.run(device_id, l.name || 'Layout', Math.floor(nowMs / 1000), device_id, l.id); } catch (_) { /* pre-migration */ }
+          }
+        }
       } else if (event === 'play_offline') {
         /*
          * #299 BACKFILL. A player that kept playing while the socket was down replays what it
@@ -1986,6 +2221,8 @@ const EVENT_APPLIERS = Object.freeze({
     logDeviceStatus(deviceId, 'offline', finalReason, null);
     // Offline-cause log: also record the transition in the unified incident feed.
     try { db.prepare("INSERT INTO device_events (device_id, type, reason, detail) VALUES (?, 'offline', ?, NULL)").run(deviceId, finalReason); } catch (_) { /* incident feed is best-effort */ }
+    // Offline alerts take over; an open screen-verification incident closes rather than double-paging.
+    try { screenVerify.noteOffline(deviceId); } catch (_) { /* best effort */ }
     emitToDeviceWorkspace(_dashboardNsRef, deviceId, 'dashboard:device-status', { device_id: deviceId, status: 'offline', liveness: 'offline', offline_reason: _off.offline_reason || 'silent', offline_detail: _off.offline_detail || null, client_type: _off.client_type || null });
 
     // If this device was leading a wall, reassign leadership to the next
@@ -2013,21 +2250,10 @@ const EVENT_APPLIERS = Object.freeze({
     // Save last screenshot to disk as offline snapshot
     const lastB64 = lastScreenshots[deviceId];
     if (lastB64) {
-      try {
-        const filename = `${deviceId}_latest.jpg`;
-        const buffer = Buffer.from(lastB64, 'base64');
-        fs.writeFileSync(path.join(config.screenshotsDir, filename), buffer);
-        const existing = db.prepare('SELECT id FROM screenshots WHERE device_id = ?').get(deviceId);
-        if (existing) {
-          db.prepare('UPDATE screenshots SET filepath = ?, captured_at = strftime(\'%s\',\'now\') WHERE device_id = ?').run(filename, deviceId);
-        } else {
-          db.prepare('INSERT INTO screenshots (device_id, filepath) VALUES (?, ?)').run(deviceId, filename);
-        }
-      } catch (e) {
-        console.error('Failed to save offline screenshot:', e.message);
-      }
+      persistScreenshot(deviceId, lastB64);
       delete lastScreenshots[deviceId];
     }
+    screenshotPersistedAt.delete(deviceId);
   },
 
   /*
@@ -2047,7 +2273,7 @@ const EVENT_APPLIERS = Object.freeze({
     applyHardwareIdentity(deviceId, d);
     applyCapabilities(deviceId, d);
     heartbeat.registerConnection(deviceId, ctx.closingSocketId || `mesh:${ctx.nodeId}`);
-    if (!d.refresh) { heartbeat.recordReconnect(deviceId); persistIdentity(deviceId, d); }
+    if (!d.refresh) { heartbeat.recordReconnect(deviceId); screenVerify.noteReconnect(deviceId); persistIdentity(deviceId, d); }
     logDeviceStatus(deviceId, 'online');
     emitToDeviceWorkspace(_dashboardNsRef, deviceId, 'dashboard:device-status', { device_id: deviceId, status: 'online', liveness: heartbeat.livenessFor(deviceId), attached_node_id: ctx.nodeId || null });
     // Commands queued while the screen was away go through the relay; the playlist does not.
@@ -2069,6 +2295,18 @@ module.exports = function setupDeviceSocket(io) {
   const deviceNs = io.of('/device');
   _dashboardNsRef = io.of('/dashboard');   // so ingestScreenshot() can relay from an HTTP route too
   _deviceNsRef = deviceNs;
+  /*
+   * Screen verification asks for its own occasional screenshot, through exactly the path the
+   * dashboard's button uses (dashboardSocket 'dashboard:request-screenshot'): only to a screen
+   * connected to THIS node, and only one that declares remote.screenshot (the caller checks).
+   * Its state changes go to the device's own workspace room, like every other device event.
+   */
+  screenVerify.setRequester((deviceId) => {
+    if (!heartbeat.getConnection(deviceId)) return false;
+    deviceNs.to(deviceId).emit('device:screenshot-request', {});
+    return true;
+  });
+  screenVerify.setEmitter((deviceId, payload) => emitToDeviceWorkspace(_dashboardNsRef, deviceId, 'dashboard:verification-state', payload));
   const dashboardNs = io.of('/dashboard');
 
 
@@ -2086,6 +2324,36 @@ module.exports = function setupDeviceSocket(io) {
       evictedSockets.add(prior.socketId);
       try { oldSocket.disconnect(true); } catch (_) { evictedSockets.delete(prior.socketId); }
     }
+  }
+
+  /*
+   * 3.0 mirrors: what a `?k=` register for display `originalId` from install `fingerprint` is.
+   * { mirror, created } | { refused } | {} (= the original itself, today's path).
+   */
+  function mirrorDecision(originalId, fingerprint, socket) {
+    if (!fingerprint || typeof fingerprint !== 'string') return {};
+    const own = mirrors.findMirror(originalId, fingerprint);
+    if (own) return { mirror: own };
+    const conn = heartbeat.getConnection(originalId);
+    const incumbent = conn && conn.socketId !== socket.id ? deviceNs.sockets.get(conn.socketId) : null;
+    if (!incumbent) return {};
+    // A socket that has gone quiet is a dying one (a reboot, a vMix restart): replace it, as ever.
+    if (!(Date.now() - (conn.lastHeartbeat || 0) < MIRROR_LIVE_MS)) return {};
+    const theirs = incumbent.data && incumbent.data.stFingerprint;
+    if (!theirs || theirs === fingerprint) return {};
+    const original = db.prepare('SELECT * FROM devices WHERE id = ?').get(originalId);
+    if (!original || original.mirror_of) return {};   // links always point at an original
+    const out = mirrors.createMirror(original, {
+      fingerprint, userAgent: socket.handshake && socket.handshake.headers && socket.handshake.headers['user-agent'], ip: getClientIp(socket),
+    });
+    if (out.refused) return { refused: out.refused };
+    try {
+      require('../lib/audit').audit('device.mirror_created', { deviceId: out.mirror.id, workspaceId: original.workspace_id,
+        ip: getClientIp(socket), details: { mirror_of: original.id, location: out.mirror.mirror_location } });
+      emitToDeviceWorkspace(dashboardNs, out.mirror.id, 'dashboard:device-added',
+        require('../lib/device-sanitize').stripDeviceSecretsForList({ ...out.mirror }));
+    } catch (e) { /* the dashboard refreshes anyway */ }
+    return { mirror: out.mirror, created: true };
   }
 
   deviceNs.on('connection', (socket) => {
@@ -2302,6 +2570,9 @@ module.exports = function setupDeviceSocket(io) {
     socket.on('device:register', (data) => {
       // `let`, because the enrolment-key exchange below may fill in device_id/device_token.
       let { pairing_code, device_id, device_token, device_info, fingerprint, hw_fingerprint } = data;
+      // 3.0 mirrors: which install this socket is, so a later `?k=` register can tell "the same
+      // browser reconnecting" from "the link opened somewhere else" (mirrorDecision).
+      if (typeof fingerprint === 'string' && fingerprint) socket.data.stFingerprint = fingerprint.slice(0, 200);
 
       /*
        * #313 — ENROLMENT KEY EXCHANGE, and it is deliberately the FIRST thing in this handler.
@@ -2320,11 +2591,28 @@ module.exports = function setupDeviceSocket(io) {
        * every single restart, filling the dashboard with dead screens. That is the exact failure
        * this feature exists to prevent, so a key that does not resolve ends the connection.
        *
-       * Only consulted when the player has no device_id of its own: stored credentials always win,
-       * so a screen that DOES have storage is completely unaffected by the key being in its URL.
+       * #630 — AND WHEN THE PLAYER ALSO HAS A STORED IDENTITY. The player used to send the key
+       * only when it had no device_id, so a browser that keeps its storage ignored a NEW link: a
+       * UniFi Cast whose server had been rebuilt presented its dead stored id, re-paired, and became
+       * a new display while the one its link named stayed offline. The player now sends the key from
+       * its URL alongside a stored identity, and this decides:
+       *   - the key names the SAME display: nothing changes (the key's token is used, which also
+       *     heals a player holding a stale token for its own row);
+       *   - the key names a DIFFERENT display: the key wins. The link is the operator's latest
+       *     instruction and the key is a 256-bit credential for exactly that display, so this is no
+       *     more than the same player would get by clearing its storage first;
+       *   - the key names NOTHING: it is ignored and the stored identity decides, so a working
+       *     screen still holding an old link after a key roll keeps working.
        */
-      if (!device_id && data.enrol_key) {
-        const resolved = enrolKey.resolveEnrolKey(db, data.enrol_key);
+      const presentedKey = data.enrol_key;
+      const resolvedKey = presentedKey && device_id ? enrolKey.resolveEnrolKey(db, presentedKey) : null;
+      // (A mirror presenting its own stored id is not a replacement: it is resolved back below.)
+      if (resolvedKey && resolvedKey.id !== device_id && mirrors.sourceOf(device_id) !== resolvedKey.id) {
+        console.log(`[enrol] ${resolvedKey.id} identified by enrolment key, replacing the player's stored identity ${String(device_id).slice(0, 36)}`);
+      }
+      if (resolvedKey) device_id = null;   // re-enter the exchange below with the key's identity
+      if (!device_id && presentedKey) {
+        const resolved = resolvedKey || enrolKey.resolveEnrolKey(db, presentedKey);
         /*
          * ⚠️ AN UNKNOWN KEY IS A STALE URL, NOT AN ATTACK — AND IT MUST NOT FEED THE PAIRING
          * LOCKOUT.
@@ -2380,7 +2668,32 @@ module.exports = function setupDeviceSocket(io) {
             db.prepare('UPDATE devices SET device_token = ? WHERE id = ?').run(device_token, resolved.id);
             console.log(`[enrol] ${resolved.id} had no device token — issued one`);
           }
-          console.log(`[enrol] ${resolved.id} identified by enrolment key`);
+          if (!resolvedKey) console.log(`[enrol] ${resolved.id} identified by enrolment key`);
+
+          /*
+           * 3.0 MIRRORS (lib/mirrors.js). The key names display X. If THIS install already owns a
+           * mirror of X, it is that mirror — whether or not X is on right now, so a mirror that
+           * reloads never turns into the original or into a second mirror. Otherwise, if X is LIVE
+           * on a socket from a DIFFERENT install, this opening becomes a new mirror instead of
+           * evicting it (which is what made two openings take turns). The same install
+           * reconnecting falls through to the ordinary eviction below, so a reload, a reboot or a
+           * vMix restart never spawns a mirror.
+           */
+          const m = mirrorDecision(resolved.id, fingerprint, socket);
+          if (m.refused) {
+            console.warn(`[mirror] ${resolved.id}: not opening a mirror from ${getClientIp(socket)} — ${m.refused.reason}`);
+            // New players show m.refused.error and stop; old ones honour the throttle and retry later.
+            socket.emit('device:mirror-refused', m.refused);
+            socket.emit('device:throttled', { retry_after_ms: 5 * 60 * 1000, reason: m.refused.reason });
+            evictedSockets.add(socket.id);
+            process.nextTick(() => { try { socket.disconnect(true); } catch (_) { evictedSockets.delete(socket.id); } });
+            return;
+          }
+          if (m.mirror) {
+            if (m.created) console.log(`[mirror] ${resolved.id}: opened in another place (${m.mirror.mirror_location}) — created mirror ${m.mirror.id}`);
+            device_id = m.mirror.id;
+            device_token = m.mirror.device_token;
+          }
         }
       }
 
@@ -2610,7 +2923,7 @@ module.exports = function setupDeviceSocket(io) {
                 }
                 currentDeviceId = existing.device_id;
                 heartbeat.registerConnection(existing.device_id, socket.id);
-                heartbeat.recordReconnect(existing.device_id);   // FIX 2: churn signal
+                heartbeat.recordReconnect(existing.device_id); screenVerify.noteReconnect(existing.device_id);   // FIX 2: churn signal
                 persistIdentity(existing.device_id, data);       // FIX 3: identity capture
                 socket.join(existing.device_id);
                 logDeviceStatus(existing.device_id, 'online');
@@ -2654,7 +2967,7 @@ module.exports = function setupDeviceSocket(io) {
                   // showing its (still-valid) code for the operator to claim.
                   currentDeviceId = existing.device_id;
                   heartbeat.registerConnection(existing.device_id, socket.id);
-                  heartbeat.recordReconnect(existing.device_id);
+                  heartbeat.recordReconnect(existing.device_id); screenVerify.noteReconnect(existing.device_id);
                   persistIdentity(existing.device_id, data);
                   socket.join(existing.device_id);
                   logDeviceStatus(existing.device_id, 'online');
@@ -2745,6 +3058,26 @@ module.exports = function setupDeviceSocket(io) {
             process.nextTick(() => { try { socket.disconnect(true); } catch (_) { evictedSockets.delete(socket.id); } });
             return;
           }
+          /*
+           * 3.0 PING-PONG GUARD (lib/mirrors.js). Different installs on one link become mirrors;
+           * what can still alternate is one display claimed by two live sockets of the SAME
+           * identity (two tabs of one link in one browser profile, a cloned install). Each register
+           * would evict the other for ever. After a burst of such evictions keep the live incumbent
+           * and soft-refuse the newcomer, with a reason, through the same throttle the players
+           * already honour.
+           */
+          const incumbentFresh = incumbentAlive && (Date.now() - (priorConn.lastHeartbeat || 0) < MIRROR_LIVE_MS);
+          if (incumbentFresh) {
+            const pp = mirrors.pingPongVerdict(device_id);
+            if (pp.refuse) {
+              logCoalescer.record(`pingpong:${device_id}`, `[ping-pong] device ${device_id} is open in two places with one identity; keeping ${priorConn.socketId}, refusing ${socket.id}`);
+              evictedSockets.add(socket.id);
+              socket.emit('device:throttled', { retry_after_ms: pp.retryAfterMs, reason: 'display_open_elsewhere' });
+              process.nextTick(() => { try { socket.disconnect(true); } catch (_) { evictedSockets.delete(socket.id); } });
+              return;
+            }
+            mirrors.noteEviction(device_id);
+          }
 
           currentDeviceId = device_id;
           authenticated = true;
@@ -2789,7 +3122,7 @@ module.exports = function setupDeviceSocket(io) {
           // churn (A2 — else healthy refreshers cross DEGRADED_RECONNECTS and show Degraded) and don't
           // re-write identity (A1 — else a sync UPDATE + WAL churn every ~45-60s per device).
           if (!isPlaylistRefresh) {
-            heartbeat.recordReconnect(device_id);     // genuine reconnect only
+            heartbeat.recordReconnect(device_id); screenVerify.noteReconnect(device_id);     // genuine reconnect only
             persistIdentity(device_id, data);         // change-detected write (see persistIdentity)
           }
           socket.join(device_id);
@@ -2802,6 +3135,9 @@ module.exports = function setupDeviceSocket(io) {
           // loop reset that counter on each post-install reconnect and was offered forever.
           try { require('../lib/ota-breaker').forgiveDevice(device_id); } catch (_) { /* non-fatal */ }
           socket.emit('device:registered', { device_id, device_token: tokenToSend, status: 'online' });
+          // 3.0 screen share: remember the address this screen reaches us on (its QR) and send its
+          // meeting-room code if it shows one. No-op for every screen with the code off.
+          try { require('../lib/screen-share').onDeviceRegistered(device_id, socket.handshake); } catch (_) { /* never block register */ }
           // #143: a device paired/claimed server-side (user_id set) that RECONNECTS must be told
           // it's paired — the app leaves the Connect page ONLY on 'device:paired' (web: hides the
           // setup screen; Android ProvisioningActivity.onPaired -> MainActivity). The
@@ -3252,6 +3588,11 @@ module.exports = function setupDeviceSocket(io) {
 
       const deviceId = currentDeviceId;
       const closingSocketId = socket.id;
+      // 3.0 screen share: a share cannot outlive the screen's connection, and its code means nothing
+      // now. Immediate (not debounced) for the pty reason above: a share that looks alive for the
+      // debounce window is a sharer presenting to a dark TV. After the stale/evicted guards, so a
+      // newer socket's share is not ended by an old socket's late disconnect.
+      try { require('../lib/screen-share').deviceGone(deviceId); } catch (_) { /* never block the offline path */ }
       console.log(`Device disconnected: ${deviceId} (offline transition deferred ${OFFLINE_DEBOUNCE_MS}ms)`);
 
       // Defensive: clear any existing timer for this device. Shouldn't happen
@@ -3334,3 +3675,4 @@ module.exports.PLAYER_EVENT_KINDS = Object.freeze(
   Object.keys(EVENT_APPLIERS).filter((k) => !NOT_RELAYABLE.includes(k))
 );
 module.exports.provisionViaReplica = provisionViaReplica;
+module.exports.__getClientIp = getClientIp; // 3.0 test hook (X-Forwarded-For trust)

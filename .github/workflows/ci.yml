@@ -7,9 +7,9 @@ on:
     # been bitten twice by that shape: a green local run on one Node version while CI runs another,
     # and a config-gated code path no test exercised taking production down. A branch nobody tests
     # is a branch nobody can trust to merge.
-    branches: [main, 2.0.0]
+    branches: [main, 2.0.0, v3.0]
   pull_request:
-    branches: [main, 2.0.0]
+    branches: [main, 2.0.0, v3.0]
   workflow_dispatch:
 
 permissions:
@@ -23,8 +23,15 @@ concurrency:
 
 jobs:
   test:
-    name: Unit tests (node --test)
+    name: Unit tests (node --test, Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    # 3.0 refuses to start below engines.node (server/lib/node-guard.js), so the floor itself is a
+    # supported runtime and gets its own run: '22' alone floats to the newest 22.x and would never
+    # notice something that needs 22.15.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.14.0', '22']
     defaults:
       run:
         working-directory: server
@@ -41,7 +48,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: server/package-lock.json
       - run: npm ci
@@ -55,8 +62,8 @@ jobs:
   # run by any test. That is the same shape as the TELEMETRY_COLLECTOR crash that took production
   # down with 1676 tests green.
   #
-  # Node 24 because node:sqlite is unflagged only from 23.4; on 22.x it needs --experimental-sqlite
-  # and on the 20.x the job above uses it does not exist at all. The driver is then forced by env
+  # Node 24 because that is what the BrightSign player bundle runs (its package forces node:sqlite);
+  # node:sqlite is also unflagged on 22.13+, but this job exercises the runtime that actually ships it. The driver is then forced by env
   # var rather than by omitting the native module — see the install step for why that reversed.
   unit-node-sqlite:
     name: Unit tests (node:sqlite fallback, Node 24)
@@ -136,7 +143,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # brs-node (the BrightScript simulator) needs Node 22; the server runs on it too for the
-      # end-to-end protocol run. Every server job runs Node 22 too (the production floor is 22.12).
+      # end-to-end protocol run. Every server job runs Node 22 too (the production floor is 22.14).
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
@@ -190,6 +197,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # gradle-wrapper.jar is a checked-in binary that every ./gradlew run executes. Verify it is a
+      # genuine Gradle release before anything runs it (OpenSSF Scorecard: Binary-Artifacts).
+      - uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin

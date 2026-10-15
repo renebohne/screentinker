@@ -144,7 +144,7 @@ test('an unknown key is refused without poisoning the site-wide pairing lockout'
    * it, and a player that also presented a pairing code can now be adopted instead of looping.
    */
   const src = fs.readFileSync(path.join(__dirname, '..', 'ws', 'deviceSocket.js'), 'utf8');
-  const block = src.slice(src.indexOf('if (!device_id && data.enrol_key)'), src.indexOf('// #146: resolve identity ONCE'));
+  const block = src.slice(src.indexOf('if (!device_id && presentedKey)'), src.indexOf('// #146: resolve identity ONCE'));
 
   assert.match(block, /socket\.disconnect\(true\)/, 'a player with nothing but a dead key is still told no');
   assert.match(block, /enrol_key_unknown/, 'and told WHY, so it can drop the key and ask for a pairing code');
@@ -152,13 +152,27 @@ test('an unknown key is refused without poisoning the site-wide pairing lockout'
     'a dead player URL must not count toward the pairing lockout — it locks out the whole egress IP');
 });
 
-test('a player that already knows who it is ignores the URL key', () => {
-  // Otherwise a working screen could be silently re-pointed by editing its URL.
+test('#630: the URL key is carried alongside a stored identity, and the server decides', () => {
+  /*
+   * ⚠️ THIS WAS INVERTED, AND THE OLD RULE WAS THE BUG IN #630. "A player that already knows who
+   * it is ignores the URL key" meant a browser that KEEPS its storage could never be given a new
+   * link: a UniFi Cast whose server had been rebuilt sent its dead stored id, re-paired, and became
+   * a new display while the one its link named stayed offline. Re-pointing a screen now needs a
+   * valid 256-bit key for the target display — the same thing clearing its storage would need.
+   */
   const player = fs.readFileSync(path.join(__dirname, '..', 'player', 'index.html'), 'utf8');
-  assert.match(player, /if \(!cfg\.deviceId\) \{\s*\n\s*const k = urlEnrolKey\(\);/,
-    'the key is only adopted when there is no stored identity');
+  assert.match(player, /const k = urlEnrolKey\(\);\s*\n\s*if \(k\) \{ cfg\.enrolKey = k; cfg\.paired = true; \}/,
+    'the key from the URL is adopted whether or not storage has an identity');
   assert.match(player, /if \(!data\.device_id && config\.enrolKey\) data\.enrol_key = config\.enrolKey;/,
-    'and only sent when registering without one');
+    'a player without an identity sends its key, as before');
+  assert.match(player, /else if \(data\.device_id && config\.enrolKey && config\.enrolKey === urlEnrolKey\(\)\) data\.enrol_key = config\.enrolKey;/,
+    'with an identity, only THIS page\'s URL key goes along — never one left in storage by an older URL');
+
+  const src = fs.readFileSync(path.join(__dirname, '..', 'ws', 'deviceSocket.js'), 'utf8');
+  const block = src.slice(src.indexOf('const presentedKey = data.enrol_key;'), src.indexOf('if (!device_id && presentedKey)'));
+  assert.match(block, /presentedKey && device_id \? enrolKey\.resolveEnrolKey\(db, presentedKey\) : null/,
+    'with a stored identity the key is only RESOLVED, so an unknown one cannot end the connection');
+  assert.match(block, /if \(resolvedKey\) device_id = null;/, 'and only a key that resolves replaces the identity');
 });
 
 /*
@@ -218,12 +232,14 @@ test('nothing mints an enrolment key unless it was asked for', () => {
     'the move mint must be gated on set_server_url + a browser player');
 });
 
-test('the Web player tab is shown only for a display that has a key', () => {
-  // Not "is this a web player" — an ordinary web player paired with a code has no key and no use
-  // for the tab. Gating on the key is what keeps the feature off by default.
+test('the Web player tab is on every original display; a key is minted only when asked for', () => {
+  // 3.0: any display can be given a link (a code-paired one included), so the tab is shown on every
+  // display that is not itself a mirror. The KEY is still never minted automatically: without one
+  // the tab offers "Create a web player link" (editors+), which is the deliberate action.
   const view = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'js', 'views', 'device-detail.js'), 'utf8');
-  assert.match(view, /\$\{device\.enrol_key \? `<div class="tab" data-tab="webplayer"/,
-    'the tab must be gated on device.enrol_key');
+  assert.match(view, /\$\{!device\.mirror_of \? `<div class="tab" data-tab="webplayer"/,
+    'the tab is gated on "not a mirror"');
+  assert.match(view, /if \(!device\.enrol_key\) \{[\s\S]{0,200}enrolCreateBtn/, 'no key: offer to create one, never mint on render');
   assert.ok(!/isWebPlayer/.test(view), 'the old platform-based gate should be gone, not left dangling');
   // Revoking would strand a display whose only way back IS the URL.
   assert.ok(!/enrolRevokeBtn/.test(view), 'no revoke button: it would brick the display it belongs to');

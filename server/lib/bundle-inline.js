@@ -83,11 +83,18 @@ async function inlineBundle(archivePath, entryPoint, opts = {}) {
   const skipped = [];
   let budget = 0;
   let inlined = 0;
+  const tooLargeMsg = () =>
+    `This bundle inlines to more than ${Math.round(maxBytes / 1048576)}MB, which is more than a player can hold in one document.`;
 
   async function read(name) {
     if (cache.has(name)) return cache.get(name);
     let buf = null;
-    try { buf = await htmlBundle.readBundleEntry(archivePath, name); } catch (e) { buf = null; }
+    // Each read is capped at the inline budget (real bytes, see html-bundle readBundleEntry); an
+    // entry that CLAIMS more than the budget is "too large", not "missing".
+    try { buf = await htmlBundle.readBundleEntry(archivePath, name, { maxBytes }); } catch (e) {
+      if (e && e.code === 'ENTRY_TOO_LARGE') throw new InlineTooLargeError(tooLargeMsg());
+      buf = null;
+    }
     cache.set(name, buf);
     return buf;
   }
@@ -136,6 +143,8 @@ async function inlineBundle(archivePath, entryPoint, opts = {}) {
     return out;
   }
 
+  // The entry point is not charged to the inline budget (it never was), so it keeps
+  // readBundleEntry's default real-byte cap rather than maxBytes.
   const entryBuf = await htmlBundle.readBundleEntry(archivePath, entryPoint);
   if (!entryBuf) throw new Error(`Bundle entry point is missing: ${entryPoint}`);
   let html = entryBuf.toString('utf8');

@@ -111,7 +111,8 @@ test('#336: the device query that feeds the payload actually selects background_
       local_api_enabled INTEGER, local_api_secret TEXT,
       default_content_id TEXT, workspace_id TEXT, latitude REAL, longitude REAL,
       capabilities TEXT, platform TEXT, android_version TEXT, client_type TEXT,
-      playlist_id TEXT, layout_id TEXT
+      playlist_id TEXT, layout_id TEXT,
+      screen_width INTEGER, screen_height INTEGER
     );
     CREATE VIEW device_resolved_playlist AS
       SELECT id AS device_id, playlist_id, 'device' AS source, layout_id FROM devices;
@@ -145,7 +146,8 @@ test('the device query selects workspace_id (data-source play_when + custom shad
       trigger_multicast_group TEXT, trigger_clear_all_token TEXT,
       local_api_enabled INTEGER, local_api_secret TEXT,
       default_content_id TEXT, workspace_id TEXT, latitude REAL, longitude REAL,
-      capabilities TEXT, platform TEXT, android_version TEXT, client_type TEXT, playlist_id TEXT, layout_id TEXT
+      capabilities TEXT, platform TEXT, android_version TEXT, client_type TEXT, playlist_id TEXT, layout_id TEXT,
+      screen_width INTEGER, screen_height INTEGER
     );
     CREATE VIEW device_resolved_playlist AS SELECT id AS device_id, playlist_id, 'device' AS source, layout_id FROM devices;
     INSERT INTO devices (id, orientation, workspace_id) VALUES ('d1', 'landscape', 'ws-42');
@@ -173,7 +175,8 @@ test('the device query selects latitude and longitude (weather and area conditio
       trigger_multicast_group TEXT, trigger_clear_all_token TEXT,
       local_api_enabled INTEGER, local_api_secret TEXT,
       default_content_id TEXT, workspace_id TEXT, latitude REAL, longitude REAL,
-      capabilities TEXT, platform TEXT, android_version TEXT, client_type TEXT, playlist_id TEXT, layout_id TEXT
+      capabilities TEXT, platform TEXT, android_version TEXT, client_type TEXT, playlist_id TEXT, layout_id TEXT,
+      screen_width INTEGER, screen_height INTEGER
     );
     CREATE VIEW device_resolved_playlist AS SELECT id AS device_id, playlist_id, 'device' AS source, layout_id FROM devices;
     INSERT INTO devices (id, orientation, latitude, longitude) VALUES ('d1', 'landscape', 41.88, -87.63);

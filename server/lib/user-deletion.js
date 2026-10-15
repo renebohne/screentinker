@@ -37,6 +37,12 @@ const WORKSPACE_SCOPED = [
   'playlists', 'schedules', 'video_walls', 'device_groups', 'devices',
   'content', 'layouts', 'widgets', 'content_folders', 'kiosk_pages',
   'white_labels', 'alert_configs',
+  // 3.0 site cache: a deleted workspace's cache boxes stop being able to sign in (their token_hash
+  // goes) and their assignments cascade with them.
+  'site_caches',
+  // 3.0 switch to ScreenTinker (lib/migrate): a deleted workspace's import jobs (and any source
+  // credential still held for one), its idempotency map and its unpaired placeholders.
+  'migration_jobs', 'migration_items', 'migration_screens',
 ];
 // Logs that carry a device_id but NO foreign key (so they don't block, but we
 // clean them to avoid dangling rows).
@@ -49,6 +55,7 @@ const NULLABLE_USER_REFS = [
   ['activity_log', 'user_id'], ['activity_log', 'acting_user_id'],
   ['cap_feeds', 'user_id'], ['automation_hooks', 'created_by'], ['social_feeds', 'created_by'],
   ['social_connections', 'created_by'], ['bi_connections', 'created_by'], ['canva_integrations', 'updated_by'],
+  ['migration_jobs', 'user_id'],
 ];
 // NOT NULL legacy creator columns on workspace-scoped resources -> reassign to
 // the resource's org owner (fallback: the acting admin) so the row survives.
@@ -420,6 +427,11 @@ function deleteUserCascade(db, { targetId, actingAdminId, unlink, revokeCanva })
     if (have.has('canva_connections')) db.prepare('DELETE FROM canva_connections WHERE user_id = ?').run(targetId);
     if (have.has('canva_links')) db.prepare('DELETE FROM canva_links WHERE user_id = ?').run(targetId);
     if (have.has('canva_jobs')) db.prepare('DELETE FROM canva_jobs WHERE user_id = ?').run(targetId);
+    // 3.0 funnel rows (lib/conversion-events.js): no foreign key, so nothing else would remove them.
+    if (have.has('conversion_events')) db.prepare('DELETE FROM conversion_events WHERE user_id = ?').run(targetId);
+    // 3.0 passkeys: declared ON DELETE CASCADE, deleted here too so it holds whatever the pragma.
+    if (have.has('webauthn_credentials')) db.prepare('DELETE FROM webauthn_credentials WHERE user_id = ?').run(targetId);
+    if (have.has('webauthn_challenges')) db.prepare('DELETE FROM webauthn_challenges WHERE user_id = ?').run(targetId);
     if (have.has('cloud_folders')) {
       db.prepare(`UPDATE cloud_folders SET user_id = NULL, enabled = 0, last_status = 'error',
           last_error = 'Paused: the person who set up this folder no longer has an account.',
@@ -445,6 +457,10 @@ function deleteUserCascade(db, { targetId, actingAdminId, unlink, revokeCanva })
 
   run();
   afterCommit(side, revokeCanva);
+  // ⚠️ A deleted user's open dashboards authenticated at their handshake; close them so they stop
+  // receiving live device events at once (writes are re-checked anyway). Lazy: avoids loading the
+  // socket stack from a lib module, and a no-op where no socket server runs (scripts, tests).
+  try { require('../ws/dashboardSocket').disconnectUserSockets(targetId); } catch (_) { /* best-effort */ }
   return removeDeletedFiles(gone, unlink);
 }
 

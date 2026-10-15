@@ -301,10 +301,18 @@ async function commitStagedAsset(db, edge, entry, stagedPath, deps) {
   const finalName = digestFilename(digest, ext);
   const finalPath = path.join(contentDir, finalName);
 
+  /*
+   * ⚠️ AN EXISTING FILE UNDER THIS NAME IS VERIFIED, NOT TRUSTED. "Same name means same bytes"
+   * holds only if every writer of a digest name hashed first; a restore that kept an archive's
+   * claimed name did not, so a file here can be another tenant's bytes wearing this digest. Re-hash
+   * it: on a match drop the duplicate, otherwise the staged (verified) bytes replace it — atomically,
+   * since the name's contract is this digest and the rows already on it want exactly these bytes.
+   */
+  let reuse = false;
+  if (fs.existsSync(finalPath)) reuse = (await digestFile(finalPath)) === digest;
   try {
-    // Same filesystem, so the rename is atomic. If the bytes are already here under this exact
-    // name, they are byte-identical by construction — drop the duplicate rather than rewrite it.
-    if (fs.existsSync(finalPath)) fs.unlinkSync(stagedPath);
+    // Same filesystem, so the rename is atomic.
+    if (reuse) fs.unlinkSync(stagedPath);
     else fs.renameSync(stagedPath, finalPath);
   } catch (e) {
     return { ok: false, reason: 'That file could not be stored.' };

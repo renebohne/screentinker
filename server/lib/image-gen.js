@@ -25,11 +25,11 @@ function buildComfyWorkflow(prompt, ckpt, width, height, seed) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function comfyGenerate(baseUrl, prompt, model, width, height, signal) {
+async function comfyGenerate(baseUrl, prompt, model, width, height, signal, fx = aiFetch) {
   const ckpt = model || 'sd_xl_base_1.0.safetensors';
   const seed = Math.floor(Math.random() * 1e15);
   const wf = buildComfyWorkflow(prompt, ckpt, width, height, seed);
-  const sub = await aiFetch(baseUrl + '/prompt', {
+  const sub = await fx(baseUrl + '/prompt', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt: wf }), signal,
   });
@@ -41,7 +41,7 @@ async function comfyGenerate(baseUrl, prompt, model, width, height, signal) {
   for (let i = 0; i < 120; i++) {
     if (signal && signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     await sleep(1000);
-    const h = await aiFetch(`${baseUrl}/history/${prompt_id}`, { signal }).then((r) => r.json()).catch(() => null);
+    const h = await fx(`${baseUrl}/history/${prompt_id}`, { signal }).then((r) => r.json()).catch(() => null);
     const entry = h && h[prompt_id];
     if (!entry) continue;
     const outputs = entry.outputs || {};
@@ -50,7 +50,7 @@ async function comfyGenerate(baseUrl, prompt, model, width, height, signal) {
       if (imgs && imgs.length) {
         const im = imgs[0];
         const q = new URLSearchParams({ filename: im.filename, subfolder: im.subfolder || '', type: im.type || 'output' });
-        const buf = Buffer.from(await (await aiFetch(`${baseUrl}/view?${q}`, { signal })).arrayBuffer());
+        const buf = Buffer.from(await (await fx(`${baseUrl}/view?${q}`, { signal })).arrayBuffer());
         return 'data:image/png;base64,' + buf.toString('base64');
       }
     }
@@ -102,7 +102,7 @@ function nearestAspect(width, height) {
   return best;
 }
 
-async function openaiCompatGenerate(baseUrl, key, prompt, model, size, signal, dims) {
+async function openaiCompatGenerate(baseUrl, key, prompt, model, size, signal, dims, fx = aiFetch) {
   const attempt = async (withSize) => {
     /*
      * ⚠️ THE RETRY IS NOT "SEND LESS", IT IS "SPEAK THE OTHER DIALECT". Dropping `size` alone got a
@@ -123,7 +123,7 @@ async function openaiCompatGenerate(baseUrl, key, prompt, model, size, signal, d
         resolution: '2k',
       };
     if (model) body.model = model;   // omit for sd.cpp (uses its loaded checkpoint)
-    const res = await aiFetch(baseUrl + '/images/generations', {
+    const res = await fx(baseUrl + '/images/generations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
       body: JSON.stringify(body),
@@ -150,7 +150,7 @@ async function openaiCompatGenerate(baseUrl, key, prompt, model, size, signal, d
   if (b64) return 'data:image/png;base64,' + b64;
   const url = j && j.data && j.data[0] && j.data[0].url;
   if (url) {
-    const buf = Buffer.from(await (await aiFetch(url, { signal })).arrayBuffer());
+    const buf = Buffer.from(await (await fx(url, { signal })).arrayBuffer());
     return 'data:image/png;base64,' + buf.toString('base64');
   }
   throw new Error('Image endpoint returned no image');
@@ -162,11 +162,13 @@ async function generateImage(opts) {
   const height = opts.height || 1024;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs || 180000);
+  // 3.0 Private AI: the one LAN host an operator allowed for this organization (lib/ai-fetch.js).
+  const fx = opts.privateHosts ? (u, o) => aiFetch(u, { ...o, privateHosts: opts.privateHosts }) : aiFetch;
   try {
     if (provider === 'openai' || provider === 'sdcpp') {
-      return await openaiCompatGenerate(baseUrl, apiKey || 'none', prompt, model, sizeFor(provider, width, height), controller.signal, { width, height });
+      return await openaiCompatGenerate(baseUrl, apiKey || 'none', prompt, model, sizeFor(provider, width, height), controller.signal, { width, height }, fx);
     }
-    return await comfyGenerate(baseUrl, prompt, model, width, height, controller.signal);
+    return await comfyGenerate(baseUrl, prompt, model, width, height, controller.signal, fx);
   } catch (e) {
     if (e.name === 'AbortError') throw new Error('image generation timed out');
     throw e;

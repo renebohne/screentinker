@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/">
+  <title type="text">Example Engineering Blog</title>
+  <link rel="self" href="https://blog.example.test/atom.xml"/>
+  <link rel="alternate" type="text/html" href="https://blog.example.test/"/>
+  <updated>2026-10-10T12:00:00Z</updated>
+  <entry>
+    <title type="html">Shipping &lt;em&gt;faster&lt;/em&gt; builds</title>
+    <link rel="replies" href="https://blog.example.test/posts/faster-builds#comments"/>
+    <link rel="alternate" type="text/html" href="/posts/faster-builds"/>
+    <id>tag:blog.example.test,2026:1</id>
+    <published>2026-10-09T08:30:00+02:00</published>
+    <updated>2026-10-10T08:30:00+02:00</updated>
+    <summary type="html">&lt;p&gt;We cut CI time in half.&lt;/p&gt;</summary>
+    <media:thumbnail url="https://blog.example.test/img/builds.png"/>
+  </entry>
+  <entry>
+    <title>Second post</title>
+    <link href="https://blog.example.test/posts/second"/>
+    <id>tag:blog.example.test,2026:2</id>
+    <updated>2026-10-01T00:00:00Z</updated>
+    <content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Body with <img src="https://blog.example.test/img/second.webp"/> picture.</p></div></content>
+  </entry>
+</feed>

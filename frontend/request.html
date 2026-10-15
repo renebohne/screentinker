@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Request</title>
+<!--
+  3.0 content requests: the public request page, /r/<code> and /r/status#<token>.
+  No dashboard chrome and no account. Everything dynamic is filled by /js/request-page.js through
+  textContent or esc(); the workspace's brand colour arrives as a validated hex and nothing else.
+-->
+<style>
+  :root { --bg:#f6f7f9; --card:#ffffff; --border:#dde1e7; --text:#14171c; --muted:#5d6673; --accent:#2f6fed; --accent-text:#ffffff; --danger:#c62828; --ok:#1b7f45; --field:#ffffff; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg:#0f1115; --card:#1a1d24; --border:#2c313b; --text:#e8eaed; --muted:#9aa0aa; --field:#0d0f13; --danger:#ff6b6b; --ok:#3ddc84; }
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; }
+  .wrap { max-width:640px; margin:0 auto; padding:24px 16px 48px; }
+  .brand { display:flex; align-items:center; gap:10px; margin-bottom:16px; min-height:32px; }
+  .brand img { max-height:40px; max-width:180px; }
+  .brand span { font-weight:600; color:var(--muted); }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:20px; margin-bottom:16px; }
+  h1 { font-size:24px; line-height:1.25; margin:0 0 8px; }
+  h2 { font-size:18px; margin:0 0 12px; }
+  .intro { white-space:pre-wrap; color:var(--muted); margin:0; }
+  label { display:block; font-weight:600; font-size:14px; margin:14px 0 6px; }
+  .hint { font-size:13px; color:var(--muted); font-weight:400; margin-top:4px; }
+  input[type=text], input[type=email], input[type=date], textarea { width:100%; padding:12px; font:inherit; color:var(--text); background:var(--field); border:1px solid var(--border); border-radius:10px; }
+  textarea { min-height:90px; resize:vertical; }
+  input:focus, textarea:focus, button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .row { display:flex; gap:12px; }
+  .row > div { flex:1; min-width:0; }
+  .choices { display:grid; gap:8px; }
+  .choice { display:flex; align-items:center; gap:10px; padding:12px; border:1px solid var(--border); border-radius:10px; cursor:pointer; font-weight:500; margin:0; }
+  .choice input { width:20px; height:20px; accent-color:var(--accent); }
+  button { min-height:48px; padding:12px 20px; font:inherit; font-weight:600; border-radius:10px; border:0; background:var(--accent); color:var(--accent-text); cursor:pointer; width:100%; margin-top:18px; }
+  button.secondary { background:transparent; color:var(--text); border:1px solid var(--border); }
+  button:disabled { opacity:.5; cursor:default; }
+  .msg { padding:12px; border-radius:10px; font-size:14px; margin-top:14px; }
+  .msg.err { background:color-mix(in srgb, var(--danger) 12%, transparent); color:var(--danger); }
+  .msg.ok { background:color-mix(in srgb, var(--ok) 12%, transparent); color:var(--ok); }
+  .bar { height:10px; background:var(--border); border-radius:6px; overflow:hidden; margin-top:12px; }
+  .bar > div { height:100%; width:0; background:var(--accent); transition:width .2s; }
+  .ref { font-size:28px; font-weight:700; letter-spacing:1px; margin:8px 0; }
+  .link { word-break:break-all; font-size:14px; padding:10px; border:1px dashed var(--border); border-radius:10px; }
+  .state { display:inline-block; padding:4px 12px; border-radius:20px; font-weight:600; font-size:14px; background:var(--border); }
+  .state.live, .state.scheduled, .state.approved { background:color-mix(in srgb, var(--ok) 18%, transparent); color:var(--ok); }
+  .state.rejected { background:color-mix(in srgb, var(--danger) 15%, transparent); color:var(--danger); }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; margin:14px 0 0; font-size:15px; }
+  dt { color:var(--muted); }
+  dd { margin:0; overflow-wrap:anywhere; }
+  .footer { text-align:center; font-size:12px; color:var(--muted); margin-top:24px; }
+  [hidden] { display:none !important; }
+  @media (max-width:480px) { .row { flex-direction:column; gap:0; } h1 { font-size:21px; } }
+</style>
+</head>
+<body>
+<main class="wrap" id="root" aria-live="polite">
+  <div class="brand" id="brand"></div>
+  <div class="card" id="loading">…</div>
+</main>
+<script type="module" src="/js/request-page.js"></script>
+</body>
+</html>

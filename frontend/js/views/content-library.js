@@ -4,6 +4,7 @@ import { showToast } from '../components/toast.js';
 import { esc, hydrateAuthImages } from '../utils.js';
 import { t } from '../i18n.js';
 import { openHistoryModal } from '../components/history-modal.js';
+import { generateCaptions, openCaptionsEditor } from '../components/captions.js';
 import { isPdf, renderPdfToPages, baseName } from '../components/pdf-pages.js';
 import { reportConnectResult, loadCanvaLinks, syncCanvaLink, openCanvaPicker } from '../components/canva-import.js';
 import { openDialog, confirmDialog } from '../components/library/dialog.js';
@@ -244,6 +245,10 @@ export function render(container) {
   });
   document.getElementById('libAddBtn').addEventListener('click', () => openAdd());
 
+  // #/content?open=<id> opens that item in the inspector (the Freshness page's "Replace" lands here).
+  const openParam = new URLSearchParams(window.location.hash.split('?')[1] || '').get('open');
+  if (openParam && /^[\w-]{1,64}$/.test(openParam)) state.openId = openParam;
+
   renderNav();
   renderChrome();
   loadContent();
@@ -253,7 +258,7 @@ export function render(container) {
 function selectHtml(id, labelKey, options, value) {
   return `<div class="lib-select">
     <label for="${id}" class="lib-visually-hidden">${esc(t(labelKey))}</label>
-    <select id="${id}" class="input">${options.map(([v, k]) => `<option value="${v}" ${v === value ? 'selected' : ''}>${esc(t(k))}</option>`).join('')}</select>
+    <select id="${id}" class="input">${options.map(([v, k]) => `<option value="${esc(v)}" ${v === value ? 'selected' : ''}>${esc(t(k))}</option>`).join('')}</select>
   </div>`;
 }
 function sortLabelKey(s) {
@@ -387,7 +392,7 @@ function renderNav() {
   const l = state.location;
   const item = (kind, icon, label, count) => `
     <li><button type="button" class="lib-nav-item${l.kind === kind ? ' is-current' : ''}" data-nav="${kind}" ${l.kind === kind ? 'aria-current="page"' : ''}>
-      ${icon}<span class="lib-nav-label">${esc(label)}</span>${count != null ? `<span class="lib-nav-count">${count}</span>` : ''}
+      ${icon}<span class="lib-nav-label">${esc(label)}</span>${count != null ? `<span class="lib-nav-count">${esc(count)}</span>` : ''}
     </button></li>`;
   const icons = {
     all: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
@@ -517,7 +522,7 @@ function renderChrome() {
   // The sort select shows a header-chosen sort too.
   const sortSel = document.getElementById('libSort');
   if (sortSel && sortSel.value !== state.sort) {
-    if (![...sortSel.options].some((o) => o.value === state.sort)) sortSel.insertAdjacentHTML('beforeend', `<option value="${state.sort}">${esc(t(sortLabelKey(state.sort)))}</option>`);
+    if (![...sortSel.options].some((o) => o.value === state.sort)) sortSel.insertAdjacentHTML('beforeend', `<option value="${esc(state.sort)}">${esc(t(sortLabelKey(state.sort)))}</option>`);
     sortSel.value = state.sort;
   }
   for (const [id, key] of [['libType', 'type'], ['libStatus', 'status'], ['libUsage', 'usage']]) { const el = document.getElementById(id); if (el) el.value = state[key]; }
@@ -1277,7 +1282,7 @@ function showEditModal(contentItem, onSave, { focus = null } = {}) {
           <label>${t('content.label_folder')}</label>
           <select id="editFolderId" class="input" style="background:var(--bg-input)">
             <option value="">${t('content.folder_root_option')}</option>
-            ${state.folders.map(f => `<option value="${f.id}" ${contentItem.folder_id === f.id ? 'selected' : ''}>${esc(folderPath(f, state.folders))}</option>`).join('')}
+            ${state.folders.map(f => `<option value="${esc(f.id)}" ${contentItem.folder_id === f.id ? 'selected' : ''}>${esc(folderPath(f, state.folders))}</option>`).join('')}
           </select>
         </div>
         <div class="form-group">
@@ -1318,6 +1323,21 @@ function showEditModal(contentItem, onSave, { focus = null } = {}) {
           </div>
           ${contentItem.subtitle_url ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px"><input type="checkbox" id="editSubtitleRemove" style="width:auto;margin:0"><span>${t('content.subtitle_remove')}</span></label>` : ''}
           <p style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('content.subtitle_hint')}</p>
+          <div class="a11y-cap-row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+            <button type="button" class="btn btn-secondary btn-sm" id="editGenCaptions" hidden>${esc(t('a11y.act.generate_captions'))}</button>
+            ${contentItem.subtitle_url ? `<button type="button" class="btn btn-secondary btn-sm" id="editEditCaptions">${esc(t('a11y.act.edit_captions'))}</button>` : ''}
+          </div>
+          <p id="editCaptionsNote" style="font-size:11px;color:var(--text-muted);margin-top:4px" hidden></p>
+        </div>
+        ` : ''}
+        ${isUploadedVideo ? `
+        <div class="form-group">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="editVideoPrerotated" ${contentItem.video_prerotated ? 'checked' : ''} style="width:auto;margin:0">
+            <span>${esc(t('content.tvsafe.prerotated'))}</span>
+          </label>
+          <p style="font-size:11px;color:var(--text-muted);margin-top:4px">${esc(t('content.tvsafe.prerotated_hint'))}</p>
+          <div id="editTvCopies" style="font-size:12px;color:var(--text-secondary);margin-top:8px" hidden></div>
         </div>
         ` : ''}
         ${!isRemote ? `
@@ -1350,6 +1370,53 @@ function showEditModal(contentItem, onSave, { focus = null } = {}) {
   overlay.querySelector('#closeEditModal').onclick = () => closeEdit();
   overlay.querySelector('#cancelEditBtn').onclick = () => closeEdit();
   overlay.onclick = (e) => { if (e.target === overlay) closeEdit(); };
+
+  // 3.0 accessibility: "Generate captions" (only when the workspace has a speech-to-text endpoint;
+  // otherwise one sentence says why it is not offered) and "Edit captions".
+  const genBtn = overlay.querySelector('#editGenCaptions');
+  if (genBtn) {
+    api.getCaptionsJob(contentItem.id).then((st) => {
+      if (!document.contains(genBtn) || !st || Array.isArray(st)) return;
+      const note = overlay.querySelector('#editCaptionsNote');
+      if (st.stt_configured) genBtn.hidden = false;
+      else { note.textContent = t('a11y.captions.not_set'); note.hidden = false; }
+      if (st.job && st.job.status === 'running') { genBtn.disabled = true; genBtn.textContent = t('a11y.captions.working'); }
+    }).catch(() => {});
+    genBtn.addEventListener('click', async () => {
+      genBtn.disabled = true;
+      genBtn.textContent = t('a11y.captions.working');
+      const lang = overlay.querySelector('#editSubtitleLang')?.value;
+      const ok = await generateCaptions(contentItem.id, () => {}, lang);
+      if (!document.contains(genBtn)) return;
+      genBtn.disabled = false;
+      genBtn.textContent = t('a11y.act.generate_captions');
+      if (ok) { closeEdit(); openCaptionsEditor(contentItem.id); }
+    });
+  }
+  overlay.querySelector('#editEditCaptions')?.addEventListener('click', () => openCaptionsEditor(contentItem.id));
+
+  // 3.0 TV-safe video copies (server/lib/video-variants.js): for a tall video, say whether the copy
+  // a Samsung TV plays is being prepared, ready or failed — and offer Retry on failure.
+  const tvEl = overlay.querySelector('#editTvCopies');
+  const renderTvCopies = (st) => {
+    if (!tvEl || !document.contains(tvEl) || !st || !st.tall) { if (tvEl) tvEl.hidden = true; return; }
+    const copies = st.copies || [];
+    let line;
+    if (!st.enabled) line = t('content.tvsafe.off');
+    else if (!copies.length && !(st.needs || []).length) line = t('content.tvsafe.not_needed');
+    else if (copies.some((c) => c.status === 'failed' || c.status === 'denied')) {
+      line = copies.some((c) => c.status === 'denied') ? t('content.tvsafe.allowance') : t('content.tvsafe.failed');
+    } else if (copies.length && copies.every((c) => c.status === 'ready')) line = t('content.tvsafe.ready');
+    else line = t('content.tvsafe.preparing');
+    const retry = copies.some((c) => c.status === 'failed' || c.status === 'denied');
+    tvEl.innerHTML = `<strong>${esc(t('content.tvsafe.title'))}</strong> ${esc(line)}${retry ? ` <button type="button" class="btn btn-secondary btn-sm" id="editTvRetry">${esc(t('content.tvsafe.retry'))}</button>` : ''}`;
+    tvEl.hidden = false;
+    overlay.querySelector('#editTvRetry')?.addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      try { renderTvCopies(await api.retryContentTvCopies(contentItem.id)); } catch (err) { showToast(err.message, 'error'); e.target.disabled = false; }
+    });
+  };
+  if (tvEl) api.getContentTvCopies(contentItem.id).then(renderTvCopies).catch(() => {});
 
   overlay.querySelector('#saveEditBtn').onclick = async () => {
     const filename = overlay.querySelector('#editFilename').value.trim();
@@ -1388,6 +1455,12 @@ function showEditModal(contentItem, onSave, { focus = null } = {}) {
       if (unstableEl) {
         const newUnstable = unstableEl.checked ? 1 : 0;
         if (newUnstable !== (contentItem.unstable_connection ? 1 : 0)) updateData.unstable_connection = newUnstable;
+      }
+      // 3.0 TV-safe video: "already rotated for portrait screens".
+      const prerotEl = overlay.querySelector('#editVideoPrerotated');
+      if (prerotEl) {
+        const v = prerotEl.checked ? 1 : 0;
+        if (v !== (contentItem.video_prerotated ? 1 : 0)) updateData.video_prerotated = v;
       }
       // #216: YouTube captions (checkbox + language).
       const captionsEl = overlay.querySelector('#editCaptionsEnabled');
@@ -1530,7 +1603,7 @@ async function showPreview(content) {
       <button style="position:absolute;top:8px;right:8px;z-index:1;background:rgba(0,0,0,0.7);border:none;color:white;width:32px;height:32px;border-radius:50%;font-size:18px;cursor:pointer" id="closePreview">&times;</button>
       <div style="max-width:80vw;max-height:80vh">
         ${isYoutube
-          ? `<iframe referrerpolicy="strict-origin-when-cross-origin" src="${(() => { /* #YT153 ROOT CAUSE: the dashboard sends Referrer-Policy: no-referrer (helmet default), so a raw YouTube iframe reaches youtube.com with NO Referer -> YouTube can't identify the embedding site -> "Video player configuration error" (153). referrerpolicy on THIS iframe overrides the page policy to send just our origin, which YouTube uses to validate the embed. (The device player dodges no-referrer differently: YT.Player's iframe_api origin postMessage handshake, which doesn't rely on Referer.) The enablejsapi/origin URL params are inert in a raw iframe (no API loaded), so they're dropped. */ try { const u = new URL(src); u.searchParams.set('mute', '1'); u.searchParams.delete('enablejsapi'); u.searchParams.delete('origin'); return u.toString(); } catch { return src; } })()}" style="width:80vw;height:45vw;max-height:80vh;display:block;border:none" allow="autoplay;encrypted-media" allowfullscreen></iframe>`
+          ? `<iframe referrerpolicy="strict-origin-when-cross-origin" src="${esc((() => { /* #YT153 ROOT CAUSE: the dashboard sends Referrer-Policy: no-referrer (helmet default), so a raw YouTube iframe reaches youtube.com with NO Referer -> YouTube can't identify the embedding site -> "Video player configuration error" (153). referrerpolicy on THIS iframe overrides the page policy to send just our origin, which YouTube uses to validate the embed. (The device player dodges no-referrer differently: YT.Player's iframe_api origin postMessage handshake, which doesn't rely on Referer.) The enablejsapi/origin URL params are inert in a raw iframe (no API loaded), so they're dropped. */ try { const u = new URL(src); if (u.protocol !== 'https:' && u.protocol !== 'http:') return 'about:blank'; /* a javascript: remote_url must never become a frame source */ u.searchParams.set('mute', '1'); u.searchParams.delete('enablejsapi'); u.searchParams.delete('origin'); return u.toString(); } catch { return src; } })())}" style="width:80vw;height:45vw;max-height:80vh;display:block;border:none" allow="autoplay;encrypted-media" allowfullscreen></iframe>`
           : isHdmiIn
             ? `<div style="padding:48px 56px;max-width:520px;color:var(--text-primary)"><div style="font-weight:600;font-size:18px;margin-bottom:8px">${esc(content.filename)}</div><div style="color:var(--text-muted);font-size:14px">${t('content.hdmi_in_desc')}</div></div>`
           : isVideo

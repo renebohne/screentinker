@@ -25,6 +25,7 @@
 const fs = require('fs');
 const path = require('path');
 const unzipper = require('unzipper');
+const { inflateCapped } = require('./zip-inflate');
 
 /*
  * ⚠️ A SYNTHETIC MIME, AND IT MUST MATCH NOTHING ELSE.
@@ -183,7 +184,10 @@ async function validateBundle(archivePath) {
     if ((Number(config.uncompressedSize) || 0) > MAX_CONFIG_BYTES) {
       throw new BundleError('Bundle config.xml is implausibly large');
     }
-    const declared = entryPointFromConfigXml(await config.buffer());
+    // Real bytes, capped at the claim (never `config.buffer()` — see lib/zip-inflate.js).
+    const configBuf = await inflateCapped(config, Math.min(Number(config.uncompressedSize) || 0, MAX_CONFIG_BYTES),
+      (kind) => new BundleError(kind === 'too-large' ? 'Bundle config.xml inflates past its declared size' : 'Bundle config.xml is corrupt'));
+    const declared = entryPointFromConfigXml(configBuf);
     if (declared) {
       const norm = normalizeEntryPath(declared);
       if (!norm) throw new BundleError(`config.xml declares an unsafe start file: ${declared}`);
@@ -199,14 +203,31 @@ async function validateBundle(archivePath) {
   return { entryPoint, flavour, entries: fileCount, files: [...names.keys()], totalBytes };
 }
 
-/** Read one entry out of an archive by its normalised name. Returns null when it is not there. */
-async function readBundleEntry(archivePath, name) {
+/**
+ * Read one entry out of an archive by its normalised name. Returns null when it is not there.
+ *
+ * ⚠️ Inflated with a REAL-byte cap of min(claimed size, opts.maxBytes || MAX_TOTAL_BYTES): this
+ * runs on every GET /api/content/:id/bundle, and `e.buffer()` here let an entry claiming 1 KB
+ * inflate to gigabytes. An entry that inflates past its own claim is corrupt (BundleError); one
+ * that CLAIMS more than maxBytes is refused before inflating, with code ENTRY_TOO_LARGE so the
+ * inliner can still report "too large" rather than "missing".
+ */
+async function readBundleEntry(archivePath, name, opts = {}) {
   const wanted = normalizeEntryPath(name);
   if (!wanted) return null;
+  const maxBytes = opts.maxBytes || MAX_TOTAL_BYTES;
   const directory = await unzipper.Open.file(archivePath);
   for (const e of (directory.files || [])) {
     if (e.type === 'Directory') continue;
-    if (normalizeEntryPath(e.path) === wanted) return e.buffer();
+    if (normalizeEntryPath(e.path) === wanted) {
+      const claimed = Number(e.uncompressedSize) || 0;
+      if (claimed > maxBytes) {
+        throw Object.assign(new BundleError(`Bundle entry is larger than ${maxBytes} bytes: ${wanted}`), { code: 'ENTRY_TOO_LARGE' });
+      }
+      return inflateCapped(e, claimed, (kind) => new BundleError(kind === 'too-large'
+        ? `Bundle entry inflates past its declared size: ${wanted}`
+        : `Bundle entry is corrupt: ${wanted}`));
+    }
   }
   return null;
 }

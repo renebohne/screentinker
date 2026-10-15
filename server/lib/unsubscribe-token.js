@@ -24,9 +24,23 @@ const config = require('../config');
 
 const PURPOSE = 'unsubscribe:v1:';
 
-function tokenFor(userId) {
+/*
+ * One purpose per mailing list. ⚠️ A token for one list must not unsubscribe another: someone who
+ * forwards the weekly freshness digest must not be handing the recipient a link that also switches
+ * off their screen-offline alerts. 'alerts' keeps the original prefix so every link already sitting
+ * in somebody's inbox still works.
+ */
+const PURPOSES = Object.freeze({
+  alerts: PURPOSE,
+  freshness: 'unsubscribe:freshness:v1:',
+});
+const LISTS = Object.freeze(Object.keys(PURPOSES));
+
+function tokenFor(userId, list = 'alerts') {
+  const purpose = PURPOSES[list];
+  if (!purpose) throw new Error(`unknown unsubscribe list: ${list}`);
   return crypto.createHmac('sha256', config.jwtSecret)
-    .update(PURPOSE + String(userId))
+    .update(purpose + String(userId))
     .digest('base64url');
 }
 
@@ -38,9 +52,9 @@ function tokenFor(userId) {
  * long URL sends — would become a 500 instead of a clean refusal. Length is compared first, which
  * leaks only the length, a value already visible in the URL.
  */
-function verify(userId, token) {
-  if (!userId || typeof token !== 'string' || !token) return false;
-  const expected = Buffer.from(tokenFor(userId));
+function verify(userId, token, list = 'alerts') {
+  if (!userId || typeof token !== 'string' || !token || !PURPOSES[list]) return false;
+  const expected = Buffer.from(tokenFor(userId, list));
   const given = Buffer.from(token);
   if (expected.length !== given.length) return false;
   try {
@@ -59,10 +73,11 @@ function verify(userId, token) {
  * APP_URL gets null and the caller omits the link rather than emitting a broken one. A link to
  * `undefined/unsubscribe` is worse than no link: it reads as contempt for the recipient.
  */
-function unsubscribeUrl(userId) {
+function unsubscribeUrl(userId, list = 'alerts') {
   const base = String(process.env.APP_URL || '').trim().replace(/\/+$/, '');
   if (!base) return null;
-  return `${base}/unsubscribe?u=${encodeURIComponent(userId)}&t=${tokenFor(userId)}`;
+  const l = list === 'alerts' ? '' : `&l=${encodeURIComponent(list)}`;
+  return `${base}/unsubscribe?u=${encodeURIComponent(userId)}&t=${tokenFor(userId, list)}${l}`;
 }
 
-module.exports = { tokenFor, verify, unsubscribeUrl, PURPOSE };
+module.exports = { tokenFor, verify, unsubscribeUrl, PURPOSE, PURPOSES, LISTS };

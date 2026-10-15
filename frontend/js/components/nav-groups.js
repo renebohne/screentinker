@@ -55,6 +55,8 @@ function writeCollapsed(set) {
 }
 
 function isShown(li) {
+  // 3.0: simple mode hides data-advanced items with CSS (components/ui-mode.js), not inline style.
+  if (li.hasAttribute('data-advanced') && document.documentElement.classList.contains('ui-simple')) return false;
   return li.style.display !== 'none' && !li.hidden;
 }
 
@@ -139,5 +141,6 @@ export function initNavGroups(root = document) {
     });
   }
   window.addEventListener('hashchange', schedule);
+  window.addEventListener('st:ui-mode', schedule); // 3.0: simple/full menu switched (ui-mode.js)
   refresh();
 }

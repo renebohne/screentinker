@@ -39,6 +39,9 @@ import com.remotedisplay.player.player.PipOverlay
 import com.remotedisplay.player.player.SlideAudioPlayer
 import com.remotedisplay.player.player.WallController
 import com.remotedisplay.player.player.GroupScheduleController
+import com.remotedisplay.player.player.Campaign
+import com.remotedisplay.player.player.CampaignPlayer
+import com.remotedisplay.player.player.CampaignStep
 import com.remotedisplay.player.player.LayoutMode
 import com.remotedisplay.player.player.layoutModeOf
 import com.remotedisplay.player.player.ZoneManager
@@ -75,6 +78,8 @@ class MainActivity : AppCompatActivity() {
     private var slideAudioPlayer: SlideAudioPlayer? = null
     private lateinit var updateChecker: UpdateChecker
     private var zoneManager: ZoneManager? = null
+    // 3.0 campaigns: whole layouts switching with full-screen items (player/CampaignPlayer.kt).
+    private var campaignPlayer: CampaignPlayer? = null
     // Wall zones: a video wall's own layout, each zone paced by the shared clock (WallZoneRenderer).
     private var wallZones: WallZoneRenderer? = null
     // #473: walk-up interactive web pages (fullscreen only; passive in zones, walls and groups).
@@ -96,10 +101,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusOverlay: View
     private lateinit var statusText: TextView
     private lateinit var rootView: View
+    // 3.0 site cache (data/SiteCache.kt): the LAN box from the latest payload, read by the downloader.
+    @Volatile private var siteCacheConfig: com.remotedisplay.player.data.SiteCacheConfig? = null
     // Audience counting (audience/AudienceController.kt): off unless the server's payload turns it on.
     private var audience: com.remotedisplay.player.audience.AudienceController? = null
     private lateinit var pipLayout: FrameLayout       // #109: reparented above rootView (see onCreate)
     private var talkRenderer: org.webrtc.SurfaceViewRenderer? = null   // #talk video: operator webcam overlay
+    private var screenShareOverlay: com.remotedisplay.player.remote.ScreenShareOverlay? = null   // 3.0 screen share
+    @Volatile private var talkDucked = false
+    @Volatile private var shareDucked = false
     private lateinit var captureRoot: View            // window content; capture source (includes pipLayout)
     private var currentOrientation: String? = null
 
@@ -221,7 +231,8 @@ class MainActivity : AppCompatActivity() {
             cache = contentCache,
             serverUrl = { config.serverUrl },
             socketAlive = { wsService?.isConnected() == true },
-            onAck = { cid, status -> ackContentOnce(cid, status) }
+            onAck = { cid, status -> ackContentOnce(cid, status) },
+            siteCache = { siteCacheConfig }
         )
         screenshotCapture = ScreenshotCapture()
         touchInjector = TouchInjector()
@@ -263,6 +274,10 @@ class MainActivity : AppCompatActivity() {
         pipOverlay = PipOverlay(this, pipLayout, rootView, youtubeWebView) { level, message ->
             wsService?.sendLog("pip", level, message)
         }
+
+        // 3.0 screen share: the shared screen + its badge, and the meeting-room code, in the PiP layer
+        // (so they turn with the panel and are in the remote-view capture). remote/ScreenShareOverlay.
+        screenShareOverlay = com.remotedisplay.player.remote.ScreenShareOverlay(this, pipLayout).also { it.attach() }
 
         /*
          * Triggers. Shares the PiP layer, which draws above the playlist and inherits the
@@ -314,6 +329,18 @@ class MainActivity : AppCompatActivity() {
         zoneManager = ZoneManager(this, rootView as FrameLayout) {
             playlistController.onVideoComplete()
         }
+        campaignPlayer = CampaignPlayer(
+            stage = rootView,
+            zones = { zoneManager },
+            render = { step -> renderCampaignStep(step) },
+            // Proof of play: the layout itself, and a full-screen step's item, like any played item.
+            onLayoutStart = { l -> if (l.gate.optInt("log_play", 1) != 0) wsService?.sendLayoutStart(l.layoutId, l.layoutName, (l.durationMs / 1000).toInt()) },
+            onItemStart = { s ->
+                val cid = if (!s.item.isNull("widget_id") && s.item.optString("widget_id", "").isNotEmpty()) s.item.optString("widget_id") else s.item.optString("content_id", "")
+                if (s.item.optInt("log_play", 1) != 0) wsService?.sendPlayStart(cid, s.item.optString("filename", s.item.optString("widget_name", "")), (s.durationMs / 1000).toInt())
+            },
+            onNothingAllowed = { zoneManager?.cleanup(); showStatus("Nothing scheduled right now") },
+        )
         // Wall zones draw into the wall-transformed rootView, just above the static fullscreen views
         // (and below the status overlay and anything layered on later).
         wallZones = WallZoneRenderer(
@@ -421,7 +448,10 @@ class MainActivity : AppCompatActivity() {
                 Log.w("MainActivity", "Image failed to load, skipping to next item")
                 handler.postDelayed({ playlistController.next() }, 500)
             },
-            transitionView = transitionView
+            transitionView = transitionView,
+            // #624 play to end: the YouTube page reports the video's length and its end.
+            onYoutubeLength = { sec -> playlistController.onYoutubeLength(sec) },
+            onYoutubeEnded = { playlistController.onYoutubeEnded() }
         )
 
         /*
@@ -485,6 +515,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
+        // #624: play to end is ignored while a shared clock drives the screen (a sync group or a wall).
+        playlistController.syncDriven = { groupSchedule.isActive || wallController.isActive }
 
         // Restore cached playlist for offline cold-start (play immediately from disk cache).
         // Catch Throwable (not just Exception) so an OOM or corrupt entry can't kill the app
@@ -534,6 +566,8 @@ class MainActivity : AppCompatActivity() {
                     // with no WAN (a LOCAL default is pinned on disk by the download loop; a remote one
                     // can't stream offline and simply won't show).
                     playlistController.setDefaultContent(if (cached.isNull("default_content")) null else cached.optJSONObject("default_content"))
+                    // The site cache too: a panel that reboots with the WAN down can still fill from its LAN box.
+                    siteCacheConfig = com.remotedisplay.player.data.SiteCacheConfig.parse(if (cached.isNull("site_cache")) null else cached.optJSONObject("site_cache"))
                     // Restore the SHAPE too, not just the content: a zoned (or wall) panel must
                     // cold-start into its zones/tiling, not render flat-fullscreen and then snap into
                     // zones the moment the server reconnects (the visible "loads fullscreen, then jumps
@@ -970,6 +1004,10 @@ class MainActivity : AppCompatActivity() {
             // of the idle text. Null/absent when unset. Set here so BOTH the wall and single-zone
             // updatePlaylist paths below have it before they run.
             playlistController.setDefaultContent(if (data.isNull("default_content")) null else data.optJSONObject("default_content"))
+            // 3.0 site cache: set BEFORE the download sweep this payload triggers, so new media is
+            // tried from the LAN box first. Absent = no box (an un-assigned screen, or a server
+            // that predates it) and downloads go to the origin as before.
+            siteCacheConfig = com.remotedisplay.player.data.SiteCacheConfig.parse(if (data.isNull("site_cache")) null else data.optJSONObject("site_cache"))
 
             /*
              * Cache playlist JSON for offline cold-start.
@@ -1002,6 +1040,7 @@ class MainActivity : AppCompatActivity() {
             val wallObj = if (data.isNull("wall_config")) null else data.optJSONObject("wall_config")
             if (wallObj != null) {
                 com.remotedisplay.player.util.DebugLog.i("Player", "Layout: VIDEO-WALL (${assignments.length()} assignments)")
+                if (campaignPlayer?.isActive == true) handler.post { campaignPlayer?.stop() }   // a wall never runs a campaign
                 if (zoneManager?.hasZones() == true) zoneManager?.cleanup()
                 groupSchedule.exit()                 // wall and group are mutually exclusive
                 kiosk?.hide()                        // interactive pages render passively on a wall
@@ -1039,6 +1078,22 @@ class MainActivity : AppCompatActivity() {
             val layoutObj = if (data.isNull("layout")) null else data.optJSONObject("layout")
             val layoutZones = layoutObj?.optJSONArray("zones")
 
+            // 3.0 campaigns (player/Campaign.kt): whole layouts switching with full-screen items. The
+            // server sends `campaign` only because PlayerCapabilities declares layout.campaign; never
+            // in a synced group (one shared item clock), where the fallback in assignments plays.
+            val campaign = if (groupObj == null) Campaign.parse(data) else null
+            if (campaign != null) {
+                com.remotedisplay.player.util.DebugLog.i("Player", "Layout: CAMPAIGN (${campaign.steps.size} steps)")
+                handler.post { campaignPlayer?.apply(campaign) }
+            } else {
+            if (campaignPlayer?.isActive == true) {
+                handler.post {
+                    campaignPlayer?.stop()
+                    zoneManager?.cleanup()
+                    zoneManager?.lastAssignmentSig = null
+                    zoneManager?.lastZoneSig = null
+                }
+            }
             if (layoutZones != null && layoutZones.length() > 1) {
                 // Multi-zone mode - use ZoneManager
                 val layoutId = layoutObj?.optString("id", "") ?: ""
@@ -1078,6 +1133,7 @@ class MainActivity : AppCompatActivity() {
                 if (zoneManager?.hasZones() == true) handler.post { zoneManager?.cleanup() }
                 playlistController.updatePlaylist(assignments, data.optString("playback_order", "sequential"))
             }
+            } // end else (not a campaign)
             } // end else (not a video wall)
 
             // #170: a genuine content change (first load, reassignment, toggle-back) resets any
@@ -1117,8 +1173,13 @@ class MainActivity : AppCompatActivity() {
                     } catch (e: Exception) { Log.w("MainActivity", "cache sweep failed: ${e.message}") }
                 }
 
-                for (i in 0 until assignments.length()) {
-                    val item = assignments.getJSONObject(i)
+                // 3.0 campaigns: every zone and full-screen item a campaign can show is downloaded too,
+                // so the next layout's media is on disk before the switch (this player's preload).
+                val toFetch = org.json.JSONArray()
+                for (i in 0 until assignments.length()) toFetch.put(assignments.getJSONObject(i))
+                try { for (it in Campaign.items(Campaign.parse(data))) toFetch.put(it) } catch (e: Exception) { /* fallback list only */ }
+                for (i in 0 until toFetch.length()) {
+                    val item = toFetch.getJSONObject(i)
                     // Widget assignments have no downloadable content file - skip
                     // (also avoids getString throwing on a null content_id).
                     val widgetId = if (item.isNull("widget_id")) "" else item.optString("widget_id", "")
@@ -1265,10 +1326,14 @@ class MainActivity : AppCompatActivity() {
 
         // #talk: duck the playlist (mute + freeze video) while a call/PA is active, so the
         // announcement is heard; restore on stop. Same ducking the trigger overlay uses.
-        wsService?.onTalkDuck = { on ->
+        // 3.0 screen share ducks the same way; the two are OR-ed so one ending never un-ducks the other.
+        val applyDuck = {
+            val on = talkDucked || shareDucked
             try { if (::mediaPlayer.isInitialized) mediaPlayer.setTalkMute(on) } catch (e: Throwable) { }
             try { slideAudioPlayer?.setMuted(on) } catch (e: Throwable) { }
         }
+        wsService?.onTalkDuck = { on -> talkDucked = on; applyDuck() }
+        wsService?.onShareDuck = { on -> shareDucked = on; applyDuck() }
 
         // #talk video: render the operator's optional webcam fullscreen over the (paused) content.
         // The track + its EglBase context arrive from AudioTalker via TalkVideoBus; a null track
@@ -1575,7 +1640,7 @@ class MainActivity : AppCompatActivity() {
         // YouTube content - play in WebView
         if (item.mimeType == "video/youtube" && !item.remoteUrl.isNullOrEmpty()) {
             Log.i("MainActivity", "Playing YouTube: ${item.remoteUrl}")
-            mediaPlayer.playYoutube(item.remoteUrl!!, item.durationSec, item.muted)
+            mediaPlayer.playYoutube(item.remoteUrl!!, item.durationSec, item.muted, playlistController.playsToEnd(item))
             wsService?.sendPlaybackState(item.contentId, 0f)
             return
         }
@@ -1584,6 +1649,7 @@ class MainActivity : AppCompatActivity() {
         if (item.isRemote) {
             Log.i("MainActivity", "Playing remote content: ${item.remoteUrl}")
             if (item.mimeType.startsWith("video/")) {
+                applyVideoTurn(item)
                 mediaPlayer.playVideoFromUrl(item.remoteUrl!!, item.muted) // remote video: plain (no wipe)
             } else if (item.mimeType.startsWith("image/")) {
                 mediaPlayer.showImageFromUrl(item.remoteUrl!!, item.transition)
@@ -1647,9 +1713,29 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    /*
+     * 3.0 TV-safe video: the quarter-turn to undo for a video the operator marked "already rotated
+     * for portrait screens" — the stage's own turn on a portrait screen, else 0. Never on a wall
+     * (currentOrientation is null there; the wall geometry owns rootView).
+     */
+    private fun prerotatedTurn(item: PlaylistItem): Float {
+        if (!item.videoPrerotated || currentOrientation == null) return 0f
+        val q = ((rootView.rotation % 360f) + 360f) % 360f
+        return if (q == 90f || q == 270f) q else 0f
+    }
+
+    private fun applyVideoTurn(item: PlaylistItem): Float {
+        val turn = prerotatedTurn(item)
+        val (w, h) = windowSize()
+        mediaPlayer.setVideoCounterTurn(turn, w.toInt(), h.toInt())
+        return turn
+    }
+
     private fun playFile(item: PlaylistItem, file: java.io.File) {
         if (item.mimeType.startsWith("video/")) {
-            mediaPlayer.playVideo(file, item.muted, item.transition)
+            // A counter-turned view cannot be composited into a wipe (the snapshot is the stage's).
+            val turn = applyVideoTurn(item)
+            mediaPlayer.playVideo(file, item.muted, if (turn != 0f) null else item.transition)
         } else if (item.mimeType.startsWith("image/")) {
             mediaPlayer.showImage(file, item.transition)
         } else {
@@ -1693,6 +1779,34 @@ class MainActivity : AppCompatActivity() {
 
     /** Build zones and render assignments into them, recording the change-detection signatures so a
      *  later identical server payload is a no-op. Call on the main thread. */
+    /*
+     * 3.0 campaigns: draw one step. A layout step is its own zones; a full-screen item is a one-zone
+     * layout. The single-item engine stays stopped while a campaign runs, and the zone signatures are
+     * cleared so the normal path rebuilds from scratch if the campaign ends.
+     */
+    private fun renderCampaignStep(step: CampaignStep) {
+        hideStatus()
+        kiosk?.hide()
+        if (::mediaPlayer.isInitialized) mediaPlayer.stop()
+        playlistController.stop()
+        playerView.visibility = View.GONE
+        imageView.visibility = View.GONE
+        val zm = zoneManager ?: return
+        when (step) {
+            is CampaignStep.Layout -> {
+                zm.setupZones(step.zones, step.layoutId)
+                zm.renderAssignments(step.assignments(), config.serverUrl, contentCache, config.deviceId)
+            }
+            is CampaignStep.Item -> {
+                zm.setupZones(Campaign.fullScreenZones(), Campaign.FULL_ZONE_ID)
+                val a = JSONObject(step.item.toString()).put("zone_id", Campaign.FULL_ZONE_ID)
+                zm.renderAssignments(org.json.JSONArray().put(a), config.serverUrl, contentCache, config.deviceId)
+            }
+        }
+        zm.lastAssignmentSig = null
+        zm.lastZoneSig = null
+    }
+
     private fun applyMultiZoneLayout(layoutZones: org.json.JSONArray, layoutId: String, assignments: org.json.JSONArray) {
         hideStatus()
         kiosk?.hide()
@@ -2269,6 +2383,7 @@ class MainActivity : AppCompatActivity() {
         // #talk video: drop the bus listener (it holds `this`) and release the renderer.
         try { com.remotedisplay.player.remote.TalkVideoBus.listener = null } catch (e: Throwable) { }
         try { talkRenderer?.let { pipLayout.removeView(it); it.release() }; talkRenderer = null } catch (e: Throwable) { }
+        try { screenShareOverlay?.detach(); screenShareOverlay = null } catch (e: Throwable) { }
         // Everything below this line exists for the same reason the wall/group shutdown does, and
         // was missing: these Handlers are on the MAIN LOOPER, which outlives the Activity.
         //

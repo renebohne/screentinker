@@ -68,6 +68,8 @@ function moveOne(db, device, toWs, opts = {}) {
   dropped.schedules = run(db, 'DELETE FROM schedules WHERE device_id = ?', id);
   dropped.power_schedules = run(db, 'DELETE FROM display_power_schedules WHERE device_id = ?', id);
   dropped.endpoints = run(db, 'DELETE FROM device_endpoints WHERE device_id = ?', id);
+  // A site cache belongs to one workspace and serves only that workspace's screens.
+  dropped.site_cache = run(db, 'DELETE FROM site_cache_assignments WHERE device_id = ?', id);
   dropped.trigger_assignments = run(db, `DELETE FROM trigger_assignments WHERE target_type = 'device' AND target_id = ?
       AND trigger_id IN (SELECT t.id FROM triggers t WHERE t.workspace_id IS NOT ?)`, id, toWs);
   dropped.slot_content = run(db, "DELETE FROM corporate_slot_fills WHERE scope_kind = 'device' AND scope_id = ? AND workspace_id IS NOT ?", id, toWs);

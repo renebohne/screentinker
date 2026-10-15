@@ -26,17 +26,26 @@ const { guardedLookup, vetRequestHost } = require('./storage/endpoint-guard');
 const MAX_BYTES = 40 * 1024 * 1024;   // a 2k PNG is a few MB; this only stops an endless body
 // Vets the address the socket is handed (so a name cannot rebind between check and connect).
 const lookup = guardedLookup({ allowPrivate: false });
+/*
+ * 3.0 Private AI (docs/private-ai.md): ONE host an operator allowed for an organization's local AI
+ * server (lib/private-ai.js, ai_private_hosts). Only that host's request gets this lookup; it still
+ * refuses cloud metadata and link-local, and every other host keeps the strict one above.
+ */
+const privateLookup = guardedLookup({ allowPrivate: true });
+const hostKey = (h) => String(h || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
 
 function blocked() { return new Error('Endpoint URL not allowed (private/internal addresses are blocked on this instance)'); }
 function abortError() { const e = new Error('The operation was aborted'); e.name = 'AbortError'; return e; }
 
-async function guardedFetch(urlString, { method = 'GET', headers = {}, body = null, signal, maxBytes = MAX_BYTES } = {}) {
+async function guardedFetch(urlString, { method = 'GET', headers = {}, body = null, signal, maxBytes = MAX_BYTES, privateHosts = null } = {}) {
   const url = new URL(urlString);
+  // Exact host match only: no suffixes, no ranges. See privateLookup above.
+  const allowPrivate = Array.isArray(privateHosts) && privateHosts.includes(hostKey(url.hostname));
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('Endpoint URL not allowed (scheme)');
   if (url.username || url.password) throw new Error('Endpoint URL not allowed (credentials in URL)');
   if (signal && signal.aborted) throw abortError();
   // Node never calls `lookup` for an IP literal, so literals (and metadata names) are vetted here.
-  try { vetRequestHost(url.hostname); }
+  try { if (allowPrivate) vetRequestHost(url.hostname, { allowPrivate: true }); else vetRequestHost(url.hostname); }
   catch { throw blocked(); }
   const bodyBuf = body == null ? null : (Buffer.isBuffer(body) ? body : Buffer.from(String(body)));
   const hdrs = { ...headers };
@@ -45,7 +54,7 @@ async function guardedFetch(urlString, { method = 'GET', headers = {}, body = nu
   const { status, resHeaders, buf } = await new Promise((resolve, reject) => {
     const mod = url.protocol === 'https:' ? https : http;
     const req = mod.request(url, {
-      method, headers: hdrs, lookup, agent: false,
+      method, headers: hdrs, lookup: allowPrivate ? privateLookup : lookup, agent: false,
       servername: net.isIP(url.hostname.replace(/^\[|\]$/g, '')) ? undefined : url.hostname,
     }, (res) => {
       const chunks = []; let total = 0;
@@ -82,7 +91,11 @@ function _setTransport(fn) { override = fn || null; }
 
 function aiFetch(url, opts) {
   if (override) return override(url, opts);
-  if (config.selfHosted) return fetch(url, opts);
+  if (config.selfHosted) {
+    // privateHosts is ours, not fetch's: dropped so the request is exactly what it was before.
+    if (opts && opts.privateHosts) { const { privateHosts, ...rest } = opts; return fetch(url, rest); } // eslint-disable-line no-unused-vars
+    return fetch(url, opts);
+  }
   return guardedFetch(url, opts);
 }
 

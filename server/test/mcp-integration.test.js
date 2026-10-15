@@ -302,17 +302,23 @@ test('⚠️ malformed JSON is a JSON-RPC parse error, and the 1 MB limit holds'
 // ───────────────────────────── 7. client attribution ─────────────────────────────
 
 test('⚠️ two tenants on different addresses have separate rate-limit budgets', async () => {
-  // /api/content allows 30 a minute per client. B spends all of it through MCP...
+  // /api/content allows 30 content OPERATIONS a minute per client (3.0: reads no longer count, so
+  // this spends the budget with writes). Every attempt counts, including one the handler refuses,
+  // because the limiter runs first — so an invalid URL keeps this off the network.
+  const spend = (tok, ip) => tool(tok, 'add_youtube_video', { url: 'not-a-url' }, ip);
   for (let i = 0; i < 30; i++) {
-    const r = await tool(S.tokB, 'list_content', {}, '198.51.100.20');
-    assert.equal(r.body.result.isError, false, `B call ${i + 1}: ${textOf(r)}`);
+    const r = await spend(S.tokB, '198.51.100.20');
+    assert.doesNotMatch(textOf(r), /429/, `B call ${i + 1} was limited early: ${textOf(r)}`);
   }
-  const b31 = await tool(S.tokB, 'list_content', {}, '198.51.100.20');
+  const b31 = await spend(S.tokB, '198.51.100.20');
   assert.equal(b31.body.result.isError, true);
   assert.match(textOf(b31), /429/, 'B is limited on its own budget');
   // ...and A, from another address, is not affected.
-  const a = await tool(S.tok.read, 'list_content', {}, '198.51.100.10');
-  assert.equal(a.body.result.isError, false, `A was limited by B's calls: ${textOf(a)}`);
+  const a = await spend(S.tok.write, '198.51.100.10');
+  assert.doesNotMatch(textOf(a), /429/, `A was limited by B's calls: ${textOf(a)}`);
+  // Reads are not content operations: listing still works for B while its write budget is spent.
+  const list = await tool(S.tokB, 'list_content', {}, '198.51.100.20');
+  assert.equal(list.body.result.isError, false, textOf(list));
 });
 
 test('⚠️ the activity log records the agent\'s address, not 127.0.0.1', async () => {

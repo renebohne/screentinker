@@ -1,0 +1,708 @@
+{
+ "_note": "Curated signage panel power figures. Every value was read from the cited page on 2026-10-14; nothing is estimated. figure: typical = the manufacturer's typical power; eu_label = P_measured (SDR) from the EU energy label in EPREL; max = the only figure published, the maximum. Add an entry only with a source URL.",
+ "calibration": {
+  "median_eei": 1.18,
+  "samples": 46,
+  "method": "median of (P+1)/(3*(90*tanh(0.025+0.0035*(A-11))+4)+3) over the typical and eu_label entries with 30 <= A <= 130 dm2, A from a 16:9 diagonal"
+ },
+ "panels": [
+  {
+   "manufacturer": "Samsung",
+   "model": "QM43B",
+   "diagonal_in": 43,
+   "on_watts": 79,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 500,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QM43B",
+    "LH43QMB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QM50B",
+   "diagonal_in": 50,
+   "on_watts": 91,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 500,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QM50B",
+    "LH50QMB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QM55B",
+   "diagonal_in": 55,
+   "on_watts": 108,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 500,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QM55B",
+    "LH55QMB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QM65B",
+   "diagonal_in": 65,
+   "on_watts": 127,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 500,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QM65B",
+    "LH65QMB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QM75B",
+   "diagonal_in": 75,
+   "on_watts": 161,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 500,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QM75B",
+    "LH75QMB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QB43B",
+   "diagonal_in": 43,
+   "on_watts": 79,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 350,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QB43B",
+    "LH43QBB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QB50B",
+   "diagonal_in": 50,
+   "on_watts": 91,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 350,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QB50B",
+    "LH50QBB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QB55B",
+   "diagonal_in": 55,
+   "on_watts": 96,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 350,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QB55B",
+    "LH55QBB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QB65B",
+   "diagonal_in": 65,
+   "on_watts": 124,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 350,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QB65B",
+    "LH65QBB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QB75B",
+   "diagonal_in": 75,
+   "on_watts": 174,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 350,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QB75B",
+    "LH75QBB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QH43B",
+   "diagonal_in": 43,
+   "on_watts": 93,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 700,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QH43B",
+    "LH43QHB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QH55B",
+   "diagonal_in": 55,
+   "on_watts": 115,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 700,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QH55B",
+    "LH55QHB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QH65B",
+   "diagonal_in": 65,
+   "on_watts": 152,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 700,
+   "source_url": "https://image-us.samsung.com/SamsungUS/samsungbusiness/pdf/spec-sheets/Digital_Signage_QBB_QMB_QHB_4K_UHD_DisplaySeries.pdf",
+   "match": [
+    "QH65B",
+    "LH65QHB"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "OM55B",
+   "diagonal_in": 55,
+   "on_watts": 450,
+   "figure": "max",
+   "standby_watts": 0.5,
+   "brightness_nits": 3000,
+   "source_url": "https://www.samsung.com/uk/smart-signage/outdoor-signage/outdoor-signage-om55b-55-inch-uhd-4k-3000nit-ip5x-lh55ombebgbxen/",
+   "match": [
+    "OM55B",
+    "LH55OMB"
+   ],
+   "note": "Only the on-mode (maximum) figure is published; a 3,000-nit window panel. No EU label (>= 1,000 cd/m2 is exempt)."
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QM43C",
+   "diagonal_in": 43,
+   "on_watts": 74,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1590748",
+   "match": [
+    "QM43C",
+    "LH43QMC"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QM55C",
+   "diagonal_in": 55,
+   "on_watts": 102,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1588325",
+   "match": [
+    "QM55C",
+    "LH55QMC"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QM65C",
+   "diagonal_in": 65,
+   "on_watts": 135,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1588326",
+   "match": [
+    "QM65C",
+    "LH65QMC"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QB43C",
+   "diagonal_in": 43,
+   "on_watts": 74,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1644948",
+   "match": [
+    "QB43C",
+    "LH43QBC"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QB55C",
+   "diagonal_in": 55,
+   "on_watts": 85,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1653476",
+   "match": [
+    "QB55C",
+    "LH55QBC"
+   ]
+  },
+  {
+   "manufacturer": "Samsung",
+   "model": "QB65C",
+   "diagonal_in": 65,
+   "on_watts": 104,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1653478",
+   "match": [
+    "QB65C",
+    "LH65QBC"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "55UH5J-H",
+   "diagonal_in": 55,
+   "on_watts": 110,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 500,
+   "source_url": "https://www.lg.com/uk/business/commercial-display/digital-signage/standard/55uh5j-h",
+   "match": [
+    "55UH5J"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "43UH5J-H",
+   "diagonal_in": 43,
+   "on_watts": 80,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 500,
+   "source_url": "https://www.lg.com/uk/business/commercial-display/digital-signage/standard/43uh5j-h",
+   "match": [
+    "43UH5J"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "55UH5F-H",
+   "diagonal_in": 55,
+   "on_watts": 105,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 500,
+   "source_url": "https://www.lg.com/uk/business/commercial-display/digital-signage/standard/55uh5f-h",
+   "match": [
+    "55UH5F"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "49UH5F-H",
+   "diagonal_in": 49,
+   "on_watts": 95,
+   "figure": "typical",
+   "standby_watts": 0.5,
+   "brightness_nits": 500,
+   "source_url": "https://www.lg.com/uk/business/commercial-display/digital-signage/standard/49uh5f-h",
+   "match": [
+    "49UH5F"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "49UH5J",
+   "diagonal_in": 49,
+   "on_watts": 92.1,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1220838",
+   "match": [
+    "49UH5J"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "65UH5J",
+   "diagonal_in": 65,
+   "on_watts": 120.4,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1220840",
+   "match": [
+    "65UH5J"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "43UH5F",
+   "diagonal_in": 43,
+   "on_watts": 77.9,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/387044",
+   "match": [
+    "43UH5F"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "65UH5F",
+   "diagonal_in": 65,
+   "on_watts": 133,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/385497",
+   "match": [
+    "65UH5F"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "55SM5KE",
+   "diagonal_in": 55,
+   "on_watts": 135,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/385481",
+   "match": [
+    "55SM5KE"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "49SM5KE",
+   "diagonal_in": 49,
+   "on_watts": 114,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/384939",
+   "match": [
+    "49SM5KE"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "43SM5KE",
+   "diagonal_in": 43,
+   "on_watts": 77.9,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/384924",
+   "match": [
+    "43SM5KE"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "55UH5N-H",
+   "diagonal_in": 55,
+   "on_watts": 103,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1589510",
+   "match": [
+    "55UH5N"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "55UH5Q-E",
+   "diagonal_in": 55,
+   "on_watts": 103,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/2374136",
+   "match": [
+    "55UH5Q"
+   ]
+  },
+  {
+   "manufacturer": "LG",
+   "model": "43UH5Q-E",
+   "diagonal_in": 43,
+   "on_watts": 82.6,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/2406049",
+   "match": [
+    "43UH5Q"
+   ]
+  },
+  {
+   "manufacturer": "Philips",
+   "model": "55BDL4050D",
+   "diagonal_in": 55,
+   "on_watts": 76,
+   "figure": "typical",
+   "standby_watts": 0.4,
+   "brightness_nits": 450,
+   "source_url": "https://www.philips.co.uk/p-p/55BDL4050D_00/signage-solutions-d-line-display",
+   "match": [
+    "55BDL4050D"
+   ]
+  },
+  {
+   "manufacturer": "Philips",
+   "model": "55BDL5050D",
+   "diagonal_in": 55,
+   "on_watts": 72,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/2456233",
+   "match": [
+    "55BDL5050D"
+   ]
+  },
+  {
+   "manufacturer": "Philips",
+   "model": "43BDL5050D",
+   "diagonal_in": 43,
+   "on_watts": 50,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/2456384",
+   "match": [
+    "43BDL5050D"
+   ]
+  },
+  {
+   "manufacturer": "Philips",
+   "model": "65BDL5050D",
+   "diagonal_in": 65,
+   "on_watts": 98,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/2463480",
+   "match": [
+    "65BDL5050D"
+   ]
+  },
+  {
+   "manufacturer": "Philips",
+   "model": "55BDL4050Q",
+   "diagonal_in": 55,
+   "on_watts": 63,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/2262754",
+   "match": [
+    "55BDL4050Q"
+   ]
+  },
+  {
+   "manufacturer": "Philips",
+   "model": "43BDL4050Q",
+   "diagonal_in": 43,
+   "on_watts": 43,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/2242412",
+   "match": [
+    "43BDL4050Q"
+   ]
+  },
+  {
+   "manufacturer": "Philips",
+   "model": "75BDL4050Q",
+   "diagonal_in": 75,
+   "on_watts": 70,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/2247597",
+   "match": [
+    "75BDL4050Q"
+   ]
+  },
+  {
+   "manufacturer": "Philips",
+   "model": "86BDL4050Q",
+   "diagonal_in": 86,
+   "on_watts": 85,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/2272015",
+   "match": [
+    "86BDL4050Q"
+   ]
+  },
+  {
+   "manufacturer": "Philips",
+   "model": "55BDL3751T",
+   "diagonal_in": 55,
+   "on_watts": 100,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/2143923",
+   "match": [
+    "55BDL3751T"
+   ]
+  },
+  {
+   "manufacturer": "Sharp/NEC",
+   "model": "MultiSync ME551",
+   "diagonal_in": 55,
+   "on_watts": 120,
+   "figure": "max",
+   "standby_watts": null,
+   "brightness_nits": 400,
+   "source_url": "https://www.sharp.co.uk/sharp-nec-multisync-me551",
+   "match": [
+    "ME551"
+   ],
+   "note": "Only the operating maximum is published."
+  },
+  {
+   "manufacturer": "Sharp/NEC",
+   "model": "PN-ME552",
+   "diagonal_in": 55,
+   "on_watts": 123,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1692939",
+   "match": [
+    "PN-ME552"
+   ]
+  },
+  {
+   "manufacturer": "Sharp/NEC",
+   "model": "PN-M552",
+   "diagonal_in": 55,
+   "on_watts": 103,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1926028",
+   "match": [
+    "PN-M552"
+   ]
+  },
+  {
+   "manufacturer": "Sharp/NEC",
+   "model": "PN-P556",
+   "diagonal_in": 55,
+   "on_watts": 102,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1926060",
+   "match": [
+    "PN-P556"
+   ]
+  },
+  {
+   "manufacturer": "Sony",
+   "model": "FW-55BZ35L",
+   "diagonal_in": 55,
+   "on_watts": 71,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1393006",
+   "match": [
+    "FW-55BZ35L"
+   ]
+  },
+  {
+   "manufacturer": "Sony",
+   "model": "FW-55BZ40L",
+   "diagonal_in": 55,
+   "on_watts": 76,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1393011",
+   "match": [
+    "FW-55BZ40L"
+   ]
+  },
+  {
+   "manufacturer": "Sony",
+   "model": "FW-55BZ30L",
+   "diagonal_in": 55,
+   "on_watts": 92,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1392992",
+   "match": [
+    "FW-55BZ30L"
+   ]
+  },
+  {
+   "manufacturer": "iiyama",
+   "model": "ProLite LH5560UHS-B1AG",
+   "diagonal_in": 55,
+   "on_watts": 88.7,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/1594947",
+   "match": [
+    "LH5560UHS-B1"
+   ]
+  },
+  {
+   "manufacturer": "iiyama",
+   "model": "ProLite LH5560UHS-B2AG",
+   "diagonal_in": 55,
+   "on_watts": 54.9,
+   "figure": "eu_label",
+   "standby_watts": 0.5,
+   "brightness_nits": null,
+   "source_url": "https://eprel.ec.europa.eu/screen/product/electronicdisplays/2272429",
+   "match": [
+    "LH5560UHS-B2"
+   ]
+  }
+ ]
+}

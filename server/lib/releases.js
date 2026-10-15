@@ -108,9 +108,15 @@ function releaseLayoutDraft(db, layoutId, req, { actor } = {}) {
     db.prepare("UPDATE layouts SET name = ?, width = ?, height = ?, draft_zones = NULL, updated_at = strftime('%s','now') WHERE id = ?")
       .run(draft.name || l.name, draft.width || l.width, draft.height || l.height, layoutId);
     applyZones(db, layoutId, Array.isArray(draft.zones) ? draft.zones : []);
+    // 3.0: the reviewed draft's main zone and orientation versions go live with its zones.
+    if (Array.isArray(draft.zones) && draft.zones.some((z) => z && z.is_main !== undefined)) {
+      const main = draft.zones.find((z) => z && (z.is_main === true || Number(z.is_main) === 1));
+      try { db.prepare('UPDATE layout_zones SET is_main = CASE WHEN id = ? THEN 1 ELSE 0 END WHERE layout_id = ?').run(main ? main.id : null, layoutId); } catch (_) { /* pre-migration schema */ }
+    }
+    require('./layout-variants').writeZoneVariants(db, layoutId, Array.isArray(draft.zones) ? draft.zones : []);
     policy.afterRelease(db, { type: 'layout', id: layoutId, gate, actor: actor || actorOf(req), summary: 'Published' });
   })();
-  pushDevices(req, db.prepare(require('./wall-layout').SCREENS_ON_LAYOUT_SQL).all(layoutId, layoutId).map((r) => r.id));
+  pushDevices(req, db.prepare(require('./wall-layout').SCREENS_ON_LAYOUT_SQL).all(layoutId, layoutId, layoutId).map((r) => r.id));
   audit('release:layout', { userId: actor && actor.userId, workspaceId: l.workspace_id, details: { layout_id: layoutId, submission_id: gate.submission ? gate.submission.id : null } });
   return { gate };
 }

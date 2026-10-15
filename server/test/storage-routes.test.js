@@ -179,3 +179,24 @@ test('a profile that still holds copies cannot be deleted', async () => {
   db.prepare('DELETE FROM content_locations WHERE content_id = ?').run(cid);
   assert.equal((await call('adminA', 'DELETE', `/${created.body.id}`)).status, 200);
 });
+
+test('⚠️ a platform-granted allow_private does not follow an org admin to a NEW private address', async () => {
+  const op = await call('platform', 'POST', '/', s3Body({ endpoint: 'http://127.0.0.1:9000', allow_private: true }));
+  assert.equal(op.status, 201, op.text);
+  // Editing anything else keeps the grant.
+  const rename = await call('adminA', 'PUT', `/${op.body.id}`, { name: 'still-private' });
+  assert.equal(rename.status, 200, rename.text);
+  assert.equal(rename.body.allow_private, true);
+  // Repointing at another private host drops it, and the private check then refuses the address.
+  const moved = await call('adminA', 'PUT', `/${op.body.id}`, { endpoint: 'http://10.0.0.5:9000' });
+  assert.equal(moved.status, 400, moved.text);
+  const moved2 = await call('adminA', 'PUT', `/${op.body.id}`, { endpoint: 'http://10.0.0.5:9000', allow_private: true });
+  assert.equal(moved2.status, 403, moved2.text);
+  const row = db.prepare('SELECT endpoint, allow_private FROM storage_profiles WHERE id = ?').get(op.body.id);
+  assert.equal(row.endpoint, 'http://127.0.0.1:9000');
+  assert.equal(row.allow_private, 1);
+  // A platform admin may still move it.
+  const pa = await call('platform', 'PUT', `/${op.body.id}`, { endpoint: 'http://10.0.0.5:9000' });
+  assert.equal(pa.status, 200, pa.text);
+  assert.equal(pa.body.allow_private, true);
+});

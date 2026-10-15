@@ -92,8 +92,28 @@ function send(res, { status, html }) {
 function resolve(req) {
   const userId = String((req.query && req.query.u) || (req.body && req.body.u) || '').trim();
   const token = String((req.query && req.query.t) || (req.body && req.body.t) || '').trim();
-  if (!verify(userId, token)) return null;
+  if (!verify(userId, token, listOf(req))) return null;
   return db.prepare('SELECT id, email, email_alerts FROM users WHERE id = ?').get(userId) || null;
+}
+
+/*
+ * Which mailing list the link is for. No `l` is the original alert-email link, so every link already
+ * in an inbox keeps meaning what it meant. The token is bound to the list (lib/unsubscribe-token.js
+ * PURPOSES), so editing `l` in a forwarded digest link does not turn it into an alerts unsubscribe:
+ * it just stops verifying.
+ */
+function listOf(req) {
+  const l = String((req.query && req.query.l) || (req.body && req.body.l) || '').trim();
+  return l === 'freshness' ? 'freshness' : 'alerts';
+}
+
+// The weekly freshness digest (services/freshness-digest.js). Its own preference row, so stopping
+// it leaves offline alerts alone — those are the emails nobody should lose by accident.
+function digestOptedOut(userId) {
+  try {
+    const r = db.prepare('SELECT opted_out FROM freshness_digest_prefs WHERE user_id = ?').get(userId);
+    return !!(r && r.opted_out);
+  } catch (e) { return false; }
 }
 
 const REFUSAL = `
@@ -108,6 +128,26 @@ const REFUSAL = `
 router.get('/', (req, res) => {
   const user = resolve(req);
   if (!user) return send(res, page("Link isn't valid", REFUSAL, 400));
+
+  if (listOf(req) === 'freshness') {
+    if (digestOptedOut(user.id)) {
+      return send(res, page('Already unsubscribed', `
+        <h1>You're already unsubscribed</h1>
+        <p><span class="addr">${esc(user.email)}</span> is not receiving the weekly freshness digest.</p>
+        <p class="muted">Nothing more to do. You can turn it back on any time on the Freshness page.</p>`));
+    }
+    return send(res, page('Unsubscribe', `
+      <h1>Stop the weekly freshness digest?</h1>
+      <p>We'll stop sending the weekly "what is going stale on your screens" email to
+      <span class="addr">${esc(user.email)}</span>.</p>
+      <p class="muted">Alerts about your screens, such as a display going offline, are not affected.</p>
+      <form method="POST" action="/unsubscribe">
+        <input type="hidden" name="u" value="${esc(user.id)}">
+        <input type="hidden" name="t" value="${esc(String(req.query.t || ''))}">
+        <input type="hidden" name="l" value="freshness">
+        <button type="submit">Yes, stop the digest</button>
+      </form>`));
+  }
 
   if (!user.email_alerts) {
     return send(res, page('Already unsubscribed', `
@@ -145,6 +185,19 @@ router.post('/', (req, res) => {
   // See isCopiedUser above: writing the copy would leave the primary still sending.
   if (config.primaryUrl && isCopiedUser(user.id)) {
     return require('../lib/replica-proxy').proxyToPrimary(req, res, config);
+  }
+
+  if (listOf(req) === 'freshness') {
+    if (!digestOptedOut(user.id)) {
+      db.prepare(`INSERT INTO freshness_digest_prefs (user_id, opted_out, opted_out_at) VALUES (?, 1, strftime('%s','now'))
+                  ON CONFLICT(user_id) DO UPDATE SET opted_out = 1, opted_out_at = strftime('%s','now')`).run(user.id);
+      audit('freshness_digest_unsubscribed', { userId: user.id, ip: req.ip || null, details: { via: 'email_link', email: user.email } });
+    }
+    return send(res, page('Unsubscribed', `
+      <h1>Done &mdash; no more freshness digests</h1>
+      <p>We've stopped the weekly freshness digest to <span class="addr">${esc(user.email)}</span>.</p>
+      <p class="muted">Alerts about your screens still arrive. You can turn the digest back on any time on
+      the Freshness page in your dashboard.</p>`));
   }
 
   if (user.email_alerts) {

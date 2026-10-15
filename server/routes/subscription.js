@@ -99,6 +99,23 @@ router.get('/me', requireAuth, (req, res) => {
   });
 });
 
+// 3.0: client-side funnel events (lib/conversion-events.js). Closed vocabulary, hosted only; on a
+// self-hosted instance this accepts and does nothing, so the client never has to ask which it is.
+router.post('/events', requireAuth, (req, res) => {
+  const conversion = require('../lib/conversion-events');
+  const { event, meta } = req.body || {};
+  if (!conversion.CLIENT_EVENTS.has(event)) return res.status(400).json({ error: 'Unknown event' });
+  if (String(req.user.id).includes(':')) return res.json({ ok: true, recorded: false }); // support/recovery
+  const recorded = conversion.record(db, { userId: req.user.id, workspaceId: req.jwtWorkspaceId || null, event, meta });
+  res.json({ ok: true, recorded });
+});
+
+// 3.0: the trial-to-paid funnel for platform admins (Platform > Overview).
+router.get('/funnel', requireAuth, requireSuperAdmin, (req, res) => {
+  const conversion = require('../lib/conversion-events');
+  res.json({ enabled: conversion.enabled(), ...conversion.funnel(db, { days: parseInt(req.query.days, 10) || 30 }) });
+});
+
 // Admin: assign plan to user
 router.post('/assign', requireAuth, requireSuperAdmin, (req, res) => {
   const { user_id, plan_id } = req.body;

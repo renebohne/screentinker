@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#111827">
+  <meta name="robots" content="noindex">
+  <meta name="referrer" content="no-referrer">
+  <link rel="icon" href="/assets/icon-192.png">
+  <title>Share your screen</title>
+  <link rel="stylesheet" href="/css/variables.css">
+  <link rel="stylesheet" href="/css/reset.css">
+  <link rel="stylesheet" href="/css/main.css">
+  <style>
+    body { min-height: 100vh; display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px 32px; background: var(--bg-primary); color: var(--text-primary); }
+    .share-card { width: 100%; max-width: 440px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 28px 24px; }
+    .share-card h1 { font-size: 22px; margin: 0 0 6px; }
+    .share-card .lead { color: var(--text-secondary); font-size: 14px; line-height: 1.5; margin: 0 0 20px; }
+    .share-field { display: grid; gap: 6px; margin-bottom: 14px; }
+    .share-field label { font-size: 13px; font-weight: 600; }
+    #shareCode { font: 700 24px/1.2 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .12em; text-transform: uppercase; text-align: center; }
+    .share-check { display: flex; align-items: center; gap: 8px; font-size: 14px; margin: 4px 0 18px; cursor: pointer; }
+    .share-go { width: 100%; font-size: 16px; padding: 12px 18px; justify-content: center; }
+    .share-ways { display: grid; gap: 10px; }
+    .share-note { font-size: 13px; line-height: 1.5; color: var(--text-secondary); margin: 2px 0 0; }
+    .share-facing { display: flex; gap: 8px; margin: 0 0 12px; }
+    .share-facing label { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 14px; cursor: pointer; }
+    .share-facing input:checked + span { font-weight: 700; }
+    .share-msg { min-height: 1.4em; margin-top: 14px; font-size: 14px; line-height: 1.5; }
+    .share-msg.error { color: var(--danger); }
+    .share-live { text-align: center; }
+    .share-live .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: var(--warning, #f59e0b); margin-right: 8px; vertical-align: middle; }
+    .share-live.on .dot { background: var(--danger, #ef4444); }
+    .share-live h1 { margin-bottom: 10px; }
+    .share-live .state { color: var(--text-secondary); margin-bottom: 22px; }
+    .share-live .share-go + .share-go { margin-top: 10px; }
+    .share-room { text-align: left; margin: 0 0 20px; border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; }
+    .share-room h2 { font-size: 13px; margin: 0 0 8px; color: var(--text-secondary); font-weight: 600; }
+    .share-room ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+    .share-room li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 14px; }
+    .share-room li .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .share-room li small { color: var(--text-muted); }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main class="share-card">
+    <section id="shareForm">
+      <h1 data-t="screen_share.guest_page.title"></h1>
+      <p class="lead" data-t="screen_share.guest_page.lead_any"></p>
+      <form id="shareJoin" autocomplete="off">
+        <div class="share-field">
+          <label for="shareCode" data-t="screen_share.guest_page.code"></label>
+          <input id="shareCode" class="input" inputmode="text" autocapitalize="characters" spellcheck="false" maxlength="12" placeholder="ABCD-1234" required>
+        </div>
+        <div class="share-field">
+          <label for="shareName" data-t="screen_share.guest_page.name"></label>
+          <input id="shareName" class="input" maxlength="40" autocomplete="name">
+        </div>
+        <label class="share-check"><input type="checkbox" id="shareAudio"> <span data-t="screen_share.include_audio"></span></label>
+        <div class="share-ways">
+          <button type="submit" class="btn btn-primary share-go" id="shareGo" data-t="screen_share.guest_page.go"></button>
+          <p class="share-note" id="shareScreenNote" hidden></p>
+          <button type="button" class="btn btn-secondary share-go" id="shareApp" data-t="screen_share.guest_page.open_app" hidden></button>
+          <div id="shareCameraBox" hidden>
+            <div class="share-facing" role="radiogroup">
+              <label><input type="radio" name="shareFacing" value="environment" checked><span data-t="screen_share.guest_page.facing_back"></span></label>
+              <label><input type="radio" name="shareFacing" value="user"><span data-t="screen_share.guest_page.facing_front"></span></label>
+            </div>
+            <button type="button" class="btn btn-primary share-go" id="shareCamera" data-t="screen_share.guest_page.go_camera"></button>
+            <p class="share-note" data-t="screen_share.guest_page.camera_hint"></p>
+          </div>
+        </div>
+      </form>
+      <p class="share-msg" id="shareMsg" role="status"></p>
+    </section>
+    <section id="shareLive" class="share-live" hidden>
+      <h1><span class="dot" aria-hidden="true"></span><span id="shareLiveTitle"></span></h1>
+      <p class="state" id="shareLiveState"></p>
+      <div class="share-room" id="shareRoom" hidden>
+        <h2 id="shareRoomTitle"></h2>
+        <ul id="shareRoomList"></ul>
+      </div>
+      <p class="share-msg" id="shareLiveMsg" role="status"></p>
+      <button type="button" class="btn btn-secondary share-go" id="shareFlip" data-t="screen_share.guest_page.switch_camera" hidden></button>
+      <button type="button" class="btn btn-danger share-go" id="shareStop" data-t="screen_share.stop"></button>
+    </section>
+  </main>
+  <script type="module" src="/js/share-page.js"></script>
+</body>
+</html>

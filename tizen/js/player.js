@@ -9,13 +9,80 @@
  *                   (the server flattens the .wgt/.zip; this player unpacks nothing)
  * Content file URL: {server}/api/content/{content_id}/file  (public)
  */
-// Minimal i18n for the Tizen player (no shared i18n module here). Falls back to en.
+// Minimal i18n for the Tizen player (no shared i18n module here). Falls back to en, per key.
+// 3.0 TV-safe video: the tall_video_* notes, and portrait_video_unsupported no longer promises a
+// "mark it Landscape" switch that did not exist — it names the real one (video_prerotated).
 var TIZEN_I18N = {
-  en: { nothing_scheduled: 'Nothing scheduled right now', no_content: 'No content assigned yet', portrait_video_unsupported: 'Portrait video isn’t supported on this TV — use landscape, or pre-rotate the file and mark it Landscape.' },
-  es: { nothing_scheduled: 'No hay nada programado en este momento', no_content: 'Aún no hay contenido asignado', portrait_video_unsupported: 'El vídeo en vertical no es compatible con este televisor: usa horizontal o rota el archivo y márcalo como Horizontal.' },
-  fr: { nothing_scheduled: 'Rien de programmé pour le moment', no_content: 'Aucun contenu attribué pour l’instant', portrait_video_unsupported: 'La vidéo en portrait n’est pas prise en charge sur ce téléviseur — utilisez le paysage, ou faites pivoter le fichier et marquez-le Paysage.' },
-  de: { nothing_scheduled: 'Derzeit ist nichts geplant', no_content: 'Noch kein Inhalt zugewiesen', portrait_video_unsupported: 'Hochformat-Video wird auf diesem TV nicht unterstützt – nutze Querformat oder drehe die Datei und markiere sie als Querformat.' },
-  pt: { nothing_scheduled: 'Nada programado no momento', no_content: 'Nenhum conteúdo atribuído ainda', portrait_video_unsupported: 'Vídeo em retrato não é suportado nesta TV — use paisagem ou gire o arquivo e marque-o como Paisagem.' }
+  en: {
+    nothing_scheduled: 'Nothing scheduled right now',
+    no_content: 'No content assigned yet',
+    portrait_video_unsupported: 'This TV couldn’t play this video rotated. Upload a copy already turned for portrait screens and tick “Already rotated for portrait screens” in its details.',
+    tall_video_preparing: 'This TV can’t play tall videos directly. ScreenTinker is preparing a TV-friendly copy — it will play automatically once ready.',
+    tall_video_no_ffmpeg: 'This TV can’t play tall videos directly, and the ScreenTinker server can’t make a TV-friendly copy because ffmpeg isn’t installed on it. Install ffmpeg on the server, or upload a landscape version.',
+    tall_video_unavailable: 'This TV can’t play tall videos directly, and no TV-friendly copy is available. Upload a landscape version, or ask your administrator.'
+  },
+  es: {
+    nothing_scheduled: 'No hay nada programado en este momento',
+    no_content: 'Aún no hay contenido asignado',
+    portrait_video_unsupported: 'Este televisor no pudo reproducir este vídeo girado. Sube una copia ya girada para pantallas en vertical y marca «Ya está girado para pantallas en vertical» en sus detalles.',
+    tall_video_preparing: 'Este televisor no puede reproducir vídeos altos directamente. ScreenTinker está preparando una copia apta para TV: se reproducirá automáticamente cuando esté lista.',
+    tall_video_no_ffmpeg: 'Este televisor no puede reproducir vídeos altos directamente y el servidor de ScreenTinker no puede crear una copia apta para TV porque no tiene ffmpeg instalado. Instala ffmpeg en el servidor o sube una versión horizontal.',
+    tall_video_unavailable: 'Este televisor no puede reproducir vídeos altos directamente y no hay ninguna copia apta para TV. Sube una versión horizontal o consulta a tu administrador.'
+  },
+  fr: {
+    nothing_scheduled: 'Rien de programmé pour le moment',
+    no_content: 'Aucun contenu attribué pour l’instant',
+    portrait_video_unsupported: 'Ce téléviseur n’a pas pu lire cette vidéo pivotée. Importez une copie déjà tournée pour les écrans en portrait et cochez « Déjà pivotée pour les écrans en portrait » dans ses détails.',
+    tall_video_preparing: 'Ce téléviseur ne peut pas lire directement les vidéos hautes. ScreenTinker prépare une copie adaptée — elle sera lue automatiquement une fois prête.',
+    tall_video_no_ffmpeg: 'Ce téléviseur ne peut pas lire directement les vidéos hautes, et le serveur ScreenTinker ne peut pas créer de copie adaptée car ffmpeg n’y est pas installé. Installez ffmpeg sur le serveur, ou importez une version paysage.',
+    tall_video_unavailable: 'Ce téléviseur ne peut pas lire directement les vidéos hautes, et aucune copie adaptée n’est disponible. Importez une version paysage, ou contactez votre administrateur.'
+  },
+  de: {
+    nothing_scheduled: 'Derzeit ist nichts geplant',
+    no_content: 'Noch kein Inhalt zugewiesen',
+    portrait_video_unsupported: 'Dieser TV konnte das Video nicht gedreht abspielen. Lade eine bereits für Hochformat-Bildschirme gedrehte Kopie hoch und aktiviere in den Details „Bereits für Hochformat-Bildschirme gedreht“.',
+    tall_video_preparing: 'Dieser TV kann hohe Videos nicht direkt abspielen. ScreenTinker bereitet eine TV-taugliche Kopie vor – sie wird automatisch abgespielt, sobald sie fertig ist.',
+    tall_video_no_ffmpeg: 'Dieser TV kann hohe Videos nicht direkt abspielen, und der ScreenTinker-Server kann keine TV-taugliche Kopie erstellen, weil ffmpeg dort nicht installiert ist. Installiere ffmpeg auf dem Server oder lade eine Querformat-Version hoch.',
+    tall_video_unavailable: 'Dieser TV kann hohe Videos nicht direkt abspielen, und es gibt keine TV-taugliche Kopie. Lade eine Querformat-Version hoch oder wende dich an deine Administration.'
+  },
+  pt: {
+    nothing_scheduled: 'Nada programado no momento',
+    no_content: 'Nenhum conteúdo atribuído ainda',
+    portrait_video_unsupported: 'Esta TV não conseguiu reproduzir este vídeo girado. Envie uma cópia já girada para telas em retrato e marque “Já está girado para telas em retrato” nos detalhes.',
+    tall_video_preparing: 'Esta TV não consegue reproduzir vídeos altos diretamente. O ScreenTinker está preparando uma cópia própria para TV — ela será reproduzida automaticamente quando estiver pronta.',
+    tall_video_no_ffmpeg: 'Esta TV não consegue reproduzir vídeos altos diretamente, e o servidor do ScreenTinker não pode criar uma cópia para TV porque o ffmpeg não está instalado nele. Instale o ffmpeg no servidor ou envie uma versão em paisagem.',
+    tall_video_unavailable: 'Esta TV não consegue reproduzir vídeos altos diretamente, e não há cópia própria para TV disponível. Envie uma versão em paisagem ou fale com o administrador.'
+  },
+  it: {
+    portrait_video_unsupported: 'Questa TV non è riuscita a riprodurre il video ruotato. Carica una copia già ruotata per schermi verticali e seleziona “Già ruotato per schermi verticali” nei dettagli.',
+    tall_video_preparing: 'Questa TV non riesce a riprodurre direttamente i video alti. ScreenTinker sta preparando una copia adatta alla TV: verrà riprodotta automaticamente quando è pronta.',
+    tall_video_no_ffmpeg: 'Questa TV non riesce a riprodurre direttamente i video alti e il server ScreenTinker non può creare una copia adatta perché ffmpeg non è installato. Installa ffmpeg sul server o carica una versione orizzontale.',
+    tall_video_unavailable: 'Questa TV non riesce a riprodurre direttamente i video alti e non è disponibile alcuna copia adatta. Carica una versione orizzontale o rivolgiti all’amministratore.'
+  },
+  ja: {
+    portrait_video_unsupported: 'このテレビでは、この動画を回転して再生できませんでした。縦向き画面用に回転済みのコピーをアップロードし、詳細で「縦向き画面用に回転済み」をオンにしてください。',
+    tall_video_preparing: 'このテレビは縦長の動画を直接再生できません。ScreenTinker がテレビ向けのコピーを準備しています。準備ができ次第、自動的に再生されます。',
+    tall_video_no_ffmpeg: 'このテレビは縦長の動画を直接再生できません。また、ScreenTinker サーバーに ffmpeg がインストールされていないため、テレビ向けのコピーを作成できません。サーバーに ffmpeg をインストールするか、横向きの動画をアップロードしてください。',
+    tall_video_unavailable: 'このテレビは縦長の動画を直接再生できず、テレビ向けのコピーもありません。横向きの動画をアップロードするか、管理者にお問い合わせください。'
+  },
+  nl: {
+    portrait_video_unsupported: 'Deze tv kon deze video niet gedraaid afspelen. Upload een kopie die al gedraaid is voor staande schermen en vink in de details “Al gedraaid voor staande schermen” aan.',
+    tall_video_preparing: 'Deze tv kan hoge video’s niet direct afspelen. ScreenTinker maakt een tv-geschikte kopie — die speelt automatisch zodra hij klaar is.',
+    tall_video_no_ffmpeg: 'Deze tv kan hoge video’s niet direct afspelen, en de ScreenTinker-server kan geen tv-geschikte kopie maken omdat ffmpeg er niet op staat. Installeer ffmpeg op de server, of upload een liggende versie.',
+    tall_video_unavailable: 'Deze tv kan hoge video’s niet direct afspelen, en er is geen tv-geschikte kopie. Upload een liggende versie, of vraag het je beheerder.'
+  },
+  zh: {
+    portrait_video_unsupported: '此电视无法旋转播放此视频。请上传已为竖屏旋转好的副本，并在其详情中勾选“已为竖屏旋转”。',
+    tall_video_preparing: '此电视无法直接播放竖长视频。ScreenTinker 正在准备适合电视的副本，准备好后会自动播放。',
+    tall_video_no_ffmpeg: '此电视无法直接播放竖长视频，而且 ScreenTinker 服务器未安装 ffmpeg，无法制作适合电视的副本。请在服务器上安装 ffmpeg，或上传横屏版本。',
+    tall_video_unavailable: '此电视无法直接播放竖长视频，且没有可用的适合电视的副本。请上传横屏版本，或联系管理员。'
+  },
+  hi: {
+    portrait_video_unsupported: 'यह टीवी इस वीडियो को घुमाकर नहीं चला सका। पोर्ट्रेट स्क्रीन के लिए पहले से घुमाई गई कॉपी अपलोड करें और उसके विवरण में “पोर्ट्रेट स्क्रीन के लिए पहले से घुमाया हुआ” चुनें।',
+    tall_video_preparing: 'यह टीवी लंबे वीडियो सीधे नहीं चला सकता। ScreenTinker टीवी-अनुकूल कॉपी तैयार कर रहा है — तैयार होते ही यह अपने-आप चलेगी।',
+    tall_video_no_ffmpeg: 'यह टीवी लंबे वीडियो सीधे नहीं चला सकता, और ScreenTinker सर्वर पर ffmpeg इंस्टॉल न होने से टीवी-अनुकूल कॉपी नहीं बन सकती। सर्वर पर ffmpeg इंस्टॉल करें, या लैंडस्केप वर्ज़न अपलोड करें।',
+    tall_video_unavailable: 'यह टीवी लंबे वीडियो सीधे नहीं चला सकता, और कोई टीवी-अनुकूल कॉपी उपलब्ध नहीं है। लैंडस्केप वर्ज़न अपलोड करें, या अपने एडमिनिस्ट्रेटर से पूछें।'
+  }
 };
 /* The mime lib/html-bundle.js stamps on an uploaded HTML bundle. Matches no image/ or video/
  * prefix, so nothing in the dispatch chains below routes it as media by accident. */
@@ -92,6 +159,12 @@ function stDriftCorrect(v, target, st, nowMs) {
   if (v.playbackRate !== 1.0) v.playbackRate = 1.0;
   return 'hold';
 }
+// 3.0 TV-safe video: the URL of a server-made copy (js/video-plan.js), the cached one when held.
+function variantUrl(base, item, kind) {
+  var mc = window.MediaCache && window.__stMediaCache;
+  var local = mc && window.__stMediaCache.localUrl(StVideoPlan.cacheKey(item, kind), item.video_variants[kind]);
+  return local || (base + StVideoPlan.variantPath(item, kind));
+}
 var TZ_LANG = (function () { try { return (localStorage.getItem('rd_lang') || navigator.language || 'en').split('-')[0]; } catch (e) { return 'en'; } })();
 function tzt(k) { return (TIZEN_I18N[TZ_LANG] && TIZEN_I18N[TZ_LANG][k]) || TIZEN_I18N.en[k] || k; }
 
@@ -128,6 +201,10 @@ function PlaylistPlayer(stageEl, getBase, getDeviceId) {
   // #157: schedule-driven (group-sync) mode — set by app.js. Group-sync advances via its own tick,
   // not the solo timer, and Tizen group-sync doesn't use wallFollower, so this gates the deferral.
   this.scheduleDriven = false;
+  // #624 play to end: the YouTube embed's listener (StPlayToEnd.listen), and whether a wall drives
+  // the screen (app.js wires it to WallController.active()). A wall or group ignores play to end.
+  this._ytStop = null;
+  this.wallActive = function () { return false; };
   // #157 deferred rotation-out: when a removed-but-live item should finish before we swap in the list.
   this._deferredRotation = false;
   this._deferredSuccessorId = null;
@@ -237,6 +314,7 @@ PlaylistPlayer.prototype.indexOfIdentity = function (arr, id) {
 };
 PlaylistPlayer.prototype.hasContentOnScreen = function () {
   if (this._holdShowing) return true;   // a blank hold is on screen even with nothing mounted
+  if (this._flatEl && this._flatEl.querySelector && this._flatEl.querySelector('video')) return true;   // 3.0 TV-safe video
   return !!(this.stage && this.stage.querySelector &&
     (this.stage.querySelector('video') || this.stage.querySelector('img') || this.stage.querySelector('iframe')));
 };
@@ -248,6 +326,11 @@ PlaylistPlayer.prototype.preloadVideo = function (idx) {
   var item = this.items[idx];
   if (!item) return;
   if ((item.mime_type || '').indexOf('video/') !== 0) { this.preloadIdx = idx; this.preloadEl = null; return; }
+  // 3.0 TV-safe video: only the plain <video> path takes a preload; warming a file the flat layer,
+  // AVPlay or a note will handle instead only costs a decoder.
+  if (typeof StVideoPlan !== 'undefined' && StVideoPlan.plan(item, this.orientation, this.avAvailable()).mode !== 'html5') {
+    this.preloadIdx = idx; this.preloadEl = null; return;
+  }
   try {
     if (this.preloadEl && this.preloadEl.parentNode) this.preloadEl.parentNode.removeChild(this.preloadEl);
     var v = document.createElement('video');
@@ -331,7 +414,9 @@ PlaylistPlayer.prototype.load = function (assignments, playbackOrder) {
       // widget_rev for the same reason as schedules and transition above: a widget's IDENTITY
       // is unchanged when it is EDITED, so a content edit produced an identical signature, the
       // update was treated as unchanged, and the screen kept the old render until a restart.
-      return [a.content_id, a.widget_id, a.widget_rev || 0, a.remote_url, a.mime_type, a.schedules || [], a.play_from || '', a.play_until || '', a.enabled === 0 ? 0 : 1, a.fit_mode || '', a.play_when || null, a.tags || [], a.meta || {}, a.transition || null];
+      // 3.0 TV-safe video: a copy becoming ready (or the pre-rotated flag changing) must remount the
+      // item, or a screen showing the "preparing" note would keep showing it.
+      return [a.content_id, a.widget_id, a.widget_rev || 0, a.remote_url, a.mime_type, a.schedules || [], a.play_from || '', a.play_until || '', a.enabled === 0 ? 0 : 1, a.fit_mode || '', a.play_when || null, a.tags || [], a.meta || {}, a.transition || null, a.video_variants || null, a.video_prerotated ? 1 : 0];
   }));
   if (sig === this.sig && this.items.length) {
     // In-place duration/weight refresh: patch live items so a duration or weight edit takes effect
@@ -435,6 +520,7 @@ PlaylistPlayer.prototype.stop = function () {
 
 PlaylistPlayer.prototype.clearStage = function () {
   this._holdShowing = false;
+  if (this._ytStop) { try { this._ytStop(); } catch (e) {} this._ytStop = null; }   // #624
   if (this.avActive) this.avStop(); // #170: tear down any AVPlay session (portrait video)
   // #473: the interactive page lives in the stage; leaving it must end (and wipe) the session, not
   // just drop its DOM. hide() is a no-op when nothing is showing.
@@ -443,6 +529,39 @@ PlaylistPlayer.prototype.clearStage = function () {
   var v = this.stage.querySelector('video');
   if (v) { try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) {} }
   this.stage.innerHTML = '';
+  this._clearFlat();
+};
+
+/*
+ * 3.0 TV-safe video: the unrotated full-screen layer (#flatVideo, a sibling of #stage like the AVPlay
+ * object). A video already turned for a portrait-mounted screen — the server's rot_cw/rot_ccw copy,
+ * or an original the operator marked pre-rotated — plays here, because inside the CSS-rotated stage
+ * the Tizen video plane blacks out (#170), and the file needs no rotation anyway.
+ */
+PlaylistPlayer.prototype._flatLayer = function () {
+  if (this._flatEl) return this._flatEl;
+  var el = (typeof document.getElementById === 'function') ? document.getElementById('flatVideo') : null;
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'flatVideo';
+    el.className = 'flat-video';
+    if (document.body && document.body.appendChild) document.body.appendChild(el);
+  }
+  this._flatEl = el;
+  return el;
+};
+PlaylistPlayer.prototype._clearFlat = function () {
+  var el = this._flatEl;
+  if (!el) return;
+  var v = el.querySelector && el.querySelector('video');
+  if (v) { try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) {} }
+  el.innerHTML = '';
+  el.style.display = 'none';
+};
+PlaylistPlayer.prototype._mediaEls = function () {
+  var list = Array.prototype.slice.call(this.stage.querySelectorAll('video, audio'));
+  if (this._flatEl && this._flatEl.querySelectorAll) list = list.concat(Array.prototype.slice.call(this._flatEl.querySelectorAll('video')));
+  return list;
 };
 
 // default/standby content: if the device carries a fallback IMAGE (set by app.js from the payload's
@@ -478,6 +597,11 @@ PlaylistPlayer.prototype.durationMs = function (item) {
 PlaylistPlayer.prototype.contentUrl = function (item) {
   if (item.remote_url) return item.remote_url;
   if (!item.content_id) return null;
+  // 3.0 TV-safe video: a tall video plays the server's copy for this orientation when one is ready
+  // (js/video-plan.js) — cached under its own key, since it is a different file from the original.
+  var vk = (typeof StVideoPlan !== 'undefined' && (item.mime_type || '').indexOf('video/') === 0)
+    ? StVideoPlan.variantKind(item, this.orientation) : null;
+  if (vk) return variantUrl(this.getBase(), item, vk);
   // A cached copy is preferred whenever we hold the revision this item asks for. That is what keeps
   // the screen alive through an outage — and the revision check is what stops it keeping the screen
   // alive with the WRONG asset after somebody replaced it in the dashboard.
@@ -831,8 +955,10 @@ PlaylistPlayer.prototype.skipSoon = function () {
 };
 
 PlaylistPlayer.prototype.fit = function (el, item) {
-  // assignment may carry a fit hint; default cover (matches Android default)
-  var f = (item.fit || item.scale || 'cover').toLowerCase();
+  // assignment may carry a fit hint; default cover (matches Android default). fit_mode is the
+  // playlist item's own setting (Fit / Fill / Crop in the dashboard) — read first: this used to look
+  // only at fit/scale, which the server never sends, so a per-item "Fit" did nothing full-screen here.
+  var f = String(item.fit_mode || item.fit || item.scale || 'cover').toLowerCase();
   if (f === 'contain' || f === 'fit') el.className = 'contain';
   else if (f === 'fill' || f === 'stretch') el.className = 'fill';
   else el.className = 'cover';
@@ -937,7 +1063,7 @@ PlaylistPlayer.prototype._texturableStageFrame = function () {
   return null;
 };
 PlaylistPlayer.prototype._fitMode = function (item) {
-  var f = (item.fit || item.scale || 'cover').toLowerCase();
+  var f = String(item.fit_mode || item.fit || item.scale || 'cover').toLowerCase();
   if (f === 'contain' || f === 'fit') return 'contain';
   if (f === 'fill' || f === 'stretch') return 'fill';
   return 'cover';
@@ -1173,7 +1299,7 @@ PlaylistPlayer.prototype.renderVideoAv = function (item, single) {
 PlaylistPlayer.prototype.suspend = function () {
   this._suspended = true;
   if (this.avActive) { try { webapis.avplay.suspend(); } catch (e) {} }
-  var media = this.stage.querySelectorAll('video, audio');
+  var media = this._mediaEls();
   for (var i = 0; i < media.length; i++) {
     var m = media[i];
     try { if (!m.paused && !m.ended) { m.__stWasPlaying = true; m.pause(); } } catch (e) {}
@@ -1188,7 +1314,7 @@ PlaylistPlayer.prototype.resume = function (onReplay) {
   if (this.avActive) {
     try { webapis.avplay.restore(); } catch (e) { replay = true; }
   }
-  var list = Array.prototype.slice.call(this.stage.querySelectorAll('video, audio'));
+  var list = this._mediaEls();
   if (this._bedEl) list.push(this._bedEl);
   for (var i = 0; i < list.length; i++) {
     var m = list[i];
@@ -1204,11 +1330,15 @@ PlaylistPlayer.prototype.resume = function (onReplay) {
 };
 
 // AVPlay missing/failed on this device -> honest note (never a silent black), then move on.
+// 3.0: the note says what is actually true — a tall video's TV-friendly copy is being prepared (it
+// will play by itself, the payload remounts it), the server cannot make one (no ffmpeg), or none is
+// available — and the wide-video case names the real "already rotated" switch.
 PlaylistPlayer.prototype.avFallback = function (item) {
   this.avStop();
+  var key = typeof StVideoPlan !== 'undefined' ? StVideoPlan.noteKey(item) : 'portrait_video_unsupported';
   this.stage.innerHTML =
     '<div class="card" style="position:relative"><h1>ScreenTinker</h1>' +
-    '<p class="sub">' + tzt('portrait_video_unsupported') + '</p></div>';
+    '<p class="sub">' + tzt(key) + '</p></div>';
   // Don't wedge on a single looping item; re-check after a beat (or the item's duration).
   this.schedule(Math.max(this.durationMs(item), 30000));
 };
@@ -1222,7 +1352,40 @@ PlaylistPlayer.prototype.avStop = function () {
   this.avActive = false;
 };
 
+// 3.0 TV-safe video: an already-turned video in the unrotated layer (see _flatLayer). A hard cut —
+// like the AVPlay path, nothing here composites into a transition — and the same end/advance rules
+// as the <video> path below.
+PlaylistPlayer.prototype.renderVideoFlat = function (item, single) {
+  var self = this;
+  var url = this.contentUrl(item);
+  if (!url) { this.skipSoon(); return; }
+  var layer = this._flatLayer();
+  this._clearFlat();
+  var v = document.createElement('video');
+  this.currentVideoEl = v;
+  this.fit(v, item);
+  v.autoplay = true; v.muted = true; v.setAttribute('playsinline', '');
+  v.loop = single;
+  v.onended = function () { if (!single) self.advance(); };
+  v.onerror = function () { self.skipSoon(); };
+  v.src = url;
+  layer.appendChild(v);
+  layer.style.display = 'block';
+  var p = v.play(); if (p && p.catch) p.catch(function () {});
+  var applyMute = function () { try { v.muted = self.wallFollower ? true : !!item.muted; } catch (e) {} };
+  v.addEventListener('playing', applyMute, { once: true });
+  if (!single) {
+    var secs = Number(item.content_duration || item.duration_sec) || this.DEFAULT_DURATION;
+    this.schedule((secs + 5) * 1000);                        // safety net if 'ended' never fires
+  }
+};
+
 PlaylistPlayer.prototype.renderVideo = function (item, single) {
+  // 3.0 TV-safe video (js/video-plan.js): a portrait screen plays an already-turned file — the
+  // server's copy of a tall video, or an original marked pre-rotated — unrotated, full-screen.
+  var plan = typeof StVideoPlan !== 'undefined' ? StVideoPlan.plan(item, this.orientation, this.avAvailable()) : null;
+  if (plan && plan.mode === 'flat') return this.renderVideoFlat(item, single);
+  if (plan && plan.mode === 'note') return this.avFallback(item);
   // #170: portrait/flipped video must rotate the Tizen HARDWARE video plane, which a CSS transform
   // on #stage can't do (black screen). Route it through AVPlay; landscape stays on <video>.
   if ((this.orientation === 'portrait' || this.orientation === 'portrait-flipped') && this.avAvailable()) {
@@ -1303,10 +1466,29 @@ PlaylistPlayer.prototype.renderYouTube = function (item, single) {
   var muted = this.wallFollower ? true : !!item.muted;
   // enablejsapi lets a live mute toggle reach the embed by postMessage without reloading it —
   // reloading would restart the video from zero every time an operator touched the control.
+  //
+  // #624 play to end: no loop, and the embed's own length/ENDED reports move the playlist on
+  // (js/play-to-end.js). The item's duration is only the fallback until the length arrives.
+  var P = typeof StPlayToEnd !== 'undefined' ? StPlayToEnd : null;
+  var toEnd = !single && !!P && P.applies(item, this.wallFollower || this.scheduleDriven || this.wallActive(), this.items.length);
+  var loop = P ? P.loopParams(id, toEnd) : '&loop=1&playlist=' + id;
   var src = 'https://www.youtube.com/embed/' + id +
     '?autoplay=1&mute=' + (muted ? 1 : 0) +
-    '&controls=0&rel=0&modestbranding=1&loop=1&playlist=' + id + '&playsinline=1&enablejsapi=1';
-  this.renderFrame(src, single ? 0 : this.durationMs(item), 'autoplay; encrypted-media', vertical);
+    '&controls=0&rel=0&modestbranding=1' + loop + '&playsinline=1&enablejsapi=1';
+  var ms = single ? 0 : (toEnd ? P.waitMs(this.durationMs(item)) : this.durationMs(item));
+  var f = this.renderFrame(src, ms, 'autoplay; encrypted-media', vertical);
+  if (!toEnd || !f) return;
+  var self = this, seq = this._playSeq, started = Date.now();
+  if (this._ytStop) { try { this._ytStop(); } catch (e) {} }
+  this._ytStop = P.listen(f, function (lengthSec) {
+    if (seq !== self._playSeq) return;
+    var safety = P.safetyMs(lengthSec, Date.now() - started);
+    if (safety !== null) self.schedule(safety);
+  }, function () {
+    if (seq !== self._playSeq || !P.endedCounts(Date.now() - started)) return;
+    if (self._ytStop) { try { self._ytStop(); } catch (e) {} self._ytStop = null; }
+    self.advance();
+  });
 };
 
 PlaylistPlayer.prototype.renderWidget = function (item, single) {
@@ -1437,6 +1619,7 @@ PlaylistPlayer.prototype.renderFrame = function (src, advanceMs, allow, vertical
   f.src = src;
   this.stage.appendChild(f);
   if (advanceMs > 0) this.schedule(advanceMs);
+  return f;
 };
 
 PlaylistPlayer.prototype.youtubeId = function (url) {
@@ -1479,6 +1662,10 @@ ZoneRenderer.prototype.invalidate = function () { this.sig = ''; };
 ZoneRenderer.prototype.cancelAll = function () {
   for (var k in this.timers) { if (this.timers.hasOwnProperty(k) && this.timers[k]) clearTimeout(this.timers[k]); }
   this.timers = {};
+  // #624: a play-to-end YouTube zone's listener must not move a zone that is gone.
+  var stops = this.ytStops || {};
+  for (var z in stops) { if (stops.hasOwnProperty(z) && stops[z]) { try { stops[z](); } catch (e) {} } }
+  this.ytStops = {};
 };
 
 ZoneRenderer.prototype.clear = function () {
@@ -1603,6 +1790,10 @@ ZoneRenderer.prototype.durationMs = function (item) {
 ZoneRenderer.prototype.contentUrl = function (item) {
   if (item.remote_url) return item.remote_url;
   if (!item.content_id) return null;
+  // 3.0 TV-safe video: in a zone, a tall video plays its upright 'fit' copy when there is one — the
+  // original is taller than this TV's decoder opens. (A turned copy cannot fill a zone.)
+  if (typeof StVideoPlan !== 'undefined' && (item.mime_type || '').indexOf('video/') === 0 &&
+      StVideoPlan.variantKind(item, 'landscape') === 'fit') return variantUrl(this.getBase(), item, 'fit');
   // A cached copy is preferred whenever we hold the revision this item asks for. That is what keeps
   // the screen alive through an outage — and the revision check is what stops it keeping the screen
   // alive with the WRONG asset after somebody replaced it in the dashboard.
@@ -1615,6 +1806,9 @@ ZoneRenderer.prototype.contentUrl = function (item) {
 
 ZoneRenderer.prototype.showItem = function (zone, list, index) {
   if (this.timers[zone.id]) { clearTimeout(this.timers[zone.id]); this.timers[zone.id] = null; }
+  // #624: whatever this zone showed before is gone, so its YouTube listener must not move it on.
+  if (!this.ytStops) this.ytStops = {};
+  if (this.ytStops[zone.id]) { try { this.ytStops[zone.id](); } catch (e) {} this.ytStops[zone.id] = null; }
 
   var self = this;
   // #74/#75: skip items whose schedule excludes them now; blank-idle the zone and
@@ -1655,10 +1849,27 @@ ZoneRenderer.prototype.showItem = function (zone, list, index) {
       var yid = zrYoutubeId(a.remote_url);
       if (!yid) { if (multi) this.scheduleAdvance(zone, 2000, advance); return; }
       var yvert = /st_aspect=vertical/.test(a.remote_url || '');
+      // #624 play to end: the zone moves on when the video ends (a one-item zone loops); its duration
+      // is only the fallback until the embed reports the length (js/play-to-end.js).
+      var YP = typeof StPlayToEnd !== 'undefined' ? StPlayToEnd : null;
+      var yToEnd = multi && !!YP && YP.applies(a, false, list.length);
       var ysrc = 'https://www.youtube.com/embed/' + yid +
-        '?autoplay=1&mute=1&controls=0&rel=0&modestbranding=1&loop=1&playlist=' + yid + '&playsinline=1';
-      zone.el.appendChild(zrFrame(ysrc, 'autoplay; encrypted-media', yvert));
-      if (multi) this.scheduleAdvance(zone, dur, advance);
+        '?autoplay=1&mute=1&controls=0&rel=0&modestbranding=1' +
+        (YP ? YP.loopParams(yid, yToEnd) : '&loop=1&playlist=' + yid) + '&playsinline=1' + (yToEnd ? '&enablejsapi=1' : '');
+      var yframe = zrFrame(ysrc, 'autoplay; encrypted-media', yvert);
+      zone.el.appendChild(yframe);
+      if (multi) this.scheduleAdvance(zone, yToEnd ? YP.waitMs(dur) : dur, advance);
+      if (yToEnd) {
+        var ystarted = Date.now();
+        this.ytStops[zone.id] = YP.listen(yframe, function (lengthSec) {
+          var safety = YP.safetyMs(lengthSec, Date.now() - ystarted);
+          if (safety !== null) self.scheduleAdvance(zone, safety, advance);
+        }, function () {
+          if (!YP.endedCounts(Date.now() - ystarted)) return;
+          if (self.timers[zone.id]) { clearTimeout(self.timers[zone.id]); self.timers[zone.id] = null; }
+          advance();
+        });
+      }
     } else if (a.widget_type || (a.widget_id && !a.content_id)) {
       zone.el.appendChild(zrFrame(this.getBase() + '/api/widgets/' + a.widget_id + '/render' + (this.getDeviceId() ? '?device=' + encodeURIComponent(this.getDeviceId()) : '?d=') + '&rev=' + (a.widget_rev || 0)));
       if (multi) this.scheduleAdvance(zone, dur, advance);

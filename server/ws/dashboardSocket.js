@@ -37,7 +37,39 @@ function socketActor(socket) {
   return corpActor.fromUser({ id: socket.userId, role: socket.userRole });
 }
 
+/*
+ * ⚠️ RE-RESOLVE THE SESSION BEFORE A WRITE. The handshake resolved the user once and cached the
+ * role on the socket, so a user deleted, logged out everywhere (token_version), demoted from
+ * platform staff, or a support session whose grant was revoked kept fleet control (commands, PTY,
+ * remote input) for as long as the tab stayed open. Re-running the same resolver as requireAuth is
+ * one HMAC + one indexed lookup, cheap enough per write action; reads stay on the cached identity.
+ * A session that no longer resolves is disconnected, not just refused — its rooms are stale too.
+ */
+function revalidateSocket(socket) {
+  const token = socket.handshake && socket.handshake.auth && socket.handshake.auth.token;
+  let session = null;
+  try { session = token ? resolveSessionUser(token) : null; } catch (_) { session = null; }
+  if (!session || session.viaRecovery || !session.user || session.user.id !== socket.userId) {
+    try { socket.disconnect(true); } catch (_) { /* already gone */ }
+    return false;
+  }
+  socket.userRole = session.user.role;
+  return true;
+}
+
+// Write tier on a whole workspace (the scope of a group or workspace talk broadcast).
+function canWriteWorkspace(socket, workspaceId) {
+  if (!workspaceId) return false;
+  if (!revalidateSocket(socket)) return false;
+  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId);
+  if (!ws) return false;
+  const ctx = accessContext(socket.userId, socket.userRole, ws);
+  if (!ctx) return false;
+  return ctx.actingAs || ctx.workspaceRole === 'workspace_editor' || ctx.workspaceRole === 'workspace_admin';
+}
+
 function canActOnDevice(socket, deviceId, tier /* 'read' | 'write' */) {
+  if (tier !== 'read' && !revalidateSocket(socket)) return false;
   const device = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(deviceId);
   if (!device || !device.workspace_id) return false;
   const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(device.workspace_id);
@@ -50,8 +82,13 @@ function canActOnDevice(socket, deviceId, tier /* 'read' | 'write' */) {
   return ctx.workspaceRole === 'workspace_editor' || ctx.workspaceRole === 'workspace_admin';
 }
 
+// The /dashboard namespace once setupDashboardSocket has run (null before, e.g. in unit tests).
+let _dashboardNs = null;
+function userRoom(userId) { return `user-sock:${userId}`; }
+
 module.exports = function setupDashboardSocket(io) {
   const dashboardNs = io.of('/dashboard');
+  _dashboardNs = dashboardNs;
   const deviceNs = io.of('/device');
   /*
    * The PTY relay authorises an open with EXACTLY the gate a `shell` command passes through below:
@@ -106,6 +143,9 @@ module.exports = function setupDashboardSocket(io) {
     const wsIds = accessibleWorkspaceIds(socket.userId, socket.userRole);
     const rooms = roomsForDashboard(wsIds, isPlatformRole(socket.userRole));
     for (const room of rooms) socket.join(room);
+    // Per-user room, used ONLY to find this user's sockets for disconnectUserSockets — nothing is
+    // ever emitted to it.
+    socket.join(userRoom(socket.userId));
     console.log(`Dashboard client connected: ${socket.id} (user: ${socket.userId}, rooms: ${rooms.length})`);
 
     /*
@@ -321,6 +361,15 @@ module.exports = function setupDashboardSocket(io) {
       const kind = data && data.scope && data.scope.kind;
       const id = data && data.scope && data.scope.id;
       if ((kind !== 'group' && kind !== 'workspace') || !id) return;
+      // ⚠️ Deleting the shared broadcast stream cuts EVERY listener off, so it needs write access to
+      // the scope itself — as publishing to it does (requireGroupWrite / the workspace talk route).
+      // It used to run for any {kind,id}, letting any dashboard user end another tenant's broadcast.
+      let scopeWs = null;
+      try {
+        scopeWs = kind === 'workspace' ? id
+          : (db.prepare('SELECT workspace_id FROM device_groups WHERE id = ?').get(id) || {}).workspace_id || null;
+      } catch (_) { scopeWs = null; }
+      if (!canWriteWorkspace(socket, scopeWs)) return;
       for (const d of scopeDevices(kind, id)) {
         if (canActOnDevice(socket, d.id, 'write')) deviceNs.to(d.id).emit('device:talk-stop', {});
       }
@@ -456,3 +505,31 @@ module.exports = function setupDashboardSocket(io) {
   return dashboardNs;
 };
 
+/*
+ * ⚠️ Close every open dashboard socket of a user whose access just shrank (deleted, removed from a
+ * workspace, demoted, support grant revoked). The write-tier re-check above already refuses their
+ * next action, but the socket also holds workspace ROOMS joined at connect, and would keep
+ * receiving that workspace's live device events. A dashboard reconnects on its own; the new
+ * handshake resolves the user and rooms afresh (or fails, for a deleted user / revoked grant).
+ * Best-effort: never throws, and a no-op before the namespace exists.
+ */
+module.exports.disconnectUserSockets = function disconnectUserSockets(userId) {
+  if (!_dashboardNs || !userId) return;
+  try { _dashboardNs.in(userRoom(userId)).disconnectSockets(true); } catch (_) { /* best-effort */ }
+};
+
+/*
+ * A user REMOVED from one workspace keeps their other memberships, so closing their dashboard
+ * would be heavier than needed (the client does not auto-reconnect after a server-side close).
+ * Instead take their open sockets out of that workspace's room — unless they still reach it some
+ * other way (org admin, platform staff). Writes there are already refused live by canActOnDevice.
+ */
+module.exports.dropUserFromWorkspace = function dropUserFromWorkspace(userId, workspaceId) {
+  if (!_dashboardNs || !userId || !workspaceId) return;
+  try {
+    const u = db.prepare('SELECT role FROM users WHERE id = ?').get(userId);
+    if (u && accessibleWorkspaceIds(userId, u.role).includes(workspaceId)) return;
+    _dashboardNs.in(userRoom(userId)).socketsLeave(require('../lib/socket-rooms').workspaceRoom(workspaceId));
+  } catch (_) { /* best-effort */ }
+};
+module.exports.revalidateSocket = revalidateSocket;

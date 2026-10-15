@@ -10,6 +10,7 @@ const { chunkedDelete, yieldTick, currentBand } = require('../lib/chunked-prune'
 const dbDir = path.dirname(config.dbPath);
 if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
 
+const dbExistedBefore = fs.existsSync(config.dbPath) && fs.statSync(config.dbPath).size > 0;
 const db = new Database(config.dbPath);
 
 // Wait through a brief writer lock instead of failing the statement outright. better-sqlite3
@@ -21,6 +22,20 @@ db.pragma('busy_timeout = 5000');
 // Enable WAL mode and foreign keys
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+
+// 3.0: a restore point on the first boot of every new version, BEFORE schema.sql and the migrations
+// touch anything (lib/upgrade-snapshot.js). Covers a 2.6 -> 3.0 upgrade however the code arrived.
+// Whether THIS boot is an upgrade of an existing install (read before the snapshot records the new
+// version). Remembered below as app_settings.last_upgraded_at, once the table exists.
+const _bootUpgraded = (() => {
+  try {
+    const last = require('../lib/upgrade-snapshot').readLastVersion(dbDir);
+    return dbExistedBefore && last !== require('../version');
+  } catch { return false; }
+})();
+require('../lib/upgrade-snapshot').snapshotOnVersionChange({
+  db, dbPath: config.dbPath, existedBefore: dbExistedBefore, version: require('../version'), copy: copyFileBytes,
+});
 
 // Run schema
 const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
@@ -2225,6 +2240,47 @@ const migrations = [
   'INSERT OR IGNORE INTO play_log_rollup_state (id, rolled_through_hour, updated_at) VALUES (1, 0, 0)',
 
   /*
+   * ⚠️ RAW KEEPS CHANGING AFTER ITS HOUR IS ROLLED UP. The rollup computes an hour once, when it
+   * completes, but plays are closed (duration_sec written) when they END, an offline player's
+   * backlog arrives with past started_at, and a device delete cascades its rows away. Measured on
+   * production 2026-10-13: seconds up to 40% short in some workspaces, deleted devices still
+   * counted. Pruning raw would have made every one of those permanent.
+   *
+   * ⚠️ NOT EXISTS, NOT `INSERT OR IGNORE`: the statement that fires a trigger overrides the
+   * trigger's conflict clause, and an FK action (content delete → SET NULL) runs with ABORT, so
+   * marking an hour twice raised UNIQUE and aborted the delete itself.
+   *
+   * So every write to an already-rolled hour marks it dirty, and services/play-rollup recomputes
+   * dirty hours from raw. Triggers rather than call sites: they cannot be forgotten by the next
+   * writer, and they see FK cascades (device delete, content/workspace SET NULL), which no call
+   * site does.
+   *
+   * raw_floor_hour is where the PRUNE has deleted up to. The prune raises it BEFORE it deletes, so
+   * the delete trigger can tell "a device was deleted" (recompute the hour) from "retention aged
+   * this out" (the aggregate is now the only copy — recomputing it would empty it).
+   */
+  'ALTER TABLE play_log_rollup_state ADD COLUMN raw_floor_hour INTEGER NOT NULL DEFAULT 0',
+  'CREATE TABLE IF NOT EXISTS play_log_rollup_dirty (hour_utc INTEGER PRIMARY KEY)',
+  `CREATE TRIGGER IF NOT EXISTS trg_play_logs_rollup_dirty_ins AFTER INSERT ON play_logs
+     WHEN NEW.started_at < (SELECT rolled_through_hour + 3600 FROM play_log_rollup_state WHERE id = 1)
+     BEGIN
+       INSERT INTO play_log_rollup_dirty (hour_utc) SELECT CAST(NEW.started_at / 3600 AS INTEGER) * 3600 WHERE NOT EXISTS (SELECT 1 FROM play_log_rollup_dirty WHERE hour_utc = CAST(NEW.started_at / 3600 AS INTEGER) * 3600);
+     END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_play_logs_rollup_dirty_upd
+     AFTER UPDATE OF started_at, duration_sec, device_id, content_id, workspace_id ON play_logs
+     WHEN MIN(OLD.started_at, NEW.started_at) < (SELECT rolled_through_hour + 3600 FROM play_log_rollup_state WHERE id = 1)
+     BEGIN
+       INSERT INTO play_log_rollup_dirty (hour_utc) SELECT CAST(OLD.started_at / 3600 AS INTEGER) * 3600 WHERE NOT EXISTS (SELECT 1 FROM play_log_rollup_dirty WHERE hour_utc = CAST(OLD.started_at / 3600 AS INTEGER) * 3600);
+       INSERT INTO play_log_rollup_dirty (hour_utc) SELECT CAST(NEW.started_at / 3600 AS INTEGER) * 3600 WHERE NOT EXISTS (SELECT 1 FROM play_log_rollup_dirty WHERE hour_utc = CAST(NEW.started_at / 3600 AS INTEGER) * 3600);
+     END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_play_logs_rollup_dirty_del AFTER DELETE ON play_logs
+     WHEN OLD.started_at >= (SELECT raw_floor_hour FROM play_log_rollup_state WHERE id = 1)
+      AND OLD.started_at < (SELECT rolled_through_hour + 3600 FROM play_log_rollup_state WHERE id = 1)
+     BEGIN
+       INSERT INTO play_log_rollup_dirty (hour_utc) SELECT CAST(OLD.started_at / 3600 AS INTEGER) * 3600 WHERE NOT EXISTS (SELECT 1 FROM play_log_rollup_dirty WHERE hour_utc = CAST(OLD.started_at / 3600 AS INTEGER) * 3600);
+     END`,
+
+  /*
    * ⚠️ DROP idx_play_logs_content — 263 MB serving nothing.
    *
    * Verified on production 2026-09-29 rather than assumed: EXPLAIN QUERY PLAN on every report
@@ -2418,6 +2474,952 @@ const migrations = [
      updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
      committed_at INTEGER)`,
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_storage_migrations_active ON storage_migrations(org_id) WHERE state IN ('copying','ready_to_commit')",
+  /*
+   * 3.0 — all additive; a code-only rollback to 2.6 leaves dead columns and an unread table.
+   *
+   * token_version: embedded in every session JWT (middleware/auth.js) and compared on each request,
+   * so a password change/reset or TOTP change ends every other session. A 2.x token carries no
+   * claim and counts as version 0, so the upgrade itself logs nobody out.
+   */
+  "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0",
+  /*
+   * ui_mode: 'simple' shows the essentials (screens, content, playlists, schedule...), 'advanced'
+   * shows everything. The DEFAULT is for NEW rows; the one-time v3_0_existing_users step below puts
+   * every account that existed before 3.0 on 'advanced', so nobody who already knows the product
+   * loses a menu item on upgrade. onboarded_at: the first-run guide is finished or skipped
+   * (server-side, so a new browser does not start the guide again); backfilled for the same accounts.
+   */
+  "ALTER TABLE users ADD COLUMN ui_mode TEXT NOT NULL DEFAULT 'simple'",
+  "ALTER TABLE users ADD COLUMN onboarded_at INTEGER",
+  /*
+   * Trial-to-paid funnel (lib/conversion-events.js). Hosted only: nothing is written when
+   * SELF_HOSTED is set. No foreign keys, like the other log tables; user deletion removes a
+   * user's rows (lib/user-deletion.js).
+   */
+  `CREATE TABLE IF NOT EXISTS conversion_events (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     user_id TEXT,
+     workspace_id TEXT,
+     event TEXT NOT NULL,
+     meta TEXT,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  "CREATE INDEX IF NOT EXISTS idx_conversion_events_event ON conversion_events(event, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_conversion_events_user ON conversion_events(user_id, event)",
+  /*
+   * 3.0: single-use codes handing a single sign-on session to the Manager app (routes/auth.js
+   * /sso/app-exchange). Stored hashed, live for 2 minutes, deleted on use and swept on each insert.
+   */
+  `CREATE TABLE IF NOT EXISTS app_sso_codes (
+     code_hash TEXT PRIMARY KEY,
+     token TEXT NOT NULL,
+     workspace_id TEXT,
+     challenge TEXT NOT NULL,
+     expires_at INTEGER NOT NULL)`,
+  /*
+   * 3.0: free stock photos and videos (lib/stock-media.js). Where a library item came from when it
+   * was added from Pexels or Pixabay: provider, item id, photographer, licence. JSON; NULL for every
+   * other item. A column of its own rather than `meta`, because meta is the operator's to edit and
+   * is copied to players, and a credit is neither.
+   */
+  'ALTER TABLE content ADD COLUMN attribution TEXT',
+  /*
+   * 3.0: passkeys (lib/passkeys.js, routes/passkeys.js). One row per registered credential.
+   * credential_id and public_key are base64url; the public key is not a secret, so it is stored
+   * plain. user_handle is the random WebAuthn user id the authenticator holds (never the email or
+   * our user id). rp_id records which address the passkey is bound to, so Settings can say so.
+   * ON DELETE CASCADE plus an explicit delete in lib/user-deletion.js, like the TOTP codes.
+   */
+  `CREATE TABLE IF NOT EXISTS webauthn_credentials (
+     id TEXT PRIMARY KEY,
+     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     credential_id TEXT NOT NULL UNIQUE,
+     public_key TEXT NOT NULL,
+     counter INTEGER NOT NULL DEFAULT 0,
+     transports TEXT,
+     user_handle TEXT NOT NULL,
+     rp_id TEXT NOT NULL,
+     name TEXT NOT NULL,
+     aaguid TEXT,
+     device_type TEXT,
+     backed_up INTEGER NOT NULL DEFAULT 0,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     last_used_at INTEGER)`,
+  "CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id)",
+  /*
+   * 3.0: outstanding WebAuthn challenges. Single-use (deleted when read), five minutes, swept on
+   * every insert and capped in size (lib/passkeys.js), because the login page mints one per view.
+   */
+  `CREATE TABLE IF NOT EXISTS webauthn_challenges (
+     id TEXT PRIMARY KEY,
+     challenge TEXT NOT NULL,
+     purpose TEXT NOT NULL,
+     user_id TEXT,
+     user_handle TEXT,
+     rp_id TEXT NOT NULL,
+     origin TEXT NOT NULL,
+     expires_at INTEGER NOT NULL)`,
+  "CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires ON webauthn_challenges(expires_at)",
+  /*
+   * 3.0 content freshness (lib/freshness.js, docs/content-freshness.md). All three are node-local and
+   * NOT replicated: a replica serving a copied workspace reads the defaults, and any write to one is
+   * forwarded to the primary by resolveTenancy like every other write.
+   *
+   * freshness_settings: a workspace's thresholds. No row = the defaults (30 / 90 days, a 7-day play
+   * window, digest on), so an install that never opens the page carries no rows at all.
+   * freshness_snoozes: "I know, leave it" for one item, screen or playlist, until a time.
+   * freshness_digest_prefs: per PERSON, not per workspace: one weekly email covers every workspace
+   * they edit. No row = opted in (the default for admins and editors); last_sent_at is the weekly
+   * once-only marker.
+   */
+  `CREATE TABLE IF NOT EXISTS freshness_settings (
+     workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+     stale_days INTEGER NOT NULL DEFAULT 30,
+     very_stale_days INTEGER NOT NULL DEFAULT 90,
+     window_days INTEGER NOT NULL DEFAULT 7,
+     digest_enabled INTEGER NOT NULL DEFAULT 1,
+     updated_by TEXT,
+     updated_at INTEGER)`,
+  `CREATE TABLE IF NOT EXISTS freshness_snoozes (
+     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+     resource_type TEXT NOT NULL CHECK (resource_type IN ('content','widget','device','playlist')),
+     resource_id TEXT NOT NULL,
+     until INTEGER NOT NULL,
+     created_by TEXT,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     PRIMARY KEY (workspace_id, resource_type, resource_id))`,
+  `CREATE TABLE IF NOT EXISTS freshness_digest_prefs (
+     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+     opted_out INTEGER NOT NULL DEFAULT 0,
+     opted_out_at INTEGER,
+     last_sent_at INTEGER)`,
+  /*
+   * 3.0: screen share to a screen (lib/screen-share.js). screen_share_guest is the per-screen
+   * meeting-room code (a guest in the room shares without an account) — OFF by default, an admin
+   * turns it on screen by screen. Its workspace switch, workspaces.screen_share_enabled, is added in
+   * the 'workspace and organization settings' step below: workspaces does not exist yet here.
+   */
+  "ALTER TABLE devices ADD COLUMN screen_share_guest INTEGER NOT NULL DEFAULT 0",
+  /*
+   * 3.0: SCIM 2.0 provisioning (routes/scim.js, lib/scim/*, docs/scim.md). All additive.
+   *
+   * users.disabled_at: set when an organization's identity provider DEACTIVATES an account that
+   * organization owns. Every session, API token and sign-in route refuses a disabled account
+   * (middleware/auth.js, middleware/apiToken.js, routes/auth.js); NULL is the normal state, so an
+   * upgrade changes nobody.
+   */
+  'ALTER TABLE users ADD COLUMN disabled_at INTEGER',
+  // One row per organization that has turned provisioning on. default_* is optional access every
+  // provisioned person gets, on top of whatever their groups map to.
+  `CREATE TABLE IF NOT EXISTS org_scim_settings (
+     organization_id      TEXT PRIMARY KEY,
+     enabled              INTEGER NOT NULL DEFAULT 0,
+     default_workspace_id TEXT,
+     default_role         TEXT,
+     updated_at           INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE)`,
+  /*
+   * The identity provider's bearer credential. SHA-256 of a 256-bit random secret, like api_tokens:
+   * the plaintext is shown once at mint and never stored. created_by is deliberately not a foreign
+   * key, so deleting the admin who minted it neither blocks nor silently revokes provisioning.
+   */
+  `CREATE TABLE IF NOT EXISTS scim_tokens (
+     id              TEXT PRIMARY KEY,
+     organization_id TEXT NOT NULL,
+     token_hash      TEXT NOT NULL UNIQUE,
+     prefix          TEXT NOT NULL,
+     name            TEXT NOT NULL DEFAULT '',
+     created_by      TEXT,
+     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     last_used_at    INTEGER,
+     revoked_at      INTEGER,
+     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE)`,
+  'CREATE INDEX IF NOT EXISTS idx_scim_tokens_org ON scim_tokens(organization_id)',
+  /*
+   * A ScreenTinker account as ONE organization's identity provider sees it. The SCIM id is its own
+   * random value rather than users.id, so nothing an IdP is told identifies the account anywhere else.
+   * suspended: the memberships taken away at deactivation, restored on reactivation (JSON). Whether
+   * this organization OWNS the account's sign-in is not stored: it is read live from
+   * users.auth_provider (lib/scim/provision.js ownsIdentity), so it cannot go stale.
+   */
+  `CREATE TABLE IF NOT EXISTS scim_users (
+     id              TEXT PRIMARY KEY,
+     organization_id TEXT NOT NULL,
+     user_id         TEXT NOT NULL,
+     user_name       TEXT NOT NULL,
+     external_id     TEXT,
+     display_name    TEXT,
+     given_name      TEXT,
+     family_name     TEXT,
+     active          INTEGER NOT NULL DEFAULT 1,
+     suspended       TEXT,
+     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     UNIQUE (organization_id, user_id),
+     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)`,
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_scim_users_username ON scim_users(organization_id, user_name COLLATE NOCASE)',
+  'CREATE INDEX IF NOT EXISTS idx_scim_users_external ON scim_users(organization_id, external_id)',
+  `CREATE TABLE IF NOT EXISTS scim_groups (
+     id              TEXT PRIMARY KEY,
+     organization_id TEXT NOT NULL,
+     display_name    TEXT NOT NULL,
+     external_id     TEXT,
+     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE)`,
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_scim_groups_name ON scim_groups(organization_id, display_name COLLATE NOCASE)',
+  `CREATE TABLE IF NOT EXISTS scim_group_members (
+     group_id     TEXT NOT NULL,
+     scim_user_id TEXT NOT NULL,
+     PRIMARY KEY (group_id, scim_user_id),
+     FOREIGN KEY (group_id) REFERENCES scim_groups(id) ON DELETE CASCADE,
+     FOREIGN KEY (scim_user_id) REFERENCES scim_users(id) ON DELETE CASCADE)`,
+  'CREATE INDEX IF NOT EXISTS idx_scim_group_members_user ON scim_group_members(scim_user_id)',
+  // What a group grants: a role in a workspace of the same organization. Set by an org admin in
+  // Settings, never by the identity provider.
+  `CREATE TABLE IF NOT EXISTS scim_group_mappings (
+     id              TEXT PRIMARY KEY,
+     organization_id TEXT NOT NULL,
+     group_id        TEXT NOT NULL,
+     workspace_id    TEXT NOT NULL,
+     role            TEXT NOT NULL,
+     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     UNIQUE (group_id, workspace_id),
+     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+     FOREIGN KEY (group_id) REFERENCES scim_groups(id) ON DELETE CASCADE,
+     FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE)`,
+  /*
+   * The workspace memberships provisioning is responsible for. Only these are ever removed by it:
+   * access an admin granted by hand is left alone. prior_role is the hand-granted role a group raised,
+   * put back when the group stops applying.
+   */
+  `CREATE TABLE IF NOT EXISTS scim_workspace_grants (
+     workspace_id    TEXT NOT NULL,
+     user_id         TEXT NOT NULL,
+     organization_id TEXT NOT NULL,
+     role            TEXT NOT NULL,
+     prior_role      TEXT,
+     PRIMARY KEY (workspace_id, user_id),
+     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+     FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)`,
+  // "Recent provisioning activity" in Settings. Pruned to the newest few hundred per organization.
+  `CREATE TABLE IF NOT EXISTS scim_events (
+     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+     organization_id TEXT NOT NULL,
+     action          TEXT NOT NULL,
+     resource        TEXT,
+     detail          TEXT,
+     status          INTEGER,
+     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE)`,
+  'CREATE INDEX IF NOT EXISTS idx_scim_events_org ON scim_events(organization_id, id DESC)',
+  /*
+   * 3.0 Make a sign: a workspace's brand kit (lib/brand-kit.js) — the business name, logo, colours
+   * and headline font every built-in sign template is pre-filled and themed with. One row per
+   * workspace, created on first save; no row means "no brand kit yet" and templates use their own
+   * palettes. colors is a JSON array of up to three #RRGGBB strings. logo_content_id points at an
+   * image in the same workspace's library and is re-checked on every read, so deleting the image
+   * simply drops the logo rather than leaving a dangling reference anything renders.
+   */
+  `CREATE TABLE IF NOT EXISTS brand_kits (
+     workspace_id TEXT PRIMARY KEY,
+     business_name TEXT,
+     logo_content_id TEXT,
+     colors TEXT NOT NULL DEFAULT '[]',
+     font TEXT,
+     updated_by TEXT,
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  /*
+   * 3.0: screen verification (lib/screen-verify, docs/screen-verification.md). What each screen is
+   * actually SHOWING, judged from its screenshots. No image is stored in any of these tables —
+   * only measurements and states; frames follow the existing latest-only screenshot retention.
+   *
+   *   _settings    per workspace; no row = the defaults in lib/screen-verify/classify.js
+   *   _state       one row per screen: the state the badge shows, since when, the open incident
+   *   _incidents   history; a row is kept only once confirmed (an unconfirmed suspicion is deleted
+   *                when a good frame arrives), pruned after 90 days
+   *   _deliveries  the once-per-incident alert ledger, like alert_deliveries for outages
+   * workspace_id is stamped on state and incidents and every read also requires the DEVICE to
+   * still be in that workspace, so a screen moved to another workspace takes none of it along.
+   */
+  `CREATE TABLE IF NOT EXISTS screen_verification_settings (
+     workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+     enabled INTEGER NOT NULL DEFAULT 1,
+     cadence_minutes INTEGER NOT NULL DEFAULT 30,
+     sensitivity TEXT NOT NULL DEFAULT 'normal',
+     persist_minutes INTEGER NOT NULL DEFAULT 10,
+     alert_checks TEXT NOT NULL DEFAULT '["blank","frozen","panel_off"]',
+     updated_by TEXT,
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  `CREATE TABLE IF NOT EXISTS screen_verification_state (
+     device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+     workspace_id TEXT,
+     state TEXT NOT NULL DEFAULT 'unknown',
+     state_since INTEGER,
+     detail TEXT,
+     open_incident_id INTEGER,
+     last_check_at INTEGER,
+     last_verdict TEXT,
+     panel_power TEXT,
+     panel_input TEXT,
+     panel_source TEXT,
+     panel_at INTEGER,
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  `CREATE TABLE IF NOT EXISTS screen_verification_incidents (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+     workspace_id TEXT,
+     kind TEXT NOT NULL,
+     detail TEXT,
+     opened_at INTEGER NOT NULL,
+     confirmed_at INTEGER,
+     last_seen_at INTEGER,
+     observations INTEGER NOT NULL DEFAULT 1,
+     good_streak INTEGER NOT NULL DEFAULT 0,
+     resolved_at INTEGER,
+     resolved_reason TEXT)`,
+  'CREATE INDEX IF NOT EXISTS idx_sv_incidents_ws ON screen_verification_incidents(workspace_id, opened_at)',
+  'CREATE INDEX IF NOT EXISTS idx_sv_incidents_device ON screen_verification_incidents(device_id, opened_at)',
+  `CREATE TABLE IF NOT EXISTS screen_verification_deliveries (
+     channel_id TEXT NOT NULL,
+     incident_id INTEGER NOT NULL REFERENCES screen_verification_incidents(id) ON DELETE CASCADE,
+     problem_sent_at INTEGER,
+     ok_sent_at INTEGER,
+     attempts INTEGER NOT NULL DEFAULT 0,
+     ok_attempts INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (channel_id, incident_id))`,
+  /*
+   * 3.0: content requests (lib/content-requests.js, docs/content-requests.md). People WITHOUT an
+   * account submit something for the screens through a shared form; it lands in the review queue.
+   *
+   * request_forms.code is the URL secret (/r/<code>). Rotating it is an UPDATE, so an old link dies
+   * the moment the admin says so. targets / fields / file_rules are JSON the lib validates on write.
+   * Everything a requester typed lives on content_requests, never on users: they have no account.
+   * status_token_hash is the sha256 of the status link's secret — the link is shown once and mailed,
+   * and the database alone cannot be used to read anybody's request status.
+   * request_tickets is the short-lived proof that a requester passed the form's gate (link code,
+   * email code, or SSO); request_email_challenges holds the hashed six-digit codes for email mode.
+   * submissions.request_id ties a queue entry back to the request it reviews.
+   */
+  `CREATE TABLE IF NOT EXISTS request_forms (
+     id TEXT PRIMARY KEY,
+     workspace_id TEXT NOT NULL,
+     code TEXT NOT NULL UNIQUE,
+     title TEXT NOT NULL,
+     intro TEXT NOT NULL DEFAULT '',
+     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','paused','closed')),
+     access_mode TEXT NOT NULL DEFAULT 'link' CHECK (access_mode IN ('link','email','sso')),
+     allowed_domains TEXT NOT NULL DEFAULT '',
+     targets TEXT NOT NULL DEFAULT '[]',
+     fields TEXT NOT NULL DEFAULT '{}',
+     file_rules TEXT NOT NULL DEFAULT '{}',
+     lead_days INTEGER NOT NULL DEFAULT 0,
+     max_window_days INTEGER NOT NULL DEFAULT 60,
+     item_duration_sec INTEGER NOT NULL DEFAULT 10,
+     daily_quota INTEGER NOT NULL DEFAULT 20,
+     folder_id TEXT,
+     created_by TEXT,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  'CREATE INDEX IF NOT EXISTS idx_request_forms_ws ON request_forms(workspace_id)',
+  `CREATE TABLE IF NOT EXISTS content_requests (
+     id TEXT PRIMARY KEY,
+     ref TEXT NOT NULL UNIQUE,
+     form_id TEXT NOT NULL,
+     workspace_id TEXT NOT NULL,
+     status_token_hash TEXT NOT NULL UNIQUE,
+     requester_name TEXT NOT NULL,
+     requester_email TEXT NOT NULL,
+     verified_via TEXT NOT NULL DEFAULT 'none',
+     title TEXT NOT NULL,
+     audience TEXT,
+     notes TEXT,
+     start_date TEXT NOT NULL,
+     end_date TEXT NOT NULL,
+     targets TEXT NOT NULL DEFAULT '[]',
+     content_id TEXT,
+     submission_id TEXT,
+     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','published','rejected','cancelled')),
+     reason TEXT,
+     decided_by TEXT,
+     decided_at INTEGER,
+     publish_result TEXT,
+     ip_hash TEXT,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  'CREATE INDEX IF NOT EXISTS idx_content_requests_ws ON content_requests(workspace_id, status, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_content_requests_form ON content_requests(form_id, created_at)',
+  `CREATE TABLE IF NOT EXISTS request_tickets (
+     id TEXT PRIMARY KEY,
+     form_id TEXT NOT NULL,
+     token_hash TEXT NOT NULL UNIQUE,
+     name TEXT,
+     email TEXT NOT NULL,
+     verified_via TEXT NOT NULL DEFAULT 'none',
+     expires_at INTEGER NOT NULL,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  'CREATE INDEX IF NOT EXISTS idx_request_tickets_exp ON request_tickets(expires_at)',
+  `CREATE TABLE IF NOT EXISTS request_email_challenges (
+     id TEXT PRIMARY KEY,
+     form_id TEXT NOT NULL,
+     email TEXT NOT NULL,
+     name TEXT,
+     code_hash TEXT NOT NULL,
+     attempts INTEGER NOT NULL DEFAULT 0,
+     expires_at INTEGER NOT NULL,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  'CREATE INDEX IF NOT EXISTS idx_request_email_challenges ON request_email_challenges(form_id, email)',
+  'ALTER TABLE submissions ADD COLUMN request_id TEXT',
+  'CREATE INDEX IF NOT EXISTS idx_submissions_request ON submissions(request_id)',
+  /*
+   * 3.0: energy & carbon (lib/energy, docs/energy.md). ESTIMATES from observed panel on-time.
+   *
+   * energy_hourly / energy_daily are written once a minute by the primary's sampler. Both carry the
+   * workspace the screen was in AT THE TIME, in the key: a screen moved mid-day leaves the morning
+   * with its old workspace, the way play_logs snapshots it, so no workspace ever reports another's
+   * electricity. hour = epoch seconds of the UTC hour; day = the SCREEN'S local date. Retention:
+   * hourly 35 days, daily 400 (config.energy), pruned in chunks by the sampler.
+   * energy_daily.on_watts / standby_watts are the figures in force when the row was last written,
+   * used only for a screen that has since been removed.
+   * energy_settings is per workspace (grid country / gCO2e override / default watts);
+   * energy_device_settings is a per-screen override (watts, country), also written by the group bulk.
+   */
+  `CREATE TABLE IF NOT EXISTS energy_hourly (
+     device_id TEXT NOT NULL,
+     workspace_id TEXT NOT NULL,
+     hour INTEGER NOT NULL,
+     on_sec INTEGER NOT NULL DEFAULT 0,
+     sched_off_sec INTEGER NOT NULL DEFAULT 0,
+     panel_off_sec INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (device_id, workspace_id, hour))`,
+  'CREATE INDEX IF NOT EXISTS idx_energy_hourly_ws ON energy_hourly(workspace_id, hour)',
+  'CREATE INDEX IF NOT EXISTS idx_energy_hourly_hour ON energy_hourly(hour)',
+  `CREATE TABLE IF NOT EXISTS energy_daily (
+     device_id TEXT NOT NULL,
+     workspace_id TEXT NOT NULL,
+     day TEXT NOT NULL,
+     on_sec INTEGER NOT NULL DEFAULT 0,
+     sched_off_sec INTEGER NOT NULL DEFAULT 0,
+     panel_off_sec INTEGER NOT NULL DEFAULT 0,
+     offline_sec INTEGER NOT NULL DEFAULT 0,
+     inferred_sec INTEGER NOT NULL DEFAULT 0,
+     on_watts REAL,
+     standby_watts REAL,
+     PRIMARY KEY (device_id, workspace_id, day))`,
+  'CREATE INDEX IF NOT EXISTS idx_energy_daily_ws ON energy_daily(workspace_id, day)',
+  'CREATE INDEX IF NOT EXISTS idx_energy_daily_day ON energy_daily(day)',
+  `CREATE TABLE IF NOT EXISTS energy_settings (
+     workspace_id TEXT PRIMARY KEY,
+     country TEXT,
+     grid_g_per_kwh REAL,
+     default_on_watts REAL,
+     default_standby_watts REAL,
+     updated_by TEXT,
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  `CREATE TABLE IF NOT EXISTS energy_device_settings (
+     device_id TEXT PRIMARY KEY,
+     workspace_id TEXT NOT NULL,
+     on_watts REAL,
+     standby_watts REAL,
+     country TEXT,
+     updated_by TEXT,
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  'CREATE INDEX IF NOT EXISTS idx_energy_device_settings_ws ON energy_device_settings(workspace_id)',
+  /*
+   * 3.0: Private AI (lib/private-ai.js, docs/private-ai.md).
+   *
+   * ai_settings.provider_kind = 'local' marks a workspace's endpoint as a local / private AI server
+   * (Ollama, LM Studio, llama.cpp, vLLM, LocalAI); NULL is the bring-your-own endpoint as before.
+   * endpoint_private is what the last save resolved the host to (1 = only private addresses), for
+   * the "data stays on your network" badge; enforcement re-resolves, it never trusts this column.
+   *
+   * ai_private_hosts: ONE host an operator allowed an organization's AI requests to reach on a
+   * private network, without opening the private ranges for anything else.
+   * org_ai_policy.only_private: the organization allows private AI only (no cloud, no hosted).
+   *
+   * sign_translations: a deck's text in another language, reviewed before it reaches a screen
+   * (status 'draft' until approved). doc is the translated deck document; widget_map is
+   * {source slide widget id: translated widget id}. device_languages: what a screen shows.
+   */
+  'ALTER TABLE ai_settings ADD COLUMN provider_kind TEXT',
+  'ALTER TABLE ai_settings ADD COLUMN endpoint_private INTEGER',
+  `CREATE TABLE IF NOT EXISTS ai_private_hosts (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     org_id TEXT NOT NULL,
+     host TEXT NOT NULL,
+     created_by TEXT,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     UNIQUE (org_id, host))`,
+  `CREATE TABLE IF NOT EXISTS org_ai_policy (
+     org_id TEXT PRIMARY KEY,
+     only_private INTEGER NOT NULL DEFAULT 0,
+     updated_by TEXT,
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  `CREATE TABLE IF NOT EXISTS sign_translations (
+     id TEXT PRIMARY KEY,
+     workspace_id TEXT NOT NULL,
+     source_deck_id TEXT NOT NULL,
+     lang TEXT NOT NULL,
+     status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','approved')),
+     doc TEXT NOT NULL,
+     notes TEXT NOT NULL DEFAULT '[]',
+     widget_map TEXT NOT NULL DEFAULT '{}',
+     source_rev INTEGER,
+     created_by TEXT,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     UNIQUE (source_deck_id, lang))`,
+  'CREATE INDEX IF NOT EXISTS idx_sign_translations_ws ON sign_translations(workspace_id, status)',
+  `CREATE TABLE IF NOT EXISTS device_languages (
+     device_id TEXT PRIMARY KEY,
+     workspace_id TEXT NOT NULL,
+     mode TEXT NOT NULL CHECK (mode IN ('fixed','rotate')),
+     langs TEXT NOT NULL DEFAULT '[]',
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  /*
+   * 3.0: Experiments (lib/experiments, docs/experiments.md). A/B tests of what one playlist slot
+   * shows, judged against sales, QR scans, audience or an uploaded CSV.
+   *
+   *   experiments          the test: variants, mode, outcome choice, the slot row as it was before
+   *                        the test (`original`, so stopping restores it exactly), dates and status
+   *   experiment_units     one row per LOCATION: its screens, the variant it was given (location
+   *                        mode — decided once at start and never recomputed) and its POS locations
+   *   experiment_exposure  what each screen actually played, per variant per hour, copied out of
+   *                        play_logs while the raw rows exist (the hourly rollup has no widget id,
+   *                        and raw rows are pruned) so a finished test keeps its exposure
+   *   experiment_outcomes  AGGREGATES ONLY: (location, hour) -> a number. Imported sales and CSV
+   *                        uploads. No order, line item, customer or finer time is ever stored.
+   * playlist_items.experiment_id marks the rows a running test owns; the snapshot never reads it.
+   */
+  `CREATE TABLE IF NOT EXISTS experiments (
+     id TEXT PRIMARY KEY,
+     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+     name TEXT NOT NULL,
+     status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','running','ended','rolled_out','stopped')),
+     mode TEXT NOT NULL DEFAULT 'location' CHECK (mode IN ('location','time')),
+     playlist_id TEXT,
+     slot_item_id INTEGER,
+     variants TEXT NOT NULL DEFAULT '[]',
+     config TEXT NOT NULL DEFAULT '{}',
+     original TEXT,
+     start_at INTEGER,
+     end_at INTEGER,
+     planned_end_at INTEGER,
+     winner INTEGER,
+     notice TEXT,
+     sales_from INTEGER,
+     sales_synced_to INTEGER,
+     sales_synced_at INTEGER,
+     sales_error TEXT,
+     sales_currency TEXT,
+     created_by TEXT,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  'CREATE INDEX IF NOT EXISTS idx_experiments_ws ON experiments(workspace_id, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments(status)',
+  `CREATE TABLE IF NOT EXISTS experiment_units (
+     experiment_id TEXT NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
+     unit_key TEXT NOT NULL,
+     label TEXT NOT NULL,
+     device_ids TEXT NOT NULL DEFAULT '[]',
+     variant INTEGER,
+     square_location_id TEXT,
+     shopify_location_id TEXT,
+     PRIMARY KEY (experiment_id, unit_key))`,
+  `CREATE TABLE IF NOT EXISTS experiment_exposure (
+     experiment_id TEXT NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
+     device_id TEXT NOT NULL,
+     hour_utc INTEGER NOT NULL,
+     variant INTEGER NOT NULL,
+     plays INTEGER NOT NULL DEFAULT 0,
+     seconds INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (experiment_id, device_id, hour_utc, variant))`,
+  `CREATE TABLE IF NOT EXISTS experiment_outcomes (
+     experiment_id TEXT NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
+     source TEXT NOT NULL,
+     metric TEXT NOT NULL,
+     unit_key TEXT NOT NULL,
+     hour_utc INTEGER NOT NULL,
+     value REAL NOT NULL DEFAULT 0,
+     PRIMARY KEY (experiment_id, source, metric, unit_key, hour_utc))`,
+  'ALTER TABLE playlist_items ADD COLUMN experiment_id TEXT',
+  /*
+   * 3.0: site cache (lib/site-cache, docs/site-cache.md). A small always-on box at a site (a Pi, a
+   * NUC, a container) downloads each asset ONCE from this server and the screens on that LAN fetch
+   * it from there, so a school with forty screens pulls a new video once instead of forty times.
+   *
+   * token_hash is the sha256 of the node's enrolment token (shown once, like an API token).
+   * fetch_key is the secretbox-SEALED key the node uses to check the tokens screens show it
+   * (lib/site-cache/tokens.js) — sealed because whoever holds it can mint access to that site's
+   * media. The status columns are what the node last reported; they are display only and never
+   * decide anything.
+   *
+   * site_cache_assignments: device XOR group, the display_power_schedules shape, so "device beats
+   * group" reads the same way it does there. One cache per screen and per group: a screen with two
+   * caches has no defined behaviour, so the database refuses rather than the resolver inventing a
+   * tiebreak.
+   */
+  `CREATE TABLE IF NOT EXISTS site_caches (
+     id                TEXT PRIMARY KEY,
+     workspace_id      TEXT NOT NULL,
+     name              TEXT NOT NULL,
+     lan_url           TEXT NOT NULL,
+     token_hash        TEXT NOT NULL UNIQUE,
+     fetch_key         TEXT NOT NULL,
+     enabled           INTEGER NOT NULL DEFAULT 1,
+     created_by        TEXT,
+     created_at        INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     updated_at        INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     last_seen_at      INTEGER,
+     last_sync_at      INTEGER,
+     node_version      TEXT,
+     disk_used         INTEGER,
+     disk_free         INTEGER,
+     files_held        INTEGER,
+     files_wanted      INTEGER,
+     bytes_wanted      INTEGER,
+     hits              INTEGER NOT NULL DEFAULT 0,
+     misses            INTEGER NOT NULL DEFAULT 0,
+     bytes_served      INTEGER NOT NULL DEFAULT 0,
+     bytes_from_origin INTEGER NOT NULL DEFAULT 0,
+     last_error        TEXT)`,
+  'CREATE INDEX IF NOT EXISTS idx_site_caches_ws ON site_caches(workspace_id)',
+  `CREATE TABLE IF NOT EXISTS site_cache_assignments (
+     id            TEXT PRIMARY KEY,
+     site_cache_id TEXT NOT NULL REFERENCES site_caches(id) ON DELETE CASCADE,
+     workspace_id  TEXT NOT NULL,
+     device_id     TEXT REFERENCES devices(id) ON DELETE CASCADE,
+     group_id      TEXT REFERENCES device_groups(id) ON DELETE CASCADE,
+     created_at    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     CHECK ((device_id IS NOT NULL AND group_id IS NULL) OR (device_id IS NULL AND group_id IS NOT NULL)))`,
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_sca_device ON site_cache_assignments (device_id) WHERE device_id IS NOT NULL',
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_sca_group ON site_cache_assignments (group_id) WHERE group_id IS NOT NULL',
+  'CREATE INDEX IF NOT EXISTS idx_sca_cache ON site_cache_assignments (site_cache_id)',
+  /*
+   * 3.0: switch to ScreenTinker (lib/migrate, docs/migrate.md). Importing another CMS's media,
+   * playlists, layouts, schedules and screens.
+   *
+   * migration_jobs is one import: its scan (what was found and what cannot be mapped), the options
+   * chosen, progress and the final report. cred_enc holds the source credential (secretbox) ONLY
+   * while the job needs it — between connect and the end of the run — and cred_expires_at bounds
+   * even that: lib/migrate clears it on finish, fail, cancel and on expiry, whichever comes first.
+   * upload_path is a vendor export / zip waiting to be read, removed the same way.
+   *
+   * migration_items is what makes a re-run idempotent: one row per source object already brought
+   * over (keyed by vendor + source account + kind + source id, per workspace), naming the row it
+   * became. migration_screens are the source's displays as unpaired placeholders: a name and the
+   * groups it belonged to, linked to a real screen only when a person pairs one.
+   */
+  `CREATE TABLE IF NOT EXISTS migration_jobs (
+     id TEXT PRIMARY KEY,
+     workspace_id TEXT NOT NULL,
+     user_id TEXT,
+     vendor TEXT NOT NULL,
+     source_account TEXT NOT NULL DEFAULT '',
+     source_label TEXT NOT NULL DEFAULT '',
+     status TEXT NOT NULL DEFAULT 'scanning',
+     scan TEXT,
+     options TEXT,
+     progress TEXT,
+     report TEXT,
+     error TEXT,
+     cred_enc TEXT,
+     cred_expires_at INTEGER,
+     upload_path TEXT,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     finished_at INTEGER)`,
+  'CREATE INDEX IF NOT EXISTS idx_migration_jobs_ws ON migration_jobs(workspace_id, created_at)',
+  `CREATE TABLE IF NOT EXISTS migration_items (
+     workspace_id TEXT NOT NULL,
+     vendor TEXT NOT NULL,
+     source_account TEXT NOT NULL,
+     kind TEXT NOT NULL,
+     source_id TEXT NOT NULL,
+     target_id TEXT,
+     job_id TEXT,
+     status TEXT NOT NULL DEFAULT 'done',
+     note TEXT,
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     PRIMARY KEY (workspace_id, vendor, source_account, kind, source_id))`,
+  `CREATE TABLE IF NOT EXISTS migration_screens (
+     id TEXT PRIMARY KEY,
+     workspace_id TEXT NOT NULL,
+     job_id TEXT,
+     vendor TEXT NOT NULL,
+     name TEXT NOT NULL,
+     group_ids TEXT NOT NULL DEFAULT '[]',
+     playlist_id TEXT,
+     layout_id TEXT,
+     note TEXT,
+     device_id TEXT,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     linked_at INTEGER)`,
+  'CREATE INDEX IF NOT EXISTS idx_migration_screens_ws ON migration_screens(workspace_id, device_id)',
+  /*
+   * 3.0 "Your data, provably" (docs/trust.md).
+   *
+   * outbound_ledger: one row per UTC day, external host, feature and workspace (lib/outbound-ledger.js).
+   * HOST ONLY: no path, query string, header or body is ever stored. workspace_id / organization_id
+   * are '' (not NULL) for instance-level traffic so the primary key can deduplicate them.
+   */
+  `CREATE TABLE IF NOT EXISTS outbound_ledger (
+     day TEXT NOT NULL,
+     host TEXT NOT NULL,
+     feature TEXT NOT NULL,
+     category TEXT NOT NULL DEFAULT 'other',
+     scope TEXT NOT NULL DEFAULT 'internet',
+     workspace_id TEXT NOT NULL DEFAULT '',
+     organization_id TEXT NOT NULL DEFAULT '',
+     count INTEGER NOT NULL DEFAULT 0,
+     bytes_in INTEGER NOT NULL DEFAULT 0,
+     bytes_out INTEGER NOT NULL DEFAULT 0,
+     errors INTEGER NOT NULL DEFAULT 0,
+     first_seen INTEGER NOT NULL,
+     last_seen INTEGER NOT NULL,
+     PRIMARY KEY (day, host, feature, workspace_id))`,
+  'CREATE INDEX IF NOT EXISTS idx_outbound_ledger_org ON outbound_ledger(organization_id, day)',
+  'CREATE INDEX IF NOT EXISTS idx_outbound_ledger_day ON outbound_ledger(day)',
+  // Complete exports (lib/trust/export.js): a background job per request; the zip lives in
+  // DATA_DIR/exports until expires_at. Only a hash of the download key is kept.
+  `CREATE TABLE IF NOT EXISTS data_exports (
+     id TEXT PRIMARY KEY,
+     kind TEXT NOT NULL CHECK (kind IN ('org','user')),
+     organization_id TEXT,
+     user_id TEXT NOT NULL,
+     status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','running','ready','failed','expired')),
+     file_name TEXT,
+     bytes INTEGER,
+     manifest TEXT,
+     error TEXT,
+     download_hash TEXT,
+     downloads INTEGER NOT NULL DEFAULT 0,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     started_at INTEGER,
+     finished_at INTEGER,
+     expires_at INTEGER)`,
+  'CREATE INDEX IF NOT EXISTS idx_data_exports_user ON data_exports(user_id, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_data_exports_org ON data_exports(organization_id, created_at)',
+  // "Delete everything": an org owner's scheduled deletion, executed after the grace period by
+  // lib/trust/org-deletion.js through lib/user-deletion.js deleteOrgCascade. Cancelling removes the row.
+  `CREATE TABLE IF NOT EXISTS org_deletion_requests (
+     organization_id TEXT PRIMARY KEY,
+     org_name TEXT NOT NULL,
+     requested_by TEXT,
+     requested_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     execute_after INTEGER NOT NULL)`,
+  /*
+   * 3.0: accessibility checker (lib/a11y, docs/accessibility.md).
+   *
+   * a11y_settings: one row per workspace, created on first save — the typical viewing distance and
+   * screen size the size check assumes, and the opt-in "block publishing with accessibility errors"
+   * policy (off by default). devices.a11y_*: a screen's own distance / size, NULL = use the
+   * workspace's. a11y_media_checks: the cached result of reading a file (kind 'video': flash counts,
+   * audio track; kind 'grid': a photo's luminance grid), keyed by the content's revision so a
+   * replaced file is checked again. ai_settings.stt_*: the speech-to-text endpoint captions use
+   * (key encrypted with lib/secretbox like the other AI keys).
+   */
+  `CREATE TABLE IF NOT EXISTS a11y_settings (
+     workspace_id TEXT PRIMARY KEY,
+     viewing_distance_m REAL NOT NULL DEFAULT 3,
+     screen_diagonal_in REAL NOT NULL DEFAULT 55,
+     block_on_errors INTEGER NOT NULL DEFAULT 0,
+     updated_by TEXT,
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`,
+  'ALTER TABLE devices ADD COLUMN a11y_viewing_distance_m REAL',
+  'ALTER TABLE devices ADD COLUMN a11y_screen_diagonal_in REAL',
+  `CREATE TABLE IF NOT EXISTS a11y_media_checks (
+     content_id TEXT NOT NULL,
+     kind TEXT NOT NULL CHECK (kind IN ('video','grid')),
+     rev INTEGER NOT NULL DEFAULT 0,
+     workspace_id TEXT,
+     status TEXT NOT NULL CHECK (status IN ('done','failed')),
+     result TEXT,
+     error TEXT,
+     checked_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     PRIMARY KEY (content_id, kind))`,
+  'CREATE INDEX IF NOT EXISTS idx_a11y_media_checks_ws ON a11y_media_checks(workspace_id)',
+  // A check outlives nothing it describes: every path that deletes content (library, workspace and
+  // account deletion, retention sweeps) takes its cached result with it, without each learning of it.
+  `CREATE TRIGGER IF NOT EXISTS trg_a11y_media_checks_content_del AFTER DELETE ON content
+     BEGIN DELETE FROM a11y_media_checks WHERE content_id = OLD.id; END`,
+  'ALTER TABLE ai_settings ADD COLUMN stt_base_url TEXT',
+  'ALTER TABLE ai_settings ADD COLUMN stt_model TEXT',
+  'ALTER TABLE ai_settings ADD COLUMN stt_api_key_enc TEXT',
+  /*
+   * 3.0: move an organization to another server (lib/trust/import.js, docs/move-server.md).
+   *
+   * data_exports.sha256: the whole archive's digest, sent with the download so a server pulling it
+   * can check every byte arrived.
+   * org_imports: one import job — receiving the archive (pulled, uploaded or picked from
+   *   DATA_DIR/imports), its scan, and the restore's cursor (`progress`), which is written in the
+   *   same transaction as each batch of rows, so a restart resumes exactly where it stopped.
+   * org_import_ids: the job's old-to-new id map. Resuming needs every id the earlier batches chose.
+   * instance_exports: the platform admin's whole-server bundles (data_exports' kind is fixed to
+   *   org/user by its CHECK, so they have their own table with the same rules).
+   */
+  'ALTER TABLE data_exports ADD COLUMN sha256 TEXT',
+  `CREATE TABLE IF NOT EXISTS org_imports (
+     id TEXT PRIMARY KEY,
+     kind TEXT NOT NULL DEFAULT 'org',
+     parent_id TEXT,
+     organization_id TEXT,
+     requested_by TEXT NOT NULL,
+     requester_org_id TEXT,
+     source TEXT NOT NULL,
+     source_url TEXT,
+     source_key_enc TEXT,
+     source_sha256 TEXT,
+     file_name TEXT,
+     declared_bytes INTEGER,
+     status TEXT NOT NULL,
+     progress TEXT,
+     scan TEXT,
+     options TEXT,
+     result TEXT,
+     error TEXT,
+     created_org INTEGER NOT NULL DEFAULT 0,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     finished_at INTEGER)`,
+  'CREATE INDEX IF NOT EXISTS idx_org_imports_org ON org_imports(organization_id, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_org_imports_requester ON org_imports(requested_by, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_org_imports_parent ON org_imports(parent_id)',
+  `CREATE TABLE IF NOT EXISTS org_import_ids (
+     job_id TEXT NOT NULL,
+     tbl TEXT NOT NULL,
+     old_id TEXT NOT NULL,
+     new_id TEXT NOT NULL,
+     PRIMARY KEY (job_id, tbl, old_id))`,
+  `CREATE TABLE IF NOT EXISTS instance_exports (
+     id TEXT PRIMARY KEY,
+     user_id TEXT NOT NULL,
+     status TEXT NOT NULL DEFAULT 'queued',
+     options TEXT,
+     file_name TEXT,
+     bytes INTEGER,
+     sha256 TEXT,
+     manifest TEXT,
+     error TEXT,
+     download_hash TEXT,
+     downloads INTEGER NOT NULL DEFAULT 0,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     started_at INTEGER,
+     finished_at INTEGER,
+     expires_at INTEGER)`,
+  /*
+   * 3.0 display-link mirrors (lib/mirrors.js, docs/web-player.md). One display link opened in a
+   * second browser while the first is live becomes a MIRROR: its own device row (own socket,
+   * status, screenshots, proof-of-play) that plays whatever `mirror_of` plays. mirror_fingerprint
+   * is the per-install fingerprint that owns the row, so the same browser reopening the link comes
+   * back as the same mirror instead of a new one. mirror_location is the "Chrome on Windows ·
+   * 10.0.0.5" hint the dashboard shows.
+   */
+  'ALTER TABLE devices ADD COLUMN mirror_of TEXT',
+  'ALTER TABLE devices ADD COLUMN mirror_fingerprint TEXT',
+  'ALTER TABLE devices ADD COLUMN mirror_location TEXT',
+  'CREATE INDEX IF NOT EXISTS idx_devices_mirror_of ON devices(mirror_of) WHERE mirror_of IS NOT NULL',
+  /*
+   * 3.0: a layout on a playlist (docs/layouts-and-campaigns.md). layout_id is what the editor
+   * shows; published_layout_id is what screens get, written on Publish next to published_snapshot
+   * so a layout change and the zone moves that go with it reach screens together. Both NULL =
+   * exactly the old behaviour (the resolver view falls through to the device's layout).
+   * layout_zones.is_main marks the zone that items without a zone play in; none marked = the
+   * largest zone, which is also what every player already does with an orphaned item.
+   */
+  'ALTER TABLE playlists ADD COLUMN layout_id TEXT REFERENCES layouts(id) ON DELETE SET NULL',
+  'ALTER TABLE playlists ADD COLUMN published_layout_id TEXT REFERENCES layouts(id) ON DELETE SET NULL',
+  'ALTER TABLE layout_zones ADD COLUMN is_main INTEGER NOT NULL DEFAULT 0',
+  /*
+   * 3.0: portrait and 4:3 versions of a layout (lib/layout-variants.js). The SAME zones (zone_id),
+   * different geometry per version. A side table rather than layout_zones columns because every
+   * payload is built with SELECT * FROM layout_zones: columns there would add fields to every
+   * screen's payload; rows here change nothing for a layout without versions. layout_id is
+   * denormalised so "this layout's versions" is one indexed read.
+   */
+  `CREATE TABLE IF NOT EXISTS layout_zone_variants (
+     zone_id TEXT NOT NULL REFERENCES layout_zones(id) ON DELETE CASCADE,
+     layout_id TEXT NOT NULL REFERENCES layouts(id) ON DELETE CASCADE,
+     variant TEXT NOT NULL CHECK (variant IN ('portrait','square')),
+     x_percent REAL NOT NULL DEFAULT 0,
+     y_percent REAL NOT NULL DEFAULT 0,
+     width_percent REAL NOT NULL DEFAULT 100,
+     height_percent REAL NOT NULL DEFAULT 100,
+     PRIMARY KEY (zone_id, variant))`,
+  'CREATE INDEX IF NOT EXISTS idx_layout_zone_variants_layout ON layout_zone_variants(layout_id, variant)',
+  // A zone deleted while foreign_keys is off (see routes/layouts.js) takes its versions with it.
+  `CREATE TRIGGER IF NOT EXISTS trg_layout_zone_variants_zone_del AFTER DELETE ON layout_zones
+     BEGIN DELETE FROM layout_zone_variants WHERE zone_id = OLD.id; END`,
+  /*
+   * 3.0 campaigns (lib/campaign.js, docs/layouts-and-campaigns.md). A playlist item may be a WHOLE
+   * LAYOUT (layout_ref_id); each of its zones plays a chosen playlist (playlist_item_zone_sources)
+   * or this playlist's rows bound to that zone. published_campaign is the structure players that
+   * declare layout.campaign get; NULL for every playlist without a layout item, whose snapshot and
+   * payload are unchanged. play_logs.layout_id records which layout a play happened in.
+   */
+  'ALTER TABLE playlist_items ADD COLUMN layout_ref_id TEXT REFERENCES layouts(id) ON DELETE CASCADE',
+  `CREATE TABLE IF NOT EXISTS playlist_item_zone_sources (
+     item_id INTEGER NOT NULL REFERENCES playlist_items(id) ON DELETE CASCADE,
+     zone_id TEXT NOT NULL REFERENCES layout_zones(id) ON DELETE CASCADE,
+     playlist_id TEXT NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+     PRIMARY KEY (item_id, zone_id))`,
+  'CREATE INDEX IF NOT EXISTS idx_pizs_playlist ON playlist_item_zone_sources(playlist_id)',
+  // Paths that delete with foreign_keys off (see routes/layouts.js) still take the rows with them.
+  `CREATE TRIGGER IF NOT EXISTS trg_pizs_item_del AFTER DELETE ON playlist_items
+     BEGIN DELETE FROM playlist_item_zone_sources WHERE item_id = OLD.id; END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_pizs_zone_del AFTER DELETE ON layout_zones
+     BEGIN DELETE FROM playlist_item_zone_sources WHERE zone_id = OLD.id; END`,
+  'ALTER TABLE playlists ADD COLUMN published_campaign TEXT',
+  'ALTER TABLE play_logs ADD COLUMN layout_id TEXT',
+  /*
+   * 3.0: TV-safe video copies (lib/video-variants.js, docs/tv-safe-video.md).
+   *
+   * content.video_prerotated: the operator says this file is already turned for portrait-mounted
+   *   screens, so a portrait screen plays it as-is instead of rotating it a second time.
+   * content_video_variants: one re-encoded copy of a tall video per kind — rot_cw / rot_ccw (turned
+   *   into a landscape frame for portrait / portrait-flipped screens) and fit (scaled to fit 1920x1080
+   *   for landscape screens) — made only for screens whose player declares playback.video_variants
+   *   (Samsung Tizen TVs, whose decoders cannot open a 1080x1920 stream). source_file ties a copy to
+   *   the bytes it was made from (a replace always writes a new file name; a rename does not, so it
+   *   costs no re-encode), so a replaced file is never played from an old copy. A cache: never
+   *   exported, rebuilt on demand. The file lives in contentDir and is removed with its row.
+   * video_variant_usage: encoded source minutes per organization per month, for the hosted cap.
+   */
+  'ALTER TABLE content ADD COLUMN video_prerotated INTEGER NOT NULL DEFAULT 0',
+  `CREATE TABLE IF NOT EXISTS content_video_variants (
+     content_id TEXT NOT NULL,
+     kind TEXT NOT NULL CHECK (kind IN ('rot_cw','rot_ccw','fit')),
+     workspace_id TEXT,
+     source_file TEXT NOT NULL,
+     status TEXT NOT NULL CHECK (status IN ('queued','running','ready','failed','denied')),
+     filepath TEXT,
+     file_size INTEGER,
+     width INTEGER,
+     height INTEGER,
+     encoder TEXT,
+     encode_ms INTEGER,
+     error TEXT,
+     attempts INTEGER NOT NULL DEFAULT 0,
+     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     PRIMARY KEY (content_id, kind))`,
+  'CREATE INDEX IF NOT EXISTS idx_content_video_variants_status ON content_video_variants(status, created_at)',
+  // Every path that deletes content takes the copies' rows with it; the files go in the orphan sweep.
+  `CREATE TRIGGER IF NOT EXISTS trg_content_video_variants_content_del AFTER DELETE ON content
+     BEGIN DELETE FROM content_video_variants WHERE content_id = OLD.id; END`,
+  `CREATE TABLE IF NOT EXISTS video_variant_usage (
+     organization_id TEXT NOT NULL,
+     month TEXT NOT NULL,
+     seconds REAL NOT NULL DEFAULT 0,
+     PRIMARY KEY (organization_id, month))`,
+  /*
+   * 3.0: several presenters at once on one screen (lib/screen-share.js, docs/screen-share.md).
+   * Per display, OFF by default (one share at a time, as before); a workspace admin turns it on next
+   * to the meeting-room code. How many at once is platform-wide (app_settings
+   * screen_share_max_presenters, 1-4).
+   */
+  'ALTER TABLE devices ADD COLUMN screen_share_multi INTEGER NOT NULL DEFAULT 0',
 ];
 // Apply each ALTER idempotently. A "duplicate column name" / "already exists"
 // error means the column is already present (expected on a migrated DB) - benign.
@@ -3365,6 +4367,10 @@ migrationStep('workspace and organization settings', () => {
   try { db.prepare('ALTER TABLE workspaces ADD COLUMN replica_rev INTEGER').run(); } catch (_) { /* present */ }
   try { db.prepare('ALTER TABLE workspaces ADD COLUMN replica_as_of INTEGER').run(); } catch (_) { /* present */ }
   try { db.prepare('ALTER TABLE devices ADD COLUMN live_video_enabled INTEGER NOT NULL DEFAULT 0').run(); } catch (_) { /* present */ }
+  // 3.0 screen share (lib/screen-share.js): the workspace admin's switch for the whole feature. ON by
+  // default — starting a share already needs edit rights on the screen, and the guest code is a
+  // separate per-screen switch that is off (devices.screen_share_guest, in the array above).
+  try { db.prepare('ALTER TABLE workspaces ADD COLUMN screen_share_enabled INTEGER NOT NULL DEFAULT 1').run(); console.log('[migrate] workspaces.screen_share_enabled added (default on)'); } catch (_) { /* present */ }
   // #talk: per-org enablement for the voice intercom / PA feature (off by default).
   try { db.prepare('ALTER TABLE organizations ADD COLUMN talk_enabled INTEGER NOT NULL DEFAULT 0').run(); console.log('[migrate] organizations.talk_enabled added (default off)'); } catch (_) { /* present */ }
   // #talk/#go2rtc: optional per-org ICE (STUN/TURN) override as a JSON array [{urls,username?,credential?}].
@@ -3391,6 +4397,9 @@ migrationStep('smart playlists', () => {
   try { db.prepare('ALTER TABLE playlists ADD COLUMN published_smart_rules TEXT').run(); } catch (_) { /* present */ }
   // "Play every N seconds" (lib/repeat-every.js): NULL = plays once per loop, as before.
   try { db.prepare('ALTER TABLE playlist_items ADD COLUMN repeat_every_sec INTEGER').run(); console.log('[migrate] playlist_items.repeat_every_sec added'); } catch (_) { /* present */ }
+  // #624 "Play to end" (lib/play-to-end.js): a YouTube item advances when the video ends, and its
+  // duration_sec becomes the most it may run. NULL = the item's duration decides, as before.
+  try { db.prepare('ALTER TABLE playlist_items ADD COLUMN play_to_end INTEGER').run(); console.log('[migrate] playlist_items.play_to_end added'); } catch (_) { /* present */ }
 });
 
 migrationStep('SAML', () => {
@@ -4035,6 +5044,19 @@ migrationStep('version history baseline', () => {
   }
 });
 
+/*
+ * 3.0 move an organization to another server (lib/trust/import.js): an imported member arrives as a
+ * pending invite. workspace_invites is created by the multitenancy phase, after the migrations
+ * array, so its columns are added here. org_role: the organization role accepting the invite also
+ * grants (routes/auth.js accept-invite); org_only: they had no workspace membership of their own,
+ * so accepting adds only the organization role; import_job_id: which import created it.
+ */
+migrationStep('organization import invites', () => {
+  try { db.prepare('ALTER TABLE workspace_invites ADD COLUMN org_role TEXT').run(); } catch (_) { /* present */ }
+  try { db.prepare('ALTER TABLE workspace_invites ADD COLUMN org_only INTEGER NOT NULL DEFAULT 0').run(); } catch (_) { /* present */ }
+  try { db.prepare('ALTER TABLE workspace_invites ADD COLUMN import_job_id TEXT').run(); } catch (_) { /* present */ }
+});
+
 // De-duplicate built-in template zones. A prior layout-editor save regenerated
 // every zone id on save; schema.sql's INSERT OR IGNORE then re-seeded the
 // canonical zone on the next boot, so template layouts accumulated positional
@@ -4233,6 +5255,36 @@ const PLAY_LOGS_WORKSPACE_BACKFILL_ID = 'play_logs_workspace_backfill';
     console.error(`[play_logs workspace backfill] FAILED (will retry next boot): ${e.message}`);
   }
 })();
+
+/*
+ * 3.0: accounts that existed before the upgrade keep the full interface and are not sent through
+ * the first-run guide. Runs once (schema_migrations), on the first 3.0 boot; on a fresh install it
+ * runs over an empty users table, so every account created from then on starts in simple mode.
+ */
+const V3_EXISTING_USERS_ID = 'v3_0_existing_users';
+(function v3ExistingUsers() {
+  try {
+    if (db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(V3_EXISTING_USERS_ID)) return;
+    const n = db.transaction(() => {
+      const r = db.prepare(`UPDATE users SET ui_mode = 'advanced',
+                              onboarded_at = COALESCE(onboarded_at, created_at, strftime('%s','now'))`).run();
+      db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(V3_EXISTING_USERS_ID);
+      return r.changes;
+    })();
+    if (n) console.log(`[migrate] 3.0: ${n} existing account(s) kept on the full interface`);
+  } catch (e) {
+    // Not fatal: the worst case is an existing user seeing the simple menu, which has a toggle.
+    console.error(`[migrate] 3.0 existing-users step failed (will retry next boot): ${e.message}`);
+  }
+})();
+
+// 3.0: remember that this install has been upgraded (the self-hosted sponsor ask treats an upgraded
+// install as an established one; routes/auth.js accountSummary).
+if (_bootUpgraded) {
+  try {
+    db.prepare("INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('last_upgraded_at', strftime('%s','now'), strftime('%s','now'))").run();
+  } catch (e) { console.warn(`[boot] could not record the upgrade time: ${e.message}`); }
+}
 
 // `playsMigrationTouched`: did THIS boot build a play_logs index or add a play_logs column?
 // Read once by services/heartbeat to arm the 2.0.1 player defer (lib/boot-defer.js). The loop

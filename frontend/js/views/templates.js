@@ -165,6 +165,7 @@ export async function render(container) {
         <button class="btn btn-secondary" id="tplSettingsBtn">${esc(t('templates.settings'))}</button>
       </div>` : ''}
     </div>
+    <p class="tpl-meta" style="margin:-6px 0 14px">${esc(t('templates.builtin_note'))} <a href="#/signs">${esc(t('signs.new_from_template'))} &rarr;</a></p>
     <div class="tabs" role="tablist">
       <div class="tab" data-tab="installed" role="tab">${esc(t('templates.tab_installed'))}</div>
       <div class="tab" data-tab="library" role="tab">${esc(t('templates.tab_library'))} <span id="tplNewCount"></span></div>
@@ -862,7 +863,9 @@ function paramFieldHtml(p, value, dataSources) {
  * The Use form. `tpl` is an installed template (public shape) — or pass `widget` (a template
  * widget row) to edit one in place, with `values`/`name` from its config or pending draft.
  */
-export async function openUseModal({ tpl, widget = null, values: initialValues = null, name: initialName = null, onSaved = null } = {}) {
+// onCreated(widget): hand the new widget to the caller (Make a sign puts it on screens) instead of
+// this dialog's own "created — add to a playlist" step.
+export async function openUseModal({ tpl, widget = null, values: initialValues = null, name: initialName = null, onSaved = null, onCreated = null } = {}) {
   if (!tpl && widget) {
     let cfg = {};
     try { cfg = JSON.parse(widget.config || '{}'); } catch { cfg = {}; }
@@ -997,6 +1000,7 @@ export async function openUseModal({ tpl, widget = null, values: initialValues =
       }
       const w = await TAPI(`${base}/use`, { method: 'POST', body: JSON.stringify({ name, values: readValues() }) });
       showToast(t('templates.toast_widget_created', { name: w.name }), 'success');
+      if (onCreated) { m.close(); onCreated(w); return; }
       showCreated(m, w);
     } catch (e) {
       go.disabled = false;

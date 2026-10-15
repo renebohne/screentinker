@@ -1,9 +1,12 @@
 import { api } from '../api.js';
+import { SPONSOR_URL } from '../components/plan-nudges.js';
 import { mountCanvaSettings } from '../components/canva-settings.js';
 import * as whatsNew from '../components/whats-new.js';
 import { showToast } from '../components/toast.js';
 import { getLanguage, setLanguage, getAvailableLanguages, t } from '../i18n.js';
-import { esc, isPlatformAdmin } from '../utils.js';
+import { esc, isPlatformAdmin, inManagerApp } from '../utils.js';
+import { passkeysSupported, suggestedPasskeyName } from '../lib/passkeys.js';
+import { addPasskey, unavailableMessage } from '../components/passkey-setup.js';
 import { resetBranding, applyAccent } from '../branding.js';
 import { mountCorporateSettings } from '../components/corporate-settings.js';
 import { mountStorageSettings } from '../components/storage-settings.js';
@@ -11,6 +14,8 @@ import { mountM365Settings } from '../components/m365-settings.js';
 import { mountBiConnections } from '../components/bi-connections-settings.js';
 import { mountSocialConnections } from '../components/social-connections-settings.js';
 import { mountRoomSettings } from '../components/room-settings.js';
+import { mountScimSettings } from '../components/scim-settings.js';
+import { mountBrandKit } from '../components/brand-kit-editor.js';
 import { formatRow, buyPack, usd } from '../components/ai-hosted-picker.js';
 
 export async function render(container) {
@@ -86,6 +91,19 @@ export async function render(container) {
         <h4 style="font-size:14px;margin-bottom:8px">${t('settings.2fa_title')}</h4>
         <p style="color:var(--text-muted);font-size:12px">…</p>
       </div>
+
+      <!-- 3.0: passkeys. Populated by loadPasskeys() from /auth/passkeys. -->
+      <div id="passkeyBlock" style="border-top:1px solid var(--border);margin-top:20px;padding-top:16px">
+        <h4 style="font-size:14px;margin-bottom:8px">${t('passkey.title')}</h4>
+        <p style="color:var(--text-muted);font-size:12px">…</p>
+      </div>
+
+      <!-- 3.0: every session carries the account's token_version; bumping it ends the others. -->
+      <div style="border-top:1px solid var(--border);margin-top:20px;padding-top:16px">
+        <h4 style="font-size:14px;margin-bottom:8px">${t('settings.sessions_title')}</h4>
+        <p style="color:var(--text-muted);font-size:12px;margin-bottom:12px">${t('settings.sessions_desc')}</p>
+        <button class="btn btn-secondary btn-sm" id="revokeOtherSessionsBtn">${t('settings.sessions_revoke')}</button>
+      </div>
     </div>
 
     <!-- Per-organization SSO. Hidden unless the signed-in user administers an organization: this
@@ -95,6 +113,21 @@ export async function render(container) {
     <!-- Head office (corporate) playlists and emergency alerts. Org owners and admins only;
          components/corporate-settings.js fills it, and leaves it hidden for everyone else. -->
     <div class="settings-section" id="corporateCard" style="display:none"></div>
+
+    <!-- 3.0 The workspace brand kit Make a sign uses (components/brand-kit-editor.js). Every member
+         sees it; a view-only member sees it read-only, and the server refuses their writes. -->
+    <div class="settings-section" id="brandKitCard">
+      <h3>${esc(t('signs.brand.title'))}</h3>
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">${esc(t('signs.brand.intro'))} <a href="#/signs">${esc(t('signs.task'))} &rarr;</a></p>
+      <div id="brandKitHost" class="bk-settings"></div>
+    </div>
+
+    <!-- 3.0 switch to ScreenTinker (views/migrate.js). The page itself says so to a view-only member. -->
+    <div class="settings-section" id="migrateCard">
+      <h3>${esc(t('migrate.title'))}</h3>
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">${esc(t('migrate.subtitle'))}</p>
+      <a class="btn btn-secondary btn-sm" href="#/migrate">${esc(t('migrate.simple.offer_link'))}</a>
+    </div>
 
     <!-- Where media is stored (org owners/admins). Mounted only for them; the server enforces it. -->
     <div class="settings-section" id="storageCard" style="display:none"></div>
@@ -147,6 +180,9 @@ export async function render(container) {
         </div>
       </details>
     </div>
+
+    <!-- 3.0: SCIM user provisioning (components/scim-settings.js). Org owners/admins; hidden otherwise. -->
+    <div class="settings-section" id="scimCard" style="display:none"></div>
 
     <div class="settings-section">
       <h3>${t('apitoken.title')}</h3>
@@ -342,6 +378,11 @@ export async function render(container) {
         <input type="file" id="importFileInput" accept=".json,.zip" style="display:none">
       </div>
       <div id="importStatus" style="display:none;margin-top:12px;padding:12px;border-radius:var(--radius);font-size:13px"></div>
+      <!-- 3.0 "Your data, provably": where data lives, what leaves, complete exports (views/privacy.js). -->
+      <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <a class="btn btn-secondary btn-sm" href="#/privacy" id="privacyLink">${t('trust.settings_link')}</a>
+        <span style="font-size:12px;color:var(--text-muted)">${t('trust.settings_link_desc')}</span>
+      </div>
     </div>
 
     <!-- Hosted AI credits (org-scoped). Hidden entirely when the server has no platform image
@@ -363,6 +404,7 @@ export async function render(container) {
       <div style="color:var(--text-secondary);font-size:13px">
         <p><strong>${esc(window.__ST_BRAND_NAME || 'ScreenTinker')}</strong>${appVersion ? ` v${esc(appVersion)}` : ''}</p>
         <p style="margin-top:4px">${t('settings.about_tagline')}</p>
+        ${user.self_hosted ? `<p style="margin-top:8px"><a href="${SPONSOR_URL}" target="_blank" rel="noopener" style="color:var(--accent)">&#9829; ${t('sponsor.about_link')}</a></p>` : ''}
         <!-- The permanent home for the release notes the dashboard panel links to. Populated
              after render because it is a fetch, and About must not wait on one. -->
         <div id="whatsNewHistory"></div>
@@ -846,11 +888,15 @@ export async function render(container) {
     try { me = await api.getMe(); }
     catch (e) { paint(`<p style="${muted}">${esc(e.message)}</p>`); return; }
 
+    // The page may have been left while this was loading: draw nothing into a detached card.
+    if (!document.contains(block)) return;
+
     let providers = [];
     try {
       const res = await fetch('/api/auth/providers');
       if (res.ok) providers = (await res.json()).providers || [];
     } catch { /* offline: fall through to the no-providers copy */ }
+    if (!document.contains(block)) return;
 
     if (me.auth_provider && me.auth_provider !== 'local') {
       const name = providers.find((p) => p.slug === me.auth_provider)?.name || me.auth_provider;
@@ -923,6 +969,9 @@ export async function render(container) {
     let status;
     try { status = await api.totpStatus(); }
     catch (e) { paint(`<p style="${muted}">${esc(e.message)}</p>`); return; }
+
+    // The page may have been left while this was loading: draw nothing into a detached card.
+    if (!document.contains(block)) return;
 
     if (!status.eligible) {
       const provider = (JSON.parse(localStorage.getItem('user') || '{}').auth_provider) || 'SSO';
@@ -1045,9 +1094,128 @@ export async function render(container) {
     }
   }
 
+  // ==================== Passkeys (3.0) ====================
+  // List / add / rename / remove this account's passkeys (server/routes/passkeys.js). Every value
+  // from the server reaches the page through esc().
+  async function loadPasskeys() {
+    const block = document.getElementById('passkeyBlock');
+    if (!block) return;
+    const muted = 'color:var(--text-muted);font-size:12px';
+    const paint = (inner) => { block.innerHTML = `<h4 style="font-size:14px;margin-bottom:8px">${esc(t('passkey.title'))}</h4>${inner}`; };
+
+    let st;
+    try { st = await api.passkeysList(); }
+    catch (e) { paint(`<p style="${muted}">${esc(e.message)}</p>`); return; }
+
+    // The page may have been left while this was loading: draw nothing into a detached card.
+    if (!document.contains(block)) return;
+
+    if (!st.available) {
+      // Never silently bound to whatever address this page happens to be on: say why it is off,
+      // and to the people who can fix it, how.
+      paint(`<p style="${muted}">${esc(unavailableMessage(st.reason, isSuperAdmin))}</p>`);
+      return;
+    }
+    if (!st.eligible && !st.passkeys.length) {
+      paint(`<p style="${muted}">${esc(t(user.auth_provider === 'local' ? 'passkey.sso_only_note' : 'passkey.sso_account_note'))}</p>`);
+      return;
+    }
+
+    const fmt = (ts) => (ts ? new Date(ts * 1000).toLocaleDateString() : '');
+    const rows = st.passkeys.map((p) => `
+      <div class="passkey-row" data-id="${esc(p.id)}" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="flex:1;min-width:180px">
+          <div style="font-weight:500">${esc(p.name)}${p.backed_up ? ` <span style="${muted};margin-left:6px">${esc(t('passkey.synced'))}</span>` : ''}</div>
+          <div style="${muted}">${esc(t('passkey.added_on', { date: fmt(p.created_at) }))} · ${esc(p.last_used_at ? t('passkey.last_used', { date: fmt(p.last_used_at) }) : t('passkey.never_used'))}</div>
+        </div>
+        <button class="btn btn-secondary btn-sm" data-pk-rename>${esc(t('passkey.rename'))}</button>
+        <button class="btn btn-danger btn-sm" data-pk-remove>${esc(t('passkey.remove'))}</button>
+      </div>`).join('');
+
+    // Why adding is not offered on this page, if it is not.
+    let addNote = '';
+    if (!st.eligible) addNote = t('passkey.sso_only_note');
+    else if (inManagerApp()) addNote = t('passkey.not_in_app');
+    else if (!passkeysSupported()) addNote = t('passkey.browser_unsupported');
+    else if (st.origin && st.origin !== window.location.origin) addNote = t('passkey.wrong_address', { origin: st.origin });
+    else if (st.passkeys.length >= st.max) addNote = t('passkey.limit', { n: st.max });
+
+    paint(`
+      <p style="${muted};margin-bottom:10px">${esc(t('passkey.desc'))}</p>
+      ${rows || `<p style="${muted};margin-bottom:10px">${esc(t('passkey.none'))}</p>`}
+      ${addNote ? `<p style="${muted};margin-top:10px">${esc(addNote)}</p>` : `
+      <div style="margin-top:12px">
+        <button class="btn btn-primary btn-sm" id="passkeyAddBtn">${esc(t('passkey.add'))}</button>
+        <div id="passkeyAddForm" style="display:none;margin-top:10px">
+          <p style="${muted};margin-bottom:8px">${esc(t(st.totp_enabled ? 'passkey.reauth_prompt_totp' : 'passkey.reauth_prompt'))}</p>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px">
+            <div class="form-group"><label>${esc(t('passkey.name_label'))}</label><input type="text" id="passkeyName" class="input" maxlength="64" value="${esc(suggestedPasskeyName())}"></div>
+            <div class="form-group"><label>${esc(t('settings.current_password'))}</label><input type="password" id="passkeyPassword" class="input" autocomplete="current-password"></div>
+            ${st.totp_enabled ? `<div class="form-group"><label>${esc(t('auth.mfa_code_label'))}</label><input type="text" id="passkeyCode" class="input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="${esc(t('settings.2fa_code_placeholder'))}"></div>` : ''}
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-primary btn-sm" id="passkeyCreateBtn">${esc(t('passkey.create'))}</button>
+            <button class="btn btn-secondary btn-sm" id="passkeyCancelBtn">${esc(t('settings.2fa_cancel'))}</button>
+          </div>
+        </div>
+      </div>`}`);
+
+    const form = document.getElementById('passkeyAddForm');
+    document.getElementById('passkeyAddBtn')?.addEventListener('click', (e) => {
+      e.target.style.display = 'none';
+      form.style.display = 'block';
+      document.getElementById('passkeyPassword')?.focus();
+    });
+    document.getElementById('passkeyCancelBtn')?.addEventListener('click', loadPasskeys);
+    document.getElementById('passkeyCreateBtn')?.addEventListener('click', async (e) => {
+      const btn = e.target;
+      const password = document.getElementById('passkeyPassword').value;
+      if (!password) { showToast(t('passkey.password_required'), 'error'); return; }
+      btn.disabled = true;
+      try {
+        await addPasskey({
+          password,
+          code: document.getElementById('passkeyCode')?.value.trim(),
+          name: document.getElementById('passkeyName').value.trim(),
+        });
+        showToast(t('passkey.added_toast'), 'success');
+        loadPasskeys();
+      } catch (err) {
+        if (!err.cancelled) showToast(err.message, 'error');
+        btn.disabled = false;
+      }
+    });
+
+    block.querySelectorAll('.passkey-row').forEach((row) => {
+      const id = row.dataset.id;
+      const current = (st.passkeys.find((p) => p.id === id) || {}).name || '';
+      row.querySelector('[data-pk-rename]').addEventListener('click', async () => {
+        const name = window.prompt(t('passkey.rename_prompt'), current);
+        if (name == null || !name.trim()) return;
+        try { await api.passkeyRename(id, name.trim()); loadPasskeys(); }
+        catch (err) { showToast(err.message, 'error'); }
+      });
+      row.querySelector('[data-pk-remove]').addEventListener('click', async () => {
+        if (!window.confirm(t('passkey.remove_confirm', { name: current }))) return;
+        try {
+          await api.passkeyDelete(id);
+          showToast(t('passkey.removed_toast'), 'success');
+          loadPasskeys();
+        } catch (err) { showToast(err.message, 'error'); }
+      });
+    });
+  }
+
   loadTokens();
   load2FA();
+  loadPasskeys();
   loadSsoLink();
+  document.getElementById('revokeOtherSessionsBtn')?.addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try { await api.revokeOtherSessions(); showToast(t('settings.sessions_revoked'), 'success'); }
+    catch (err) { showToast(err.message, 'error'); }
+    finally { e.target.disabled = false; }
+  });
 
   /*
    * Report the outcome of a link round trip.
@@ -1533,6 +1701,8 @@ export async function render(container) {
   loadSso();
   if (canManageOrgSecurity) mountCanvaSettings(document.getElementById('canvaSettingsCard'));
   mountCorporateSettings(document.getElementById('corporateCard'));
+  if (user.current_workspace_id) mountBrandKit(document.getElementById('brandKitHost'));
+  else document.getElementById('brandKitCard')?.remove();
   // Org admins always; a workspace admin too, because the org may let workspaces choose their own
   // storage — when it does not, the server answers 403 and the card stays hidden.
   if (canManageOrgSecurity || user.current_workspace_role === 'workspace_admin') mountStorageSettings(document.getElementById('storageCard'));
@@ -1543,6 +1713,8 @@ export async function render(container) {
   if (canManageOrgSecurity) mountSocialConnections(document.getElementById('socialConnCard'));
   // Meeting-room calendar connections: org owners and admins (the server agrees, and says can_manage).
   if (canManageOrgSecurity) mountRoomSettings(document.getElementById('roomsCard'));
+  // SCIM provisioning belongs to the organization; the server answers 404 to anyone but its admins.
+  if (canManageOrgSecurity && orgId) mountScimSettings(document.getElementById('scimCard'), orgId);
 
 
   document.getElementById('createTokenBtn')?.addEventListener('click', async () => {

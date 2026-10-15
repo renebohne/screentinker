@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url>
+    <loc>https://plain.example.test/news/older-story</loc>
+    <news:news>
+      <news:publication><news:name>Plain Times</news:name><news:language>en</news:language></news:publication>
+      <news:publication_date>2026-10-10T08:00:00Z</news:publication_date>
+      <news:title>Older story about the harvest festival</news:title>
+    </news:news>
+  </url>
+  <url>
+    <loc>https://plain.example.test/news/newest-story</loc>
+    <news:news>
+      <news:publication><news:name>Plain Times</news:name><news:language>en</news:language></news:publication>
+      <news:publication_date>2026-10-14T08:00:00Z</news:publication_date>
+      <news:title><![CDATA[Newest story: rail service & bus changes]]></news:title>
+    </news:news>
+    <image:image><image:loc>https://plain.example.test/img/rail.jpg</image:loc></image:image>
+  </url>
+  <url>
+    <loc>https://plain.example.test/news/middle-story</loc>
+    <news:news>
+      <news:publication_date>2026-10-12T08:00:00Z</news:publication_date>
+      <news:title>Middle story on the new clinic</news:title>
+    </news:news>
+  </url>
+  <url><loc>https://plain.example.test/about</loc></url>
+</urlset>

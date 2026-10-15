@@ -399,9 +399,17 @@ async function renderWidgetOrHtml(html, profile, widgetType = '', options = {}) 
 
       browser = await getBrowser();
       page = await browser.newPage();
+      const baseUrl = localBaseUrl();
+      /*
+       * ⚠️ VET EVERY REQUEST, like the raster path. This HTML is tenant-authored (widget markup, text
+       * widgets, a layout's zone iframes/imgs pointing at remote_url), and Chromium runs on the
+       * server: unguarded, a zone at http://169.254.169.254/ came back as a PNG of the metadata
+       * page via /api/embedded/render-layout?preview=1. Same rule as guardRasterRequests: this
+       * server's origin for GET/HEAD, everything else through the SSRF guard.
+       */
+      await guardRasterRequests(page, new URL(baseUrl).origin);
       await page.setViewport({ width: profile.width, height: profile.height });
 
-      const baseUrl = localBaseUrl();
       const staticStyle = '<style>*, *::before, *::after { animation: none !important; transition: none !important; }</style>';
       let finalHtml = html;
       if (/<head[^>]*>/i.test(finalHtml)) {
@@ -881,6 +889,21 @@ async function renderLayoutNative(layout, zoneEntries, screenProfile, options = 
   return { png };
 }
 
+/*
+ * A layout zone's remote_url is only checked by validatePlayerOpenedUrl at save time, which lets
+ * private/LAN addresses through on purpose (a PLAYER on that LAN opens them). The server-side
+ * render is not that player, so vet it here with the outbound SSRF policy. Resolves to the URL, or
+ * null when refused.
+ */
+async function safeZoneRemoteUrl(url) {
+  try {
+    await assertSafeUrl(url);
+    return url;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function renderLayout(layout, zoneEntries, screenProfile, options = {}) {
   const profile = {
     width: safeDimension(screenProfile?.width, 800),
@@ -955,6 +978,10 @@ async function renderLayout(layout, zoneEntries, screenProfile, options = {}) {
         console.warn(`[embedded] zone widget render error for ${type}:`, zoneErr.message);
         innerHtml = `<div style="width:100%;height:100%;background:transparent;"></div>`;
       }
+    } else if (content && content.remote_url && !(await safeZoneRemoteUrl(content.remote_url))) {
+      // Refused by the SSRF guard: leave the zone empty rather than emit a URL the page's request
+      // guard would only abort later (and whose failure would otherwise be invisible).
+      console.warn('[embedded] layout zone remote_url refused by SSRF guard');
     } else if (content && content.remote_url) {
       if (looksLikeImage(content.remote_url, content.mime_type)) {
         innerHtml = `<img src="${escapeHtmlAttr(content.remote_url)}" style="width:100%;height:100%;object-fit:${fitMode};display:block;" />`;
@@ -1034,4 +1061,6 @@ module.exports = {
   safeLocalImagePath,
   parseColorToRgba,
   withTimeout,
+  guardRasterRequests,
+  safeZoneRemoteUrl,
 };

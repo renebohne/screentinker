@@ -67,6 +67,31 @@ export function livenessBadge(data, opts = {}) {
 // role to 'platform_admin'. Existing frontend checks still match the old
 // string; this helper accepts both so we don't have to splatter the array
 // at every call site. Use everywhere the UI gates on platform-level access.
+/*
+ * 3.0: running inside the ScreenTinker Manager Android app (android-admin/). The app appends
+ * "ScreenTinkerManager/<version>" to its WebView user agent and exposes window.STManager. Inside
+ * the app the dashboard is always the Simple view; everything else opens in the phone's browser.
+ */
+/** A phone or tablet (touch, no hover): "tap" rather than "click", and no drag-and-drop to offer. */
+export function isTouchFirst() {
+  try { return window.matchMedia('(hover: none) and (pointer: coarse)').matches; } catch { return false; }
+}
+
+export function inManagerApp() {
+  return typeof navigator !== 'undefined' && /\bScreenTinkerManager\//.test(navigator.userAgent || '');
+}
+
+/** Open a page of THIS server outside the app (the phone's browser), or navigate normally on the web. */
+export function openOutsideApp(path) {
+  const bridge = typeof window !== 'undefined' ? window.STManager : null;
+  if (inManagerApp() && bridge && typeof bridge.openInBrowser === 'function') {
+    bridge.openInBrowser(window.location.origin + path);
+    return true;
+  }
+  window.location.href = path;
+  return false;
+}
+
 export function isPlatformAdmin(user) {
   return !!(user && (user.role === 'superadmin' || user.role === 'platform_admin'));
 }

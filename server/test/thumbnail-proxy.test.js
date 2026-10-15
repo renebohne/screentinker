@@ -54,6 +54,7 @@ before(async () => {
   upstream = http.createServer((req, res) => {
     upstreamHits++;
     if (req.url.includes('missing')) { res.writeHead(404); res.end('not found'); return; }
+    if (req.url.includes('to-metadata')) { res.writeHead(302, { Location: 'http://169.254.169.254/latest/meta-data/' }); res.end(); return; }
     res.writeHead(200, { 'Content-Type': 'image/png' }); res.end(PNG);
   });
   await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
@@ -62,7 +63,9 @@ before(async () => {
   const logFd = fs.openSync(LOG, 'w');
   proc = spawn('node', ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test' },
+    // The mock upstream is on loopback, which the SSRF guard the proxy now uses refuses unless the
+    // operator opens it — exactly what OUTBOUND_ALLOW_HOSTS is for.
+    env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', PORT: String(PORT), NODE_ENV: 'test', OUTBOUND_ALLOW_HOSTS: '127.0.0.1' },
     stdio: ['ignore', logFd, logFd],
   });
   let up = false;
@@ -119,4 +122,17 @@ test('remote upstream 404 yields a clean 404 (process stays up)', async () => {
   assert.equal(r.status, 404, 'upstream 404 maps to a clean 404');
   // server still alive
   assert.equal((await fetch(BASE + '/api/status')).ok, true, 'server survived the upstream failure');
+});
+
+test('the proxy goes through the SSRF guard: private targets and redirects to metadata are refused', async () => {
+  // Not in OUTBOUND_ALLOW_HOSTS: a LAN address is refused outright.
+  const lan = makeContent('http://10.255.255.1/vi/x/hqdefault.jpg', { mime: 'video/youtube' });
+  assert.equal((await jget(`/api/content/${lan}/thumbnail`)).status, 502);
+  // An allowed upstream that 302s to cloud metadata: the hop is re-vetted, and metadata never opens.
+  const hop = makeContent(`http://127.0.0.1:${upstreamPort}/vi/to-metadata/hqdefault.jpg`, { mime: 'video/youtube' });
+  assert.equal((await jget(`/api/content/${hop}/thumbnail`)).status, 502);
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const fn = src.slice(src.indexOf('async function proxyRemoteThumbnail'), src.indexOf("app.get('/api/content/:id/thumbnail'"));
+  assert.match(fn, /guardedRequest\(/);
+  assert.doesNotMatch(fn, /\bfetch\(/);
 });

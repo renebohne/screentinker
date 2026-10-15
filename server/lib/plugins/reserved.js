@@ -34,7 +34,7 @@ const RESERVED_WIDGET_TYPES = new Set([
 
 // The built-in data sources (lib/data-sources/builtin-types.js). 'api' was the "coming soon"
 // placeholder in the dashboard's type list; reserved so an old draft cannot resolve to a plugin.
-const RESERVED_DATA_SOURCE_TYPES = new Set(['ical', 'weather', 'rest', 'sheets', 'csv', 'rss', 'table', 'api']);
+const RESERVED_DATA_SOURCE_TYPES = new Set(['ical', 'weather', 'rest', 'sheets', 'csv', 'rss', 'table', 'api', 'square', 'shopify']);
 
 const PLUGIN_ID_RE = /^[a-z][a-z0-9-]{1,63}$/;
 const CAPABILITIES = new Set(['widget', 'data-source', 'routes', 'hooks']);

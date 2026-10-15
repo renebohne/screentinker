@@ -22,6 +22,45 @@ function parseBillingRateTable(raw) {
 
 const { parseSize } = require('./lib/parse-size');
 
+/*
+ * ⚠️ THE JWT SECRET SIGNS EVERY SESSION AND KEYS THE ENCRYPTION OF SAVED SECRETS.
+ *  - Generated file: written 0600, and an existing one (from 2.x, written with the default umask,
+ *    seen world-readable) is chmod'ed 0600 at boot. Best-effort: a filesystem that refuses chmod
+ *    (some bind mounts / SMB) must not stop the server.
+ *  - From env: the compose examples ship `JWT_SECRET: "set-a-long-random-string"` commented out;
+ *    uncommented verbatim, anyone who has read the example can mint sessions. That is REFUSED in
+ *    production. Anything else short is only warned about — an in-place upgrade must not stop
+ *    booting over a secret that has worked until now, and changing it signs everyone out.
+ */
+const JWT_PLACEHOLDERS = new Set(['set-a-long-random-string', 'changeme', 'change-me', 'secret', 'your-secret-here']);
+function resolveJwtSecret() {
+  const fs = require('fs');
+  const env = process.env.JWT_SECRET;
+  if (env) {
+    if (JWT_PLACEHOLDERS.has(env.trim().toLowerCase())) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('[config] JWT_SECRET is the documentation placeholder. Unset it (one is generated under certs/) or set a long random value.');
+      }
+      console.warn('[config] ⚠️ JWT_SECRET is the documentation placeholder — sessions can be forged by anyone. Unset it or set a long random value. (Refused when NODE_ENV=production.)');
+    } else if (env.length < 32) {
+      console.warn(`[config] ⚠️ JWT_SECRET is only ${env.length} characters; use at least 32 random characters. (Changing it signs everyone out and makes saved secrets unreadable.)`);
+    }
+    return env;
+  }
+  const secretFile = path.join(certsDir, '.jwt_secret');
+  if (fs.existsSync(secretFile)) {
+    try { if ((fs.statSync(secretFile).mode & 0o077) !== 0) fs.chmodSync(secretFile, 0o600); } catch { /* EPERM etc. */ }
+    return fs.readFileSync(secretFile, 'utf8').trim();
+  }
+  const secret = require('crypto').randomBytes(64).toString('hex');
+  try {
+    fs.mkdirSync(path.dirname(secretFile), { recursive: true });
+    fs.writeFileSync(secretFile, secret, { mode: 0o600 });
+  } catch {}
+  return secret;
+}
+const backstop = require('./lib/backstop-limit');
+
 module.exports = {
   /*
    * #trigger-ingress: let the SERVER hold the LAN trigger door open and forward what arrives to the
@@ -33,6 +72,14 @@ module.exports = {
   triggerIngress: process.env.TRIGGER_INGRESS === '1' || process.env.TRIGGER_INGRESS === 'true',
   /** UDP port for the server-side door. Only bound when triggerIngress is on. */
   triggerIngressUdpPort: Number(process.env.TRIGGER_INGRESS_UDP_PORT || 7847),
+
+  /*
+   * Global abuse backstop (lib/backstop-limit.js says who shares a bucket and why these numbers).
+   * Requests per minute: per credential, and per anonymous IP. 0 on the first turns the backstop
+   * off entirely; 0 on the second stops limiting anonymous requests only.
+   */
+  rateLimitBackstop: backstop.parseLimit(process.env.RATE_LIMIT_BACKSTOP, backstop.DEFAULT_IDENTITY_MAX),
+  rateLimitBackstopAnon: backstop.parseLimit(process.env.RATE_LIMIT_BACKSTOP_ANON, backstop.DEFAULT_ANON_MAX),
 
   port: process.env.PORT || 3001,
   httpsPort: process.env.HTTPS_PORT || 3443,
@@ -158,14 +205,7 @@ module.exports = {
   sslCert: process.env.SSL_CERT || path.join(certsDir, 'cert.pem'),
   sslKey: process.env.SSL_KEY || path.join(certsDir, 'key.pem'),
   // Auth
-  jwtSecret: process.env.JWT_SECRET || (() => {
-    const secretFile = path.join(certsDir, '.jwt_secret');
-    const fs = require('fs');
-    if (fs.existsSync(secretFile)) return fs.readFileSync(secretFile, 'utf8').trim();
-    const secret = require('crypto').randomBytes(64).toString('hex');
-    try { fs.mkdirSync(path.dirname(secretFile), { recursive: true }); fs.writeFileSync(secretFile, secret); } catch {}
-    return secret;
-  })(),
+  jwtSecret: resolveJwtSecret(),
   jwtExpiry: '7d',
   /*
    * Google and Microsoft sign-in are configured through lib/oidc-providers.js, which reads
@@ -206,6 +246,13 @@ module.exports = {
   smtpFrom: process.env.SMTP_FROM || '',
   // Self-hosted mode: if true, first user gets enterprise plan and no billing
   selfHosted: process.env.SELF_HOSTED === 'true',
+  // 3.0: what LATER signups get on a self-hosted instance (the first account is always enterprise).
+  // 'enterprise' (default): no trial clock, no limits - the operator owns the box. 'trial': the 2.x
+  // behaviour (14-day Pro trial, then Free), for an operator who uses plans to ration accounts.
+  // 3.0: self-hosted operators see an occasional, dismissible GitHub Sponsors ask (frontend
+  // plan-nudges.js). ST_HIDE_SPONSOR=true turns it off for the whole instance.
+  hideSponsor: ['1', 'true', 'yes'].includes(String(process.env.ST_HIDE_SPONSOR || '').toLowerCase()),
+  selfHostedSignupPlan: String(process.env.SELF_HOSTED_SIGNUP_PLAN || 'enterprise').toLowerCase() === 'trial' ? 'trial' : 'enterprise',
   // #116: opt-in UI gate. When true, hides the Subscription nav item + billing view
   // and bounces #/billing to the dashboard. Default off, so existing deployments are
   // unchanged. UI-only — /api/subscription/* stays in place (internal usage reads).
@@ -374,6 +421,12 @@ module.exports = {
    * ~1.1 GB, and a YEAR of hourly rollups is ~108 MB.
    */
   playLogRetentionDays: parseFloat(process.env.PLAY_LOG_RETENTION_DAYS) || 90,
+  // 3.0 energy & carbon (lib/energy, docs/energy.md): the hourly on-time table feeds the four-week
+  // what-if suggestions only, the daily one a year's ESG report plus a month. Both pruned in chunks.
+  energy: {
+    hourlyRetentionDays: parseFloat(process.env.ENERGY_HOURLY_RETENTION_DAYS) || 35,
+    dailyRetentionDays: parseFloat(process.env.ENERGY_DAILY_RETENTION_DAYS) || 400,
+  },
   statusLogPruneBatch: parseInt(process.env.STATUS_LOG_PRUNE_BATCH) || 2000,
   // #146 P1.3 kill switch: when false, interval maintenance runs regardless of loop-lag
   // band (disables the band-gate that skips maintenance while loaded). Startup prune is
@@ -551,10 +604,37 @@ module.exports = {
   go2rtcTurnUrl: process.env.GO2RTC_TURN_URL || null,
   go2rtcTurnUser: process.env.GO2RTC_TURN_USER || null,
   go2rtcTurnPass: process.env.GO2RTC_TURN_PASS || null,
+  // Short-lived TURN credentials (the "TURN REST API" scheme coturn calls use-auth-secret): with a
+  // shared secret set, every hand-out of ICE servers mints its own username/password that expires after
+  // GO2RTC_TURN_TTL seconds, so a guest who once started a share does not keep a working relay login.
+  // Takes precedence over GO2RTC_TURN_USER / GO2RTC_TURN_PASS. GO2RTC_TURN_URL may list several URLs
+  // separated by commas (e.g. the same server over UDP and TCP).
+  go2rtcTurnSecret: process.env.GO2RTC_TURN_SECRET || null,
+  go2rtcTurnTtl: Math.max(300, Math.min(7 * 86400, parseInt(process.env.GO2RTC_TURN_TTL, 10) || 6 * 3600)),
   // Live video must be switched on per workspace as well; this is the server-wide master gate. Off
   // by default so enabling the sidecar does not silently start offering video everywhere.
   liveVideoEnabled: process.env.LIVE_VIDEO_ENABLED === 'true',
   // #talk: dedicated master switch for the voice intercom / PA feature, separate from live video.
   // Per-org enablement lives in organizations.talk_enabled; this is the global gate. Off by default.
   talkEnabled: process.env.TALK_ENABLED === 'true',
+  /*
+   * 3.0: screen share to a screen (lib/screen-share.js, docs/screen-share.md). ON by default: it
+   * needs no sidecar (peer-to-peer WebRTC, this server only relays signalling), only an editor can
+   * start one, and the meeting-room code is off per screen until an admin turns it on. Set
+   * SCREEN_SHARE_ENABLED=false to remove the feature from the whole server.
+   */
+  screenShareEnabled: process.env.SCREEN_SHARE_ENABLED !== 'false',
+  // The longest a single share may run before the screen goes back to its content (minutes, 1-480).
+  screenShareMaxMinutes: Math.min(480, Math.max(1, parseInt(process.env.SCREEN_SHARE_MAX_MINUTES) || 60)),
+  /*
+   * 3.0 multi share: how many screens one share may reach at once (1-50). Each screen is its own
+   * peer-to-peer upload from the SHARER's computer (~1-3 Mbit/s each for a screen), so the limit is
+   * the sharer's uplink, not this server. Default 6.
+   */
+  screenShareMaxTargets: Math.min(50, Math.max(1, parseInt(process.env.SCREEN_SHARE_MAX_TARGETS) || 6)),
+  /*
+   * 3.0: how many people may present on one screen at once when its "several people" switch is on
+   * (1-4, default 4). The platform admin's setting (Admin -> System, app_settings) overrides this.
+   */
+  screenShareMaxPresenters: Math.min(4, Math.max(1, parseInt(process.env.SCREEN_SHARE_MAX_PRESENTERS) || 4)),
 };

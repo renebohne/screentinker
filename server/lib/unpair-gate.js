@@ -96,8 +96,12 @@
    *   widgets share one origin and one localStorage. Clearing screen 1's keys from screen 2 would
    *   unpair the wrong output.
    */
-  function storageKeys(suffix) {
+  // `linkSuffix` (3.0): the per-display-link namespace of a page opened with ?k=. The keys below
+  // that are unsuffixed per OUTPUT are still per LINK, because two links in one browser are two
+  // displays. '' (plain /player) gives exactly the old list.
+  function storageKeys(suffix, linkSuffix) {
     var sfx = suffix == null ? '' : String(suffix);
+    var lsx = linkSuffix == null ? '' : String(linkSuffix);
     return [
       'rd_web_player' + sfx,        // identity: deviceId, deviceToken, paired, settingsPin
       'rd_playlist_cache' + sfx,    // content, so the next pairing does not play the last tenant's
@@ -105,7 +109,7 @@
       'rd_trigger_cfg' + sfx,       // a LAN listener config, including its secret
       'rd_triggers_cache' + sfx,
       'st_install_id' + sfx,        // see above — without this the whole wipe is theatre
-      'st_group_sync',              // unsuffixed by design: one clock per player process
+      'st_group_sync' + lsx,        // unsuffixed per output by design: one clock per player process
     ];
   }
 

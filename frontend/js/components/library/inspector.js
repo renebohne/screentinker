@@ -17,6 +17,7 @@ import { showToast } from '../toast.js';
 import { confirmDialog, focusables } from './dialog.js';
 import { openMenu } from './menu.js';
 import { typeOf, statusOf, durationOf, dimensionsOf, formatSize, sourceOf, isStoredFile, BUNDLE_MIME, typeIcon } from './content-meta.js';
+import { creditLine } from '../stock-picker.js';
 
 const NARROW = '(max-width: 1100px)';
 
@@ -89,6 +90,8 @@ export function createInspector(host, opts) {
       [t('library.col.dimensions'), dimensionsOf(c)],
       [t('library.inspector.size'), isStoredFile(c) ? formatSize(c.file_size) : ''],
       [t('library.inspector.source'), sourceOf(c)],
+      // Free stock (lib/stock-media.js): who took it, and where from. Shown wherever the item is.
+      [t('stock.inspector.credit'), creditLine(c)],
       [t('library.inspector.added'), c.created_at ? new Date(Number(c.created_at) * 1000).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : ''],
       [t('content.label_expires_at'), c.expires_at ? new Date(Number(c.expires_at) * 1000).toLocaleString([], { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''],
     ].filter(([, v]) => v);

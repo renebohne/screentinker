@@ -86,11 +86,12 @@ const MANDATE_EXPR = `CASE WHEN NOT EXISTS (SELECT 1 FROM corporate_mandates WHE
  * these four, and the per-boot verifier below can fall back to the previous definition precisely
  * because the shape never changes. A new tier adds a value of `source`, never a column.
  */
-const RESOLVED_VIEW = `CREATE VIEW device_resolved_playlist AS
-  SELECT d.id AS device_id,
-         CASE
-           -- A head office mandate outranks everything below. A dark mandate resolves to NULL.
-           WHEN cm.id IS NOT NULL THEN cm.playlist_id
+/*
+ * The playlist a screen plays when NO mandate covers it. Named once because two columns need it:
+ * playlist_id below, and the layout tier that reads THAT playlist's own layout. Pasting it twice is
+ * how the two would one day disagree about which playlist a screen is on.
+ */
+const LOCAL_PLAYLIST_EXPR = `CASE
            -- 'none' short-circuits everything else: "deliberately plays nothing" is not the same
            -- as "nothing was chosen". Without this branch the backfill's carefully-preserved dark
            -- screens inherit their group's playlist and light up during an upgrade.
@@ -109,7 +110,14 @@ const RESOLVED_VIEW = `CREATE VIEW device_resolved_playlist AS
            -- inherited sources means an unconverted writer keeps working while the migration is
            -- staged, and a stale copy still loses to the group.
            d.playlist_id
-         ) END AS playlist_id,
+         ) END`;
+
+const RESOLVED_VIEW = `CREATE VIEW device_resolved_playlist AS
+  SELECT d.id AS device_id,
+         CASE
+           -- A head office mandate outranks everything below. A dark mandate resolves to NULL.
+           WHEN cm.id IS NOT NULL THEN cm.playlist_id
+           ELSE ${LOCAL_PLAYLIST_EXPR} END AS playlist_id,
          CASE
            WHEN cm.id IS NOT NULL THEN 'corporate'
            WHEN d.scheduled_playlist_id IS NOT NULL THEN 'schedule'
@@ -121,12 +129,22 @@ const RESOLVED_VIEW = `CREATE VIEW device_resolved_playlist AS
            ELSE NULL
          END AS source,
          -- Layout follows the same rule, for the same reason: the scheduler used to overwrite
-         -- devices.layout_id and revert it from memory. There is no group or wall tier here —
-         -- a layout has only ever been per-device.
+         -- devices.layout_id and revert it from memory.
          -- ⚠️ A MANDATE ALWAYS DECIDES THE LAYOUT: head office's own, or NULL = full screen. A
          -- store layout could otherwise shrink every corporate item into a 1% zone.
+         -- Below it: an active schedule's layout, then THE PLAYLIST'S OWN LAYOUT (the published
+         -- one, so a layout change waits for Publish exactly like the zone moves that go with it),
+         -- then the device's. The playlist tier is what lets a group of screens play a zoned
+         -- playlist without setting each screen's layout by hand (docs/layouts-and-campaigns.md).
+         -- It reads the TOP-LEVEL playlist the screen resolved to; a nested child's layout never
+         -- counts. Wall members skip it: a wall has its own layout (video_walls.layout_id), and a
+         -- member's own layout is never drawn on a wall anyway. A NULL published_layout_id — every
+         -- playlist until someone picks a layout — falls straight through to today's rule.
          CASE WHEN cm.id IS NOT NULL THEN cm.layout_id
-              ELSE COALESCE(d.scheduled_layout_id, d.layout_id) END AS layout_id
+              ELSE COALESCE(d.scheduled_layout_id,
+                            CASE WHEN d.wall_id IS NULL THEN (SELECT pl.published_layout_id FROM playlists pl
+                                                               WHERE pl.id = ${LOCAL_PLAYLIST_EXPR}) END,
+                            d.layout_id) END AS layout_id
     FROM (SELECT d.*, ${MANDATE_EXPR} AS mandate_id FROM devices d) d
     JOIN device_inherited_playlist i ON i.device_id = d.id
     LEFT JOIN corporate_mandates cm ON cm.id = d.mandate_id`;
@@ -195,7 +213,7 @@ function renameForTemp(sql) {
  *   device_group_members  device_id, group_id
  *   workspaces        id, organization_id
  *   organizations     id, corporate_enabled
- *   playlists         id, workspace_id, corporate
+ *   playlists         id, workspace_id, corporate, published_layout_id
  *   corporate_mandates (all columns — lib/corporate/schema-sql.js)
  *
  * Adding a column here means updating that list, lib/schema-check.js's REQUIRED_COLUMNS AND any

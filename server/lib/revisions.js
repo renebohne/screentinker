@@ -30,10 +30,14 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
+const { resolveWithin } = require('./safe-path');
 
 const RESOURCE_TYPES = ['content', 'playlist', 'layout', 'slide_deck', 'widget'];
 const TABLE = { content: 'content', playlist: 'playlists', layout: 'layouts', slide_deck: 'slide_decks', widget: 'widgets' };
 const HISTORY_DIR = '.history';
+// Content ids are uuids; the check keeps a malformed one from ever naming .history itself or
+// anything outside it.
+const RETAINED_DIR_ID_RE = /^[A-Za-z0-9_-]+$/;
 const SECRET_KEY_RE = /(api[_-]?key|secret|token|password|passwd|credential|auth)/i;
 
 function nowSec() { return Math.floor(Date.now() / 1000); }
@@ -79,12 +83,19 @@ function smartItemsState(db, row) {
   } catch (_) { return []; }
 }
 
+function zoneSourcesOf(db, itemId) {
+  const out = {};
+  try { for (const r of db.prepare('SELECT zone_id, playlist_id FROM playlist_item_zone_sources WHERE item_id = ? ORDER BY zone_id').all(itemId)) out[r.zone_id] = r.playlist_id; } catch (_) { /* pre-migration */ }
+  return out;
+}
+
 function capturePlaylist(db, row) {
   // slot_id (a corporate local slot placement) only when set — with its name, so a restore can say
   // which slot it could not bring back — and only where the column exists (hand-built fixtures).
   const hasSlots = require('./corporate/schema-probe').hasColumn(db, 'playlist_items', 'slot_id');
-  const items = db.prepare(`SELECT pi.id, pi.content_id, pi.widget_id, pi.child_playlist_id, pi.zone_id, pi.sort_order, pi.duration_sec, pi.muted, pi.play_from, pi.play_until, pi.enabled, pi.log_play, pi.fit_mode, pi.play_when, pi.weight, pi.repeat_every_sec
-                                   ${hasSlots ? ', pi.slot_id, (SELECT s.name FROM corporate_slots s WHERE s.id = pi.slot_id) AS slot_name' : ''}
+  const hasLayoutRef = require('./corporate/schema-probe').hasColumn(db, 'playlist_items', 'layout_ref_id');
+  const items = db.prepare(`SELECT pi.id, pi.content_id, pi.widget_id, pi.child_playlist_id, pi.zone_id, pi.sort_order, pi.duration_sec, pi.muted, pi.play_from, pi.play_until, pi.enabled, pi.log_play, pi.fit_mode, pi.play_when, pi.weight, pi.repeat_every_sec, pi.play_to_end
+                                   ${hasSlots ? ', pi.slot_id, (SELECT s.name FROM corporate_slots s WHERE s.id = pi.slot_id) AS slot_name' : ''}${hasLayoutRef ? ', pi.layout_ref_id' : ''}
                               FROM playlist_items pi WHERE pi.playlist_id = ? ORDER BY pi.sort_order ASC, pi.id ASC`).all(row.id)
     .map((it) => ({
       content_id: it.content_id || null, widget_id: it.widget_id || null, child_playlist_id: it.child_playlist_id || null,
@@ -94,10 +105,16 @@ function capturePlaylist(db, row) {
       fit_mode: it.fit_mode || null, play_when: it.play_when || null, weight: it.weight || 1,
       // Only when set, so capturing an unchanged pre-feature playlist yields the same state as before.
       ...(it.repeat_every_sec ? { repeat_every_sec: it.repeat_every_sec } : {}),
+      ...(it.play_to_end ? { play_to_end: 1 } : {}),
       ...(it.slot_id ? { slot_id: it.slot_id, slot_name: it.slot_name || null } : {}),
+      // 3.0 campaigns: a layout item and its zones' playlists, only when set (same reason).
+      ...(it.layout_ref_id ? { layout_ref_id: it.layout_ref_id, zone_sources: zoneSourcesOf(db, it.id) } : {}),
       schedules: scheduleBlocksFor(db, it.id),
     }));
   const state = { name: row.name, description: row.description || '', playback_order: row.playback_order || 'sequential', items };
+  // 3.0 playlist layout: part of what a reviewer approves. Only when set, so an unchanged
+  // pre-feature playlist captures the same state (and the same approval hash) as before.
+  if (row.layout_id) state.layout_id = row.layout_id;
   if (row.smart_rules) {
     state.smart_rules = row.smart_rules;
     // ⚠️ A smart playlist's items are what its rules match NOW, not playlist_items (it has none).
@@ -157,12 +174,24 @@ function captureContent(db, row) {
   return state;
 }
 
+/*
+ * A switch over the five names, never `obj[type]()`: `type` reaches here from route params, and on
+ * an object literal 'constructor' / '__proto__' / 'toString' are truthy inherited members — the old
+ * `if (!TABLE[type])` guard let them through to a SELECT FROM "function Object()...".
+ */
 function captureState(db, type, id) {
-  const table = TABLE[type];
-  if (!table) throw new Error(`unknown resource type: ${type}`);
-  const row = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id);
+  if (!Object.prototype.hasOwnProperty.call(TABLE, type)) throw new Error(`unknown resource type: ${type}`);
+  const row = db.prepare(`SELECT * FROM ${TABLE[type]} WHERE id = ?`).get(id);
   if (!row) return null;
-  const state = { content: captureContent, playlist: capturePlaylist, layout: captureLayout, slide_deck: captureDeck, widget: captureWidget }[type](db, row);
+  let state;
+  switch (type) {
+    case 'content': state = captureContent(db, row); break;
+    case 'playlist': state = capturePlaylist(db, row); break;
+    case 'layout': state = captureLayout(db, row); break;
+    case 'slide_deck': state = captureDeck(db, row); break;
+    case 'widget': state = captureWidget(db, row); break;
+    default: throw new Error(`unknown resource type: ${type}`);
+  }
   return { row, state };
 }
 
@@ -313,7 +342,11 @@ function retainContentFile(db, contentId, relPath, tag) {
     const kind = relPath === row.thumbnail_path && relPath !== row.filepath ? 'thumb' : 'asset';
     return require('./storage/locations').retainRemote(contentId, kind, tag, relPath);
   }
-  const dir = path.join(historyDir(), contentId);
+  // contentId names a directory under .history, so it gets the same shape check removeRetainedFiles
+  // applies before it deletes one. Callers pass a row id that was just read, but this is the
+  // function that creates the directory and moves bytes into it, so it does not take that on trust.
+  const dir = RETAINED_DIR_ID_RE.test(String(contentId || '')) ? resolveWithin(historyDir(), String(contentId)) : null;
+  if (!dir) throw new Error('retainContentFile: invalid content id');
   fs.mkdirSync(dir, { recursive: true });
   const dest = path.join(dir, `${tag}__${path.basename(src)}`);
   const rel = path.join(HISTORY_DIR, contentId, path.basename(dest));
@@ -363,9 +396,6 @@ function deleteHistoryRows(db, resourceType, resourceId) {
   db.prepare('DELETE FROM revisions WHERE resource_type = ? AND resource_id = ?').run(resourceType, resourceId);
 }
 
-// Content ids are uuids; the check keeps a malformed one from ever naming .history itself or
-// anything outside it.
-const RETAINED_DIR_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 /** Remove <contentDir>/.history/<contentId>/ (the retained copies of a DELETED content row). */
 function removeRetainedFiles(contentId) {
@@ -527,7 +557,7 @@ function restoreToDraft(db, { type, id, revisionId, actor, materialized = null }
       db.prepare('DELETE FROM playlist_items WHERE playlist_id = ?').run(id);
       // ⚠️ slot_id is restored too, or a corporate revision brings its local slots back as all-NULL
       // ghost items (spec §6.1-6).
-      const ins = db.prepare(`INSERT INTO playlist_items (playlist_id, content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec, muted, play_from, play_until, enabled, log_play, fit_mode, play_when, weight, repeat_every_sec${hasSlots ? ', slot_id' : ''}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${hasSlots ? ', ?' : ''})`);
+      const ins = db.prepare(`INSERT INTO playlist_items (playlist_id, content_id, widget_id, child_playlist_id, zone_id, sort_order, duration_sec, muted, play_from, play_until, enabled, log_play, fit_mode, play_when, weight, repeat_every_sec, play_to_end${hasSlots ? ', slot_id' : ''}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${hasSlots ? ', ?' : ''})`);
       // A smart revision's items are its matches at the time, not rows to recreate.
       for (const it of (state.smart_rules ? [] : (state.items || []))) {
         /*
@@ -542,7 +572,15 @@ function restoreToDraft(db, { type, id, revisionId, actor, materialized = null }
           db.prepare('UPDATE corporate_slots SET retired_at = NULL WHERE id = ?').run(it.slot_id);
         }
         try {
-          const r = ins.run(id, it.content_id || null, it.widget_id || null, it.child_playlist_id || null, it.zone_id || null, it.sort_order, it.duration_sec, it.muted ? 1 : 0, it.play_from || null, it.play_until || null, it.enabled === 0 ? 0 : 1, it.log_play === 0 ? 0 : 1, it.fit_mode || null, it.play_when || null, it.weight || 1, it.repeat_every_sec || null, ...(hasSlots ? [it.slot_id || null] : []));
+          // 3.0 campaigns: a layout item whose layout is gone is not restored (nothing to show).
+          if (it.layout_ref_id && !db.prepare('SELECT 1 FROM layouts WHERE id = ?').get(it.layout_ref_id)) continue;
+          const r = ins.run(id, it.content_id || null, it.widget_id || null, it.child_playlist_id || null, it.zone_id || null, it.sort_order, it.duration_sec, it.muted ? 1 : 0, it.play_from || null, it.play_until || null, it.enabled === 0 ? 0 : 1, it.log_play === 0 ? 0 : 1, it.fit_mode || null, it.play_when || null, it.weight || 1, it.repeat_every_sec || null, it.play_to_end ? 1 : null, ...(hasSlots ? [it.slot_id || null] : []));
+          if (it.layout_ref_id) {
+            db.prepare('UPDATE playlist_items SET layout_ref_id = ? WHERE id = ?').run(it.layout_ref_id, r.lastInsertRowid);
+            for (const [zid, pid] of Object.entries(it.zone_sources || {})) {
+              try { db.prepare('INSERT INTO playlist_item_zone_sources (item_id, zone_id, playlist_id) VALUES (?, ?, ?)').run(r.lastInsertRowid, zid, pid); } catch (_) { /* zone or playlist gone */ }
+            }
+          }
           for (const b of it.schedules || []) {
             const cols = Object.keys(b);
             if (!cols.length) continue;
@@ -557,6 +595,12 @@ function restoreToDraft(db, { type, id, revisionId, actor, materialized = null }
       }
       db.prepare("UPDATE playlists SET name = ?, description = ?, playback_order = ?, smart_rules = ?, status = 'draft', updated_at = ? WHERE id = ?")
         .run(state.name || row.name, state.description || '', state.playback_order || row.playback_order || 'sequential', state.smart_rules || null, now, id);
+      if (require('./corporate/schema-probe').hasColumn(db, 'playlists', 'layout_id')) {
+        // A layout that has since been deleted (or now belongs elsewhere) is not restored.
+        const l = state.layout_id ? db.prepare('SELECT is_template, workspace_id FROM layouts WHERE id = ?').get(state.layout_id) : null;
+        const ok = l && (l.is_template || l.workspace_id === row.workspace_id);
+        db.prepare('UPDATE playlists SET layout_id = ? WHERE id = ?').run(ok ? state.layout_id : null, id);
+      }
     });
     txn();
   } else if (type === 'layout') {

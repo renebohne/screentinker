@@ -24,6 +24,8 @@
 const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const { db } = require('../db/database');
 const { requireScope } = require('../middleware/apiToken');
 const { resourceAccess } = require('../lib/tenancy');
@@ -50,7 +52,7 @@ function access(req, res, { admin = false, write = false, adminError = 'Only a w
  */
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch((err) => {
-    console.error(`[zapier] unhandled error in ${req.method} ${req.path}:`, err && err.message);
+    console.error('[zapier] unhandled error in %s %s:', req.method, req.path, err && err.message);
     try {
       if (!res.headersSent) res.status(500).json({ error: 'Something went wrong' });
     } catch (e2) {
@@ -121,18 +123,22 @@ router.delete('/subscriptions/:id', requireScope('write'), (req, res) => {
   res.json({ ok: true, removed: r.changes > 0 });
 });
 
+// Kind -> query, as data: a Map lookup of a fixed SQL string, never `obj[kind]()`. The object
+// literal this replaced answered /options/constructor (and __proto__) with 200 `{}` instead of 404,
+// because those are inherited members of every object.
+const OPTION_LISTS = new Map([
+  ['groups', 'SELECT id, name FROM device_groups WHERE workspace_id = ? ORDER BY name'],
+  ['playlists', 'SELECT id, name FROM playlists WHERE workspace_id = ? ORDER BY name'],
+  ['triggers', "SELECT id, name FROM triggers WHERE workspace_id = ? AND COALESCE(kind, '') != 'emergency' ORDER BY name"],
+  ['tables', "SELECT id, name FROM data_sources WHERE workspace_id = ? AND type = 'table' ORDER BY name"],
+  ['screens', 'SELECT id, name FROM devices WHERE workspace_id = ? ORDER BY name'],
+]);
+
 router.get('/options/:kind', requireScope('read'), (req, res) => {
   if (!access(req, res)) return;
-  const ws = req.workspaceId;
-  const q = {
-    groups: () => db.prepare('SELECT id, name FROM device_groups WHERE workspace_id = ? ORDER BY name').all(ws),
-    playlists: () => db.prepare('SELECT id, name FROM playlists WHERE workspace_id = ? ORDER BY name').all(ws),
-    triggers: () => db.prepare("SELECT id, name FROM triggers WHERE workspace_id = ? AND COALESCE(kind, '') != 'emergency' ORDER BY name").all(ws),
-    tables: () => db.prepare("SELECT id, name FROM data_sources WHERE workspace_id = ? AND type = 'table' ORDER BY name").all(ws),
-    screens: () => db.prepare('SELECT id, name FROM devices WHERE workspace_id = ? ORDER BY name').all(ws),
-  }[req.params.kind];
-  if (!q) return res.status(404).json({ error: 'Unknown option list' });
-  res.json(q());
+  const sql = OPTION_LISTS.get(String(req.params.kind));
+  if (!sql) return res.status(404).json({ error: 'Unknown option list' });
+  res.json(db.prepare(sql).all(req.workspaceId));
 });
 
 /* ============================== actions ============================== */

@@ -130,3 +130,54 @@ test('#170 EXIF orientation is applied by the decoder, so dimensions are as DISP
   // Reported as 1 because the rotation is already applied — imageDisplayDims() must NOT swap again.
   assert.equal(meta.orientation, 1, 'a tag of 6 here would double-rotate downstream');
 });
+
+/* ---------------------------------------------------- decompression bombs / runaway jobs */
+
+test('header dimensions are read without decoding (PNG, JPEG, WebP, GIF)', async () => {
+  const { headerDims } = require('../lib/image-dims');
+  const { sniffMime } = require('../lib/upload-sniff');
+  const raw = Buffer.alloc(37 * 23 * 3, 0x80);
+  for (const fmt of ['png', 'jpeg', 'webp', 'gif']) {
+    const buf = await sharp(raw, { raw: { width: 37, height: 23, channels: 3 } }).toFormat(fmt).toBuffer();
+    assert.deepEqual(headerDims(buf, sniffMime(buf)), { width: 37, height: 23 }, fmt);
+  }
+  // lossless WebP is the VP8L header, a different bit layout
+  const lossless = await sharp(raw, { raw: { width: 37, height: 23, channels: 3 } }).webp({ lossless: true }).toBuffer();
+  assert.deepEqual(headerDims(lossless, 'image/webp'), { width: 37, height: 23 });
+  assert.equal(headerDims(Buffer.from('nope'), 'image/png'), null, 'unreadable header: no opinion');
+});
+
+test('a tiny file DECLARING a huge canvas is refused before decode', async () => {
+  // A valid PNG signature + IHDR claiming 60000x60000 (14 GB of RGBA); the rest is junk.
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(60000, 0); ihdr.writeUInt32BE(60000, 4); ihdr[8] = 8; ihdr[9] = 6;
+  const len = Buffer.alloc(4); len.writeUInt32BE(13);
+  const bomb = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), len, Buffer.from('IHDR'), ihdr, Buffer.alloc(64)]);
+  const p = path.join(tmp, 'bomb.png');
+  fs.writeFileSync(p, bomb);
+  await assert.rejects(() => imageOps.metadata(p), /too large to decode/);
+
+  // JPEG SOF0 claiming 65000x65000
+  const sof = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0xfd, 0xe8, 0xfd, 0xe8, 0x03, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xd9, 0, 0, 0]);
+  const pj = path.join(tmp, 'bomb.jpg');
+  fs.writeFileSync(pj, sof);
+  await assert.rejects(() => imageOps.metadata(pj), /too large to decode/);
+
+  // A normal image still measures.
+  const ok = path.join(tmp, 'after-bomb.png');
+  fs.writeFileSync(ok, await sharp({ create: { width: 9, height: 7, channels: 3, background: '#123456' } }).png().toBuffer());
+  assert.deepEqual(await imageOps.metadata(ok), { width: 9, height: 7, orientation: 1 });
+});
+
+test('a job past the per-job timeout is rejected, the worker replaced, and the next job runs', async () => {
+  const src = await bigPhoto();
+  const prev = imageOps._setJobTimeoutMs(1);
+  try {
+    await assert.rejects(() => imageOps.writeThumbnail(src, path.join(tmp, 'slow.jpg'), 320, 70), /timed out/);
+  } finally {
+    imageOps._setJobTimeoutMs(prev);
+  }
+  const ok = path.join(tmp, 'after-timeout.png');
+  fs.writeFileSync(ok, await sharp({ create: { width: 5, height: 4, channels: 3, background: '#000' } }).png().toBuffer());
+  assert.deepEqual(await imageOps.metadata(ok), { width: 5, height: 4, orientation: 1 });
+});

@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
@@ -94,8 +96,10 @@ function inlineUserContent(html, workspaceId) {
  * save time by validateTimezone below, so nobody silently gets UTC again.
  */
 function safeTimezone(tz) {
-  if (!tz) return 'UTC';
-  return isRealTimezone(tz) ? tz : 'UTC';
+  if (!tz || !isRealTimezone(tz)) return 'UTC';
+  // Intl's own spelling of the zone, not the caller's string: isRealTimezone already refuses quotes
+  // and backslashes, and this makes what is inlined into the clock's script text Intl produced.
+  return new Intl.DateTimeFormat('en-US', { timeZone: tz }).resolvedOptions().timeZone;
 }
 
 function serverTimezone() {
@@ -687,7 +691,7 @@ function renderWidgetHtml(type, config, opts = {}) {
   switch (type) {
     case 'clock': return renderClock(config);
     case 'weather': return renderWeather(config);
-    case 'rss': return renderRSS(config);
+    case 'rss': return renderRSS(config, { seed: opts.seed });
     case 'text': return renderText(config, iframeSandbox);
     case 'webpage': return renderWebpage(config, iframeSandbox, opts.origin);
     // The embedded renderer passes the workspace and gets a self-contained snapshot; otherwise this is
@@ -734,7 +738,7 @@ function renderWidgetHtml(type, config, opts = {}) {
           });
           if (typeof html === 'string' && html.length) return html;
         } catch (e) {
-          console.warn(`[plugins] render failed for type "${type}":`, e.message);
+          console.warn('[plugins] render failed for type "%s":', type, e.message);
         }
       }
       return '<html><body style="color:white;background:black;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><h1>Unknown widget</h1></body></html>';
@@ -876,6 +880,16 @@ router.get('/:id/render', (req, res) => {
       .catch(() => null)
       .then((initial) => res.send(renderRoomDisplay({ widgetId: widget.id, origin, config, initial })));
   }
+  /*
+   * The news widget (renderRSS): items and pictures come from this server only, and its policy says
+   * so — a screen showing headlines contacts no publisher and no feed service.
+   */
+  if (widget.widget_type === 'rss') {
+    res.setHeader('Content-Security-Policy', rssCsp(`${req.protocol}://${req.get('host')}`));
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    return res.send(renderRSS(config));
+  }
   if (widget.widget_type === 'template') {
     const out = require('../lib/templates/widget').renderTemplateWidget(widget, {
       origin: `${req.protocol}://${req.get('host')}`,
@@ -1000,7 +1014,9 @@ router.post('/:id/telemetry', express.text({ type: '*/*', limit: '16kb' }), (req
   t.receivedAt = Date.now();
   // Key by the reporting device (player passes ?device=<id>) so multiple panels don't collide;
   // fall back to a widget-scoped key for players that don't pass a device id yet.
-  const key = (t.device && String(t.device).slice(0, 64)) || ('w:' + req.params.id);
+  // 3.0: namespaced by the widget too. Keyed on the bare device id, anyone who knew a screen's id
+  // could forge or read its diagnostics through ANY widget id; now they also need this widget's id.
+  const key = (t.device && `d:${req.params.id}:${String(t.device).slice(0, 64)}`) || ('w:' + req.params.id);
   widgetTelemetry.set(key, t);
   // 204, not res.json(): this is fire-and-forget diagnostic data and the reporting widget ignores
   // the response entirely (routes/widgets.js renderDiagSmoothness -> fetch(...).catch()). It also
@@ -1019,7 +1035,7 @@ router.get('/:id/telemetry', (req, res) => {
   // with no device id gets the widget-scoped snapshot (raw/debug view only).
   // get() returns null for a missing OR expired entry, so a stale snapshot is never served
   // as live even between sweeps.
-  const rec = dev ? widgetTelemetry.get(dev) : widgetTelemetry.get('w:' + req.params.id);
+  const rec = dev ? widgetTelemetry.get(`d:${req.params.id}:${dev.slice(0, 64)}`) : widgetTelemetry.get('w:' + req.params.id);
   res.json(rec || null);
 });
 
@@ -1046,6 +1062,11 @@ router.post('/preview', (req, res) => {
   });
   if (req.workspaceId) html = inlineUserContent(html, req.workspaceId);
   res.setHeader('Content-Type', 'text/html');
+  // Same containment as the preview-session URL below: this is author config rendered on the
+  // dashboard's origin, so if the response is ever loaded as a document it runs opaque, not as the
+  // origin whose localStorage holds the session.
+  if (widget_type === 'cloud-doc') res.setHeader('Content-Security-Policy', require('../lib/cloud-docs').RENDER_CSP);
+  else res.setHeader('Content-Security-Policy', `sandbox ${PREVIEW_IFRAME_SANDBOX}`);
   res.send(html);
 });
 
@@ -1090,7 +1111,15 @@ router.get('/preview-session/:id', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Content-Type', 'text/html');
   // The editor previews a cloud document with allow-same-origin (as players do); script-free by CSP.
+  //
+  // Every other preview gets `sandbox allow-scripts` as a HEADER, the same thing the dashboard's
+  // <iframe sandbox="allow-scripts"> already applies. In the dashboard that changes nothing. It
+  // matters when this URL is opened top-level: it is unauthenticated (_skipAuth) and lives on the
+  // dashboard's origin, so without the header the page would run as the origin whose localStorage
+  // holds the session. Raw author HTML is already isolated one level down (renderText's srcdoc
+  // iframe); this keeps the wrapper, and anything a future widget type emits, opaque as well.
   if (entry.widget_type === 'cloud-doc') res.setHeader('Content-Security-Policy', require('../lib/cloud-docs').RENDER_CSP);
+  else res.setHeader('Content-Security-Policy', `sandbox ${PREVIEW_IFRAME_SANDBOX}`);
   res.send(html);
 });
 
@@ -1158,7 +1187,7 @@ async function load() {
   try {
     // #324: wttr.in accepts lang=, so "Sunny" can arrive in the operator's language rather than
     // always English. Same locale field the clock gained in #323; blank leaves wttr.in's default.
-    const r = await fetch('https://wttr.in/${encodeURIComponent(c.location || 'New York')}?format=j1${/^[A-Za-z]{2}$/.test(String(c.locale || '').slice(0, 2)) ? '&lang=' + String(c.locale).slice(0, 2).toLowerCase() : ''}');
+    const r = await fetch('https://wttr.in/${encodeURIComponent(c.location || 'New York')}?format=j1${/^[A-Za-z]{2}$/.test(String(c.locale || '').slice(0, 2)) ? '&lang=' + encodeURIComponent(String(c.locale).slice(0, 2).toLowerCase()) : ''}');
     const d = await r.json();
     const cur = d.current_condition[0];
     const unit = '${c.units === 'metric' ? 'temp_C' : 'temp_F'}';
@@ -1177,69 +1206,215 @@ load(); setInterval(load, 600000);
 </script></body></html>`;
 }
 
-function renderRSS(c) {
-  // scroll_speed is authored in the UI as "seconds" (legacy field), but that used to be wired
-  // straight into animation-duration: a *fixed total time* for the whole strip to cross the
-  // screen. That makes the on-screen speed depend on how much content there is - a feed with
-  // many items gets dragged through in the same {scroll_speed}s as a feed with one, so it
-  // flies past far too fast, never lets the reader finish, and simply "jumps back to the
-  // start" once the fixed duration is up. Instead we treat scroll_speed as calibrating a
-  // constant px/sec rate (using one viewport-width per scroll_speed seconds as the reference,
-  // matching prior behaviour for content that fits in one screen), then measure the actual
-  // rendered width of the ticker and derive a duration long enough to move that full distance
-  // at the same constant speed - so more items simply take proportionally longer, and every
-  // item scrolls fully into and out of view before the loop restarts.
-  const scrollSpeedSec = safeNumber(c.scroll_speed, 30);
-  return `<!DOCTYPE html><html><head><style>
+/*
+ * The news widget ('rss'): a scrolling ticker, or one headline at a time with its picture.
+ *
+ * ⚠️ THE SCREEN TALKS ONLY TO THIS SERVER. It reads its items from /api/news-feeds/items (signed
+ * for this feed, lib/news-feed) and its pictures from /api/news-feeds/image — never from the
+ * publisher, and never from a feed-conversion service (it used to ask api.rss2json.com, which
+ * refused valid feeds and learned which feeds every screen reads).
+ *
+ * SEEDED, SO A SCREEN THAT RELOADS OFFLINE STILL HAS HEADLINES. When the server already holds this
+ * feed, the page carries those items and shows them until a fresh answer arrives; a failed read
+ * keeps whatever is on screen. Headlines are public and short-lived, so unlike a social wall
+ * (lib/social/widget.js) there is no moderation that a cached copy could undo.
+ *
+ * Feed text is DATA: it reaches the page as JSON in a <script type="application/json"> block with
+ * `<` escaped and is put on screen with textContent. ES5 on purpose: the page also runs on old
+ * player WebViews (the legacy player).
+ */
+function rssConfig(c) {
+  const feedUrl = typeof c.feed_url === 'string' ? c.feed_url.trim().slice(0, 2000) : '';
+  return {
+    feedUrl,
+    mode: c.feed_mode === 'page' ? 'page' : 'feed',
+    layout: c.layout === 'headlines' ? 'headlines' : 'ticker',
+    maxItems: Math.max(1, Math.min(50, Math.round(safeNumber(c.max_items, 10)) || 10)),
+    scrollSpeedSec: Math.max(1, Math.min(600, safeNumber(c.scroll_speed, 30))),
+    intervalSec: Math.max(3, Math.min(300, Math.round(safeNumber(c.interval_sec, 10)) || 10)),
+    showImages: c.show_images !== false,
+    fontSize: Math.max(8, Math.min(400, safeNumber(c.font_size, 24))),
+  };
+}
+
+const jsonForScript = (o) => JSON.stringify(o).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026')
+  .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+
+// The page's own policy (set by /render): scripts inline, data and pictures from this server only.
+function rssCsp(origin) {
+  const o = origin || "'self'";
+  return `default-src 'none'; img-src ${o} data:; connect-src ${o}; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; sandbox allow-scripts`;
+}
+
+function renderRSS(c, opts = {}) {
+  const news = require('../lib/news-feed');
+  const r = rssConfig(c || {});
+  // Pictures: on by default for the headlines look; the ticker shows small ones beside each headline
+  // only when asked (show_images: true), so tickers saved before 3.0 stay text-only.
+  const images = r.layout === 'headlines' ? r.showImages : c && c.show_images === true;
+  // Relative: the page is served by this server, and a moved server must not leave cached pages
+  // pointing at the old address. The embedded renderer sets a <base>, so it resolves there too.
+  const itemsUrl = r.feedUrl ? news.itemsPath(r.feedUrl, r.mode) : '';
+  const seedData = itemsUrl && opts.seed !== false ? news.peek(r.feedUrl, r.mode) : null;
+  const seed = seedData ? news.screenPayload(seedData, { max: r.maxItems, images }) : null;
+  const cfg = {
+    url: itemsUrl ? `${itemsUrl}&n=${r.maxItems}` : '',
+    layout: r.layout, speed: r.scrollSpeedSec, interval: r.intervalSec * 1000, images, font: r.fontSize,
+    seed: seed ? seed.items : null,
+  };
+  const fg = safeCss(c.color, '#FFF');
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:${safeCss(c.background, '#000')}; height:100vh; overflow:hidden; font-family:-apple-system,sans-serif; }
+  body { background:${safeCss(c.background, '#000')}; color:${fg}; height:100vh; overflow:hidden; font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
   .ticker { display:flex; align-items:center; height:100%; white-space:nowrap; position:relative; will-change:transform; }
-  .item { display:inline-block; padding:0 40px; font-size:${safeNumber(c.font_size, 24)}px; color:${safeCss(c.color, '#FFF')}; }
+  .item { display:inline-block; padding:0 40px; font-size:${r.fontSize}px; color:${fg}; }
   .item .title { font-weight:600; }
-  .item .sep { margin:0 20px; opacity:0.3; }
+  #root { position:relative; height:100%; }
+  .item .tp { display:inline-block; vertical-align:middle; margin-right:14px; border-radius:4px; background:#111 center/cover no-repeat; }
+  .item.sep { padding:0 20px; opacity:0.3; }
+  .msg { display:flex; align-items:center; justify-content:center; height:100%; font-size:${r.fontSize}px; opacity:.7; }
+  .hl { position:absolute; top:0; right:0; bottom:0; left:0; display:flex; align-items:stretch; opacity:0; transition:opacity .8s ease; }
+  /* Chrome 53 CSS only (legacy players): no inset, no min()/max(), no flex gap. */
+  .hl.on { opacity:1; }
+  .hl .pic { flex:0 0 45%; background:#111 center/cover no-repeat; }
+  .hl .txt { flex:1; display:flex; flex-direction:column; justify-content:center; padding:5vmin; min-width:0; }
+  .hl .t { font-size:${Math.round(r.fontSize * 2)}px; font-weight:700; line-height:1.2; overflow:hidden; display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; }
+  .hl .s { margin-top:2.5vmin; font-size:${Math.round(r.fontSize * 1.1)}px; line-height:1.35; opacity:.8; overflow:hidden; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; }
+  .hl .w { margin-top:2.5vmin; font-size:${Math.round(r.fontSize * 0.8)}px; opacity:.6; }
+  @media (orientation: portrait) { .hl { flex-direction:column; } .hl .pic { flex:0 0 45%; } }
 </style></head><body>
-<div class="ticker" id="ticker"><div class="item">Loading feed...</div></div>
+<div id="root"><div class="msg">Loading feed...</div></div>
+<script type="application/json" id="cfg">${jsonForScript(cfg)}</script>
 <script>
-var SCROLL_SPEED_SEC = ${scrollSpeedSec};
-var ticker = document.getElementById('ticker');
-var anim = null;
-function restartAnimation() {
-  if (anim) { anim.cancel(); anim = null; }
-  var viewportW = window.innerWidth;
-  var tickerW = ticker.scrollWidth;
-  // Reference speed: one viewport-width travelled every SCROLL_SPEED_SEC seconds, so the
-  // default of 30s behaves the same as before for a feed that fits within one screen.
-  var pxPerSec = viewportW / SCROLL_SPEED_SEC;
-  var distance = viewportW + tickerW; // starts fully off-screen right, ends fully off-screen left
-  var durationMs = Math.max(1000, (distance / pxPerSec) * 1000);
-  anim = ticker.animate(
-    [
-      { transform: 'translateX(' + viewportW + 'px)' },
-      { transform: 'translateX(-' + tickerW + 'px)' },
-    ],
-    { duration: durationMs, iterations: Infinity, easing: 'linear' }
-  );
-}
-async function load() {
-  try {
-    const r = await fetch('https://api.rss2json.com/v1/api.json?rss_url=' + encodeURIComponent('${escapeHtml(c.feed_url) || ''}'));
-    const d = await r.json();
-    const items = d.items?.slice(0, ${safeNumber(c.max_items, 10)}) || [];
-    // NOTE: RSS feed titles are external content - using textContent instead of innerHTML to prevent XSS
-    ticker.innerHTML = items.map(i => {
-      const el = document.createElement('span'); el.textContent = i.title;
-      return '<div class="item"><span class="title">' + el.innerHTML + '</span></div><div class="item sep">•</div>';
-    }).join('') || '<div class="item">No items</div>';
-  } catch(e) { ticker.innerHTML = '<div class="item">Feed unavailable</div>'; }
-  requestAnimationFrame(restartAnimation);
-}
-window.addEventListener('resize', restartAnimation);
-load(); setInterval(load, 300000);
+(function () {
+  var cfg = JSON.parse(document.getElementById('cfg').textContent);
+  var root = document.getElementById('root');
+  var items = cfg.seed;
+  var anim = null, rot = null, idx = 0;
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; }
+  function message(text) { stop(); root.innerHTML = ''; root.appendChild(el('div', 'msg', text)); }
+  function stop() { if (anim) { try { anim.cancel(); } catch (e) {} anim = null; } if (rot) { clearInterval(rot); rot = null; } }
+
+  /* Ticker. scroll_speed calibrates a constant px/sec (one viewport width per scroll_speed seconds),
+     and the duration is derived from the strip's real width, so a long feed takes proportionally
+     longer instead of being dragged past too fast to read. */
+  function ticker() {
+    stop();
+    root.innerHTML = '';
+    var strip = el('div', 'ticker');
+    for (var i = 0; i < items.length; i++) {
+      var it = el('div', 'item');
+      if (cfg.images && items[i].image) {
+        var tp = el('span', 'tp'); var th = Math.round(cfg.font * 1.7);
+        tp.style.height = th + 'px'; tp.style.width = Math.round(th * 16 / 9) + 'px';
+        tp.style.backgroundImage = 'url("' + String(items[i].image).replace(/["\\\\\\n]/g, '') + '")';
+        it.appendChild(tp);
+      }
+      it.appendChild(el('span', 'title', items[i].title)); strip.appendChild(it);
+      strip.appendChild(el('div', 'item sep', '\\u2022'));
+    }
+    root.appendChild(strip);
+    var vw = window.innerWidth, w = strip.scrollWidth;
+    var ms = Math.max(1000, ((vw + w) / (vw / cfg.speed)) * 1000);
+    if (strip.animate) {
+      anim = strip.animate([{ transform: 'translateX(' + vw + 'px)' }, { transform: 'translateX(-' + w + 'px)' }], { duration: ms, iterations: Infinity, easing: 'linear' });
+    } else {
+      var st = document.createElement('style');
+      st.textContent = '@keyframes stt{from{transform:translateX(' + vw + 'px)}to{transform:translateX(-' + w + 'px)}}';
+      root.appendChild(st);
+      strip.style.animation = 'stt ' + (ms / 1000) + 's linear infinite';
+    }
+  }
+
+  /* Headlines: one story at a time, its picture beside (or above, in portrait) the words. */
+  function when(iso) {
+    if (!iso) return '';
+    var d = new Date(iso); if (isNaN(d.getTime())) return '';
+    var mins = Math.round((Date.now() - d.getTime()) / 60000);
+    if (mins < 60 && mins >= 0) return mins <= 1 ? 'just now' : mins + ' min ago';
+    try { return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (e) { return d.toDateString(); }
+  }
+  function headlines() {
+    stop();
+    root.innerHTML = '';
+    var cards = [];
+    for (var i = 0; i < items.length; i++) {
+      var c = el('div', 'hl');
+      if (cfg.images && items[i].image) { var p = el('div', 'pic'); p.style.backgroundImage = 'url("' + String(items[i].image).replace(/["\\\\\\n]/g, '') + '")'; c.appendChild(p); }
+      var tx = el('div', 'txt');
+      tx.appendChild(el('div', 't', items[i].title));
+      if (items[i].summary) tx.appendChild(el('div', 's', items[i].summary));
+      var w = when(items[i].published); if (w) tx.appendChild(el('div', 'w', w));
+      c.appendChild(tx); root.appendChild(c); cards.push(c);
+    }
+    idx = idx % cards.length;
+    cards[idx].className = 'hl on';
+    if (cards.length > 1) rot = setInterval(function () {
+      cards[idx].className = 'hl'; idx = (idx + 1) % cards.length; cards[idx].className = 'hl on';
+    }, cfg.interval);
+  }
+
+  function draw() {
+    if (!items || !items.length) { message(items ? 'No items' : 'Feed unavailable'); return; }
+    if (cfg.layout === 'headlines') headlines(); else ticker();
+  }
+  function load() {
+    if (!cfg.url) { message('No feed chosen'); return; }
+    var x = new XMLHttpRequest();
+    var done = false;
+    function keep() { if (done) return; done = true; if (!items) message('Feed unavailable'); }
+    try {
+      x.open('GET', cfg.url, true);
+      x.timeout = 30000;
+      x.onload = function () {
+        if (x.status === 200) {
+          try {
+            var d = JSON.parse(x.responseText);
+            if (d && d.items && d.items.length !== undefined) { done = true; items = d.items; draw(); return; }
+          } catch (e) {}
+        }
+        keep();   // an error keeps what is on screen
+      };
+      x.onerror = keep; x.ontimeout = keep;
+      x.send();
+    } catch (e) { keep(); }
+  }
+  if (items) draw();
+  window.addEventListener('resize', function () { if (items && items.length && cfg.layout !== 'headlines') ticker(); });
+  load();
+  setInterval(load, 300000);
+})();
 </script></body></html>`;
 }
 
+/*
+ * Feed fetches in hand-written and designer HTML, pointed at this server (lib/news-feed).
+ *
+ *   https://api.rss2json.com/v1/api.json?rss_url=<feed>   what the designer's ticker wrote until 3.0;
+ *                                                         every saved one now reads through this server
+ *   /api/news-feeds/items?m=<mode>&u=<feed>               what it writes now, unsigned: the signature is
+ *                                                         added here, at render, so the page can read it
+ *
+ * The response keeps rss2json's `items[].title` shape, so the old inline scripts work unchanged.
+ * Anyone who can author a text widget can already build a news widget for any feed, so signing a
+ * feed found in their HTML grants nothing new; the read is still SSRF-guarded and cached.
+ */
+function rewriteFeedFetches(html) {
+  if (!/rss2json|\/api\/news-feeds\/items/i.test(html)) return html;
+  const news = require('../lib/news-feed');
+  const signed = (enc, mode) => {
+    let url = '';
+    try { url = decodeURIComponent(enc); } catch (_) { url = ''; }
+    // An unreadable address still must not reach rss2json: an unsigned path answers 403 with no items.
+    return news.itemsPath(url, mode) || '/api/news-feeds/items?m=feed&u=&s=';
+  };
+  return html
+    .replace(/https?:\/\/api\.rss2json\.com\/v1\/api\.json\?rss_url=([^'"\s<>&)`]*)(?:&[^'"\s<>)`]*)?/gi, (m, enc) => signed(enc, 'feed'))
+    .replace(/\/api\/news-feeds\/items\?m=(feed|page)&u=([^'"\s<>&)`]*)(?:&s=[A-Za-z0-9_-]*)?/g, (m, mode, enc) => signed(enc, mode));
+}
+
 function renderText(c, iframeSandbox = 'allow-scripts') {
-  let html = c.html || '<p style="color:white;padding:20px">Empty text widget</p>';
+  let html = rewriteFeedFetches(c.html ? String(c.html) : '<p style="color:white;padding:20px">Empty text widget</p>');
 
   // LEGACY DESIGNER RESCUE — deliberately narrow.
   //

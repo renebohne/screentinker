@@ -1,5 +1,8 @@
 'use strict';
 
+// The ScreenTinker app's page in the Roku Channel Store (adds it to the signed-in Roku account).
+const ROKU_STORE_URL = 'https://my.roku.com/account/add/Screentinker';
+
 /*
  * The /download page: every player this INSTANCE can hand out, in one place.
  *
@@ -221,16 +224,18 @@ function entries(state = {}) {
       id: 'roku',
       name: 'Roku',
       file: null,
-      // Not a download: a Roku app installs from the Roku Channel Store. A sideloaded zip needs
-      // developer mode on every Roku, which is not how a sign should be set up. Until Roku publishes
-      // the app there is no store link either, so the row explains instead of offering.
-      what: 'Not a download. The ScreenTinker app installs from the Roku Channel Store (in Roku’s review). Needs Roku OS 15.1 or later.',
-      url: null,
+      // Not a download: a Roku app installs from the Roku Channel Store, so the row links to the
+      // store's add-to-account page rather than to a file on this instance. A sideloaded zip needs
+      // developer mode on every Roku, which is not how a sign should be set up.
+      what: 'Not a download: add the ScreenTinker app to your Roku account and it installs on your Rokus. Needs Roku OS 15.1 or later. Read the guide first: a Roku cannot start itself after a power cut.',
+      url: ROKU_STORE_URL,
+      external: true,
+      action_label: 'Add to your Roku',
       guide: '/guides/roku-digital-signage.html',
-      available: false,
+      available: true,
       version: null,
       size: null,
-      absent: 'The Roku app is in Roku’s store review; once published it is added with the channel code Screentinker. Read the guide first: a Roku cannot start itself after a power cut.',
+      absent: null,
     },
   ];
 }
@@ -248,7 +253,8 @@ function rowHtml(e, base) {
 
   let action;
   if (e.available && e.url) {
-    action = `<a class="btn" href="${esc(e.url)}">${e.file ? 'Download ' + esc(e.file) : 'Open the player'}</a>`;
+    const label = e.action_label || (e.file ? 'Download ' + e.file : 'Open the player');
+    action = `<a class="btn" href="${esc(e.url)}"${e.external ? ' target="_blank" rel="noopener"' : ''}>${esc(label)}</a>`;
   } else {
     action = `<p class="absent">${esc(e.absent || 'Not available on this instance.')}</p>`
       + (e.fallback ? `<a class="btn btn-quiet" href="${esc(e.fallback)}">Use the web player</a>` : '');

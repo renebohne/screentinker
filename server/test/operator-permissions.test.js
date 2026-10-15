@@ -67,7 +67,7 @@ db.exec(`
   -- the playlist holding this content has no copy of the id on its row — and would otherwise be
   -- left showing a file that no longer exists on disk.
   CREATE TABLE devices (id TEXT PRIMARY KEY, workspace_id TEXT, playlist_id TEXT, playlist_source TEXT, wall_id TEXT, layout_id TEXT, scheduled_playlist_id TEXT, scheduled_layout_id TEXT);
-  CREATE TABLE playlists (id TEXT PRIMARY KEY, workspace_id TEXT, published_snapshot TEXT);
+  CREATE TABLE playlists (id TEXT PRIMARY KEY, workspace_id TEXT, published_snapshot TEXT, published_layout_id TEXT);
   CREATE TABLE playlist_items (id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id TEXT, content_id TEXT, child_playlist_id TEXT);
   CREATE TABLE playlist_item_schedules (id TEXT PRIMARY KEY, playlist_item_id INTEGER);
   CREATE TABLE video_walls (id TEXT PRIMARY KEY, workspace_id TEXT, playlist_id TEXT);

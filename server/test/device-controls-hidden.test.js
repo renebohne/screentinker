@@ -118,6 +118,10 @@ function render(device, telemetry) {
     // Same again for the head office (corporate) playlist section that replaces the picker on a
     // screen head office drives. A recognisable marker, so the test below can see it was chosen.
     corporatePlaylistTab: () => '<!--corporate-playlist-tab-->',
+    // Same again for the 3.0 layout helpers (which layout is on screen, and who chose it): not
+    // platform-dependent, covered in test/playlist-layout-routes.test.js.
+    activeLayoutIdOf: (d) => (d && d.layout_id) || null,
+    layoutSourceNote: () => '',
     localStorage: { getItem: () => null, setItem: () => {} },
     Math, Date, JSON, String, Array, Object,
   };

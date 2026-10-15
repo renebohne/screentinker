@@ -155,3 +155,16 @@ test('a read-only member sees the data but not the credentials, and cannot write
   const test2 = await api(U.viewerA, 'POST', '/api/data-sources/test', { type: 'table', config: { columns: ['a'], rows: [] } }, { 'X-Workspace-Id': U.a.ws });
   assert.equal(test2.status, 403);
 });
+
+test('an edit that keeps the URL keeps the stored token; repointing the URL drops it (no exfil on next sync)', async () => {
+  const stored = () => JSON.parse(sqlite.prepare('SELECT config FROM data_sources WHERE id = ?').get(DS.aRest).config);
+  // Same origin, blank token (what the form sends back): the stored secret is kept.
+  let r = await api(U.a, 'PUT', `/api/data-sources/${DS.aRest}`, { config: { url: 'https://api.example.com/queue?v=2', auth_type: 'bearer', auth_token: '' } });
+  assert.equal(r.status, 200, r.text);
+  assert.match(stored().auth_token || '', /^enc:v1:/, 'same destination keeps the secret');
+  // A different origin with a blank token: the stored secret must NOT follow it.
+  r = await api(U.a, 'PUT', `/api/data-sources/${DS.aRest}`, { config: { url: 'https://attacker.invalid/collect', auth_type: 'bearer', auth_token: '' } });
+  assert.equal(r.status, 200, r.text);
+  assert.doesNotMatch(r.text, new RegExp(TOKEN));
+  assert.ok(!stored().auth_token, 'repointed source carries no stored secret');
+});

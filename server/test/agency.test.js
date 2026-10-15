@@ -252,3 +252,30 @@ test('#158 agency upload folder: auto-create, pick, subtree confinement, rebind'
   assert.equal(c3.folder_id, null, 'after unbinding, uploads land at library root');
   assert.deepEqual((await jfetch('/api/agency/folders', { headers: { Authorization: 'Bearer ' + atok } })).body, [], 'no bound folder -> empty subtree (portal shows no picker)');
 });
+
+test('a token owner DEMOTED to viewer after minting: the agency token and its target edits are refused', async () => {
+  const auth = (tok) => ({ headers: { Authorization: 'Bearer ' + tok } });
+  const email = 'dm' + crypto.randomBytes(4).toString('hex') + '@x.local';
+  // Own client IP: the suite's earlier registrations would otherwise trip the per-IP signup limiter.
+  const r = (await jfetch('/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '192.0.2.77' }, body: JSON.stringify({ email, password: 'Passw0rd123' }) })).body;
+  const jwt = r.token;
+  assert.ok(jwt, 'registered: ' + JSON.stringify(r));
+  const pl = (await jfetch('/api/playlists', jpost(jwt, { name: 'Demote' }))).body;
+  const tokRes = await jfetch('/api/tokens', jpost(jwt, { name: 'Demoted', scope: 'agency', target_playlist_ids: [pl.id] }));
+  assert.equal(tokRes.status, 201);
+  const atok = tokRes.body.token, tokId = tokRes.body.id;
+  assert.equal((await jfetch(`/api/agency/playlists/${pl.id}/layout`, auth(atok))).status, 200, 'works while editor/admin');
+
+  const Database = require('better-sqlite3');
+  const sql = new Database(path.join(DATA_DIR, 'db', 'remote_display.db'));
+  sql.pragma('busy_timeout = 5000');
+  sql.prepare("UPDATE workspace_members SET role = 'workspace_viewer' WHERE user_id = ? AND workspace_id = ?").run(r.user.id, r.current_workspace_id);
+  sql.close();
+
+  assert.equal((await jfetch(`/api/agency/playlists/${pl.id}/layout`, auth(atok))).status, 403, 'use-time re-check');
+  assert.equal((await jfetch('/api/agency/playlists', auth(atok))).status, 403);
+  const put = await jfetch(`/api/tokens/${tokId}/targets`, { method: 'PUT', headers: { Authorization: 'Bearer ' + jwt, 'Content-Type': 'application/json' }, body: JSON.stringify({ target_playlist_ids: [pl.id] }) });
+  assert.equal(put.status, 403, 'target edit re-checks the role too');
+  const fput = await jfetch(`/api/tokens/${tokId}/upload-folder`, { method: 'PUT', headers: { Authorization: 'Bearer ' + jwt, 'Content-Type': 'application/json' }, body: JSON.stringify({ upload_folder_id: null }) });
+  assert.equal(fput.status, 403, 'upload-folder edit re-checks the role too');
+});

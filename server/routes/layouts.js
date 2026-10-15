@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
 const { PLATFORM_ROLES, ELEVATED_ROLES } = require('../middleware/auth');
@@ -29,7 +31,12 @@ router.get('/', (req, res) => {
 
   // Attach zones to each layout
   const zonesStmt = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order');
-  layouts.forEach(l => { l.zones = zonesStmt.all(l.id); });
+  const lv = require('../lib/layout-variants');
+  layouts.forEach(l => {
+    l.zones = zonesStmt.all(l.id);
+    // 3.0: which orientation versions it has, so pickers can say "has a portrait version".
+    l.variants = lv.variantNames(db, l.id);
+  });
 
   res.json(layouts);
 });
@@ -86,6 +93,11 @@ router.get('/:id', (req, res) => {
   if (!layout) return;
 
   layout.zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(layout.id);
+  // 3.0: each zone's portrait / 4:3 geometry, for the editor's Landscape | Portrait | 4:3 toggle.
+  {
+    const vs = require('../lib/layout-variants').variantsOf(db, layout.id);
+    for (const z of layout.zones) if (vs[z.id]) z.variants = vs[z.id];
+  }
   // `zones` stays the LIVE set - renderers and assignments read this route too. A pending draft is
   // offered alongside it so the editor can open on the author's unpublished work instead of
   // showing them the live layout and quietly discarding the draft on their next save.
@@ -213,6 +225,7 @@ router.put('/:id', (req, res) => {
       const existingIds = db.prepare('SELECT id FROM layout_zones WHERE layout_id = ?')
         .all(req.params.id).map(r => r.id);
       const existingSet = new Set(existingIds);
+      const zoneIdTaken = db.prepare('SELECT 1 FROM layout_zones WHERE id = ?');
       const keptIds = new Set();
 
       const insertZone = db.prepare(`
@@ -224,9 +237,17 @@ router.put('/:id', (req, res) => {
           height_percent = ?, z_index = ?, zone_type = ?, fit_mode = ?, background_color = ?, sort_order = ?
         WHERE id = ? AND layout_id = ?
       `);
+      // 3.0: the zone a playlist's zone-less items play in (lib/playlist-layout.js mainZone). Only
+      // written when the editor sends the flag, so an older editor's save leaves it as it was; at
+      // most one zone keeps it.
+      const sendsMain = zones.some((z) => z && z.is_main !== undefined);
+      let mainId = null;
+      const savedIds = [];
 
       zones.forEach((z, i) => {
-        const zid = z.id || uuidv4();
+        // An id that belongs to ANOTHER layout's zone is not this layout's to reuse (it would collide
+        // on insert — a 500 — or, worse, be read as a claim on that zone): mint a fresh one.
+        const zid = (z.id && (existingSet.has(z.id) || !zoneIdTaken.get(z.id))) ? z.id : uuidv4();
         const vals = [
           z.name || `Zone ${i + 1}`,
           z.x_percent || 0, z.y_percent || 0, z.width_percent || 100, z.height_percent || 100,
@@ -236,7 +257,18 @@ router.put('/:id', (req, res) => {
         if (existingSet.has(zid)) updateZone.run(...vals, zid, req.params.id);
         else insertZone.run(zid, req.params.id, ...vals);
         keptIds.add(zid);
+        if (!mainId && (z.is_main === true || Number(z.is_main) === 1)) mainId = zid;
+        savedIds[i] = zid;
       });
+      if (sendsMain) {
+        try {
+          db.prepare('UPDATE layout_zones SET is_main = CASE WHEN id = ? THEN 1 ELSE 0 END WHERE layout_id = ?').run(mainId, req.params.id);
+        } catch (_) { /* pre-migration schema */ }
+      }
+      // 3.0 orientation versions, keyed by the ids the zones now have (a new zone's id is minted
+      // above, so the editor's copy is matched by position).
+      require('../lib/layout-variants').writeZoneVariants(db, req.params.id,
+        zones.map((z, i) => (z && z.variants !== undefined ? { id: z.id || savedIds[i], variants: z.variants } : null)).filter(Boolean));
 
       // Only the zones the editor actually removed.
       for (const zid of existingIds) {
@@ -252,6 +284,10 @@ router.put('/:id', (req, res) => {
 
   const updated = db.prepare('SELECT * FROM layouts WHERE id = ?').get(req.params.id);
   updated.zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(req.params.id);
+  {
+    const vs = require('../lib/layout-variants').variantsOf(db, req.params.id);
+    for (const z of updated.zones) if (vs[z.id]) z.variants = vs[z.id];
+  }
   // Push to the displays using this layout. Editing a layout used to notify nothing at all, so a
   // zone change waited for the next heartbeat refresh at best — and on Android it did not apply
   // even then, because the rebuild was keyed on the layout ID, which does not change when you edit
@@ -262,7 +298,7 @@ router.put('/:id', (req, res) => {
     if (io) {
       const { buildPlaylistPayload } = require('../ws/deviceSocket');
       const commandQueue = require('../lib/command-queue');
-      for (const d of db.prepare(SCREENS_ON_LAYOUT_SQL).all(req.params.id, req.params.id)) {
+      for (const d of db.prepare(SCREENS_ON_LAYOUT_SQL).all(req.params.id, req.params.id, req.params.id)) {
         commandQueue.queueOrEmitPlaylistUpdate(io.of('/device'), d.id, buildPlaylistPayload);
       }
     }
@@ -271,15 +307,66 @@ router.put('/:id', (req, res) => {
   res.json(updated);
 });
 
+/*
+ * 3.0: a starting arrangement for a layout's portrait or 4:3 version (lib/layout-variants.js
+ * autoArrange), computed from the zones the editor is showing — saved or not, which is why this takes
+ * the zones rather than a layout id. Pure arithmetic over the caller's own numbers: nothing is read
+ * or written, so it needs no layout access check beyond being signed in.
+ */
+router.post('/auto-variant', (req, res) => {
+  const variant = req.body && req.body.variant;
+  const lv = require('../lib/layout-variants');
+  if (!lv.VARIANTS.includes(variant)) return res.status(400).json({ error: 'variant must be portrait or square' });
+  const zones = Array.isArray(req.body.zones) ? req.body.zones.slice(0, 100) : [];
+  const clean = zones.map((z, i) => ({
+    id: typeof (z && z.key) === 'string' ? z.key.slice(0, 80) : String(i),
+    x_percent: Number(z && z.x_percent) || 0, y_percent: Number(z && z.y_percent) || 0,
+    width_percent: Number(z && z.width_percent) || 0, height_percent: Number(z && z.height_percent) || 0,
+  }));
+  res.json({ variant, zones: lv.autoArrange(clean, variant, { width: Number(req.body.width) || 1920, height: Number(req.body.height) || 1080 }) });
+});
+
 // Delete layout
 router.delete('/:id', (req, res) => {
   const layout = checkLayoutWrite(req, res);
   if (!layout) return;
   if (layout.is_template && !PLATFORM_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Cannot delete templates' });
 
+  // Screens drawing it right now (their own, a wall's, a schedule's or their playlist's layout):
+  // read BEFORE the delete, they are pushed the full-screen fallback after it.
+  let affected = [];
+  try { affected = db.prepare(SCREENS_ON_LAYOUT_SQL).all(req.params.id, req.params.id, req.params.id).map((d) => d.id); } catch (_) { affected = []; }
+  // 3.0 campaigns: playlists that show this layout as an item. The items go with the layout (a layout
+  // item with no layout is skipped anyway); published campaigns are republished so screens drop the
+  // step now rather than at their next unrelated publish.
+  let campaigns = [];
+  try { campaigns = db.prepare('SELECT DISTINCT playlist_id FROM playlist_items WHERE layout_ref_id = ?').all(req.params.id).map((r) => r.playlist_id); } catch (_) { campaigns = []; }
   db.prepare('DELETE FROM layouts WHERE id = ?').run(req.params.id);
+  try { db.prepare('DELETE FROM layout_zone_variants WHERE layout_id = ?').run(req.params.id); } catch (_) { /* pre-migration schema */ }
+  if (campaigns.length) {
+    try { db.prepare('DELETE FROM playlist_items WHERE layout_ref_id = ?').run(req.params.id); } catch (_) { /* gone with the FK */ }
+    for (const pid of campaigns) {
+      try {
+        const p = db.prepare('SELECT status FROM playlists WHERE id = ?').get(pid);
+        if (p && p.status === 'published') require('../lib/corporate/actor').runAsSystem(() => require('./playlists').publishPlaylist(pid, req));
+      } catch (e) { console.warn(`[campaign] republish of ${pid} after layout delete failed: ${e && e.message}`); }
+    }
+  }
   // foreign_keys is OFF here, so ON DELETE SET NULL never fires: clear walls that used it by hand.
   db.prepare('UPDATE video_walls SET layout_id = NULL WHERE layout_id = ?').run(req.params.id);
+  // Same for playlists that chose it (3.0 playlist layouts): they go back to "the screen's own".
+  try {
+    db.prepare('UPDATE playlists SET layout_id = NULL WHERE layout_id = ?').run(req.params.id);
+    db.prepare('UPDATE playlists SET published_layout_id = NULL WHERE published_layout_id = ?').run(req.params.id);
+  } catch (_) { /* pre-migration schema */ }
+  try {
+    const io = req.app.get('io');
+    if (io && affected.length) {
+      const { buildPlaylistPayload } = require('../ws/deviceSocket');
+      const commandQueue = require('../lib/command-queue');
+      for (const id of affected) commandQueue.queueOrEmitPlaylistUpdate(io.of('/device'), id, buildPlaylistPayload);
+    }
+  } catch (_) { /* best-effort; the heartbeat refresh still picks it up */ }
   res.json({ success: true });
 });
 
@@ -390,7 +477,14 @@ router.post('/:id/duplicate', (req, res) => {
     zone_id_map[z.id] = nz;
     stmt.run(nz, newId, z.name, z.x_percent, z.y_percent, z.width_percent, z.height_percent,
       z.z_index, z.zone_type, z.fit_mode, z.background_color, z.sort_order);
+    if (Number(z.is_main) === 1) db.prepare('UPDATE layout_zones SET is_main = 1 WHERE id = ?').run(nz);
   });
+  // The copy keeps the source's portrait / 4:3 versions, on its own zone ids.
+  try {
+    const vs = require('../lib/layout-variants').variantsOf(db, req.params.id);
+    require('../lib/layout-variants').writeZoneVariants(db, newId,
+      Object.entries(vs).filter(([zid]) => zone_id_map[zid]).map(([zid, v]) => ({ id: zone_id_map[zid], variants: v })));
+  } catch (_) { /* pre-migration schema */ }
 
   const layout = db.prepare('SELECT * FROM layouts WHERE id = ?').get(newId);
   layout.zones = db.prepare('SELECT * FROM layout_zones WHERE layout_id = ? ORDER BY sort_order').all(newId);

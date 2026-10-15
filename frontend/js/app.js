@@ -10,8 +10,12 @@ import * as schedule from './views/schedule.js';
 import * as widgets from './views/widgets.js';
 import * as slides from './views/slides.js';
 import * as templates from './views/templates.js';
+import * as makeSign from './views/make-sign.js';
+import * as aiSetup from './views/ai-setup.js';
+import * as translateView from './views/translate.js';
 import * as dataSources from './views/data-sources.js';
 import * as reviews from './views/reviews.js';
+import * as contentRequests from './views/requests.js';
 import * as videoWall from './views/video-wall.js';
 import * as reports from './views/reports.js';
 import * as audience from './views/audience.js';
@@ -19,27 +23,40 @@ import * as servers from './views/servers.js';
 import * as noc from './views/noc.js';
 import * as triggers from './views/triggers.js';
 import * as qrCodes from './views/qr-codes.js';
+import * as experiments from './views/experiments.js';
 import * as socialFeeds from './views/social.js';
 import * as alerts from './views/alerts.js';
 import * as capFeeds from './views/cap-feeds.js';
 import * as automation from './views/automation.js';
 import * as corporate from './views/corporate.js';
 import * as activity from './views/activity.js';
+import * as freshness from './views/freshness.js';
+import * as energy from './views/energy.js';
+import * as migrate from './views/migrate.js';
+import { installFreshnessChips } from './components/freshness-chips.js';
+import * as accessibility from './views/accessibility.js';
+import { installA11yBadges } from './components/accessibility.js';
 import * as kiosk from './views/kiosk.js';
 import * as onboarding from './views/onboarding.js';
 import * as help from './views/help.js';
 import * as teams from './views/teams.js';
 import * as admin from './views/admin.js';
+import * as privacy from './views/privacy.js';   // 3.0 "Your data, provably" (#/privacy)
+import * as orgImport from './views/org-import.js';   // 3.0 move an organization to another server (#/org-import)
 import * as adminPlayerDebug from './views/admin-player-debug.js';
 import * as designer from './views/designer.js';
 import * as playlists from './views/playlists.js';
 import * as workspaceMembers from './views/workspace-members.js';
 import * as forcePasswordChange from './views/force-password-change.js';
 import * as noWorkspace from './views/no-workspace.js';
+import * as siteCaches from './views/site-caches.js';
 import { applyBranding } from './branding.js';
 import { t } from './i18n.js';
 import { isPlatformAdmin } from './utils.js';
 import { initNavGroups } from './components/nav-groups.js';
+import { applyUiMode, isSimpleMode, setUiMode } from './components/ui-mode.js';
+import * as simpleHome from './views/simple-home.js';
+import { installPlanNudges, updateTrialBanner } from './components/plan-nudges.js';
 import { renderWorkspaceSwitcher, selectedRemoteOrg, clearRemoteOrg } from './components/workspace-switcher.js';
 import { corporateSettings, renderHqContextBar } from './components/corporate-ui.js';
 
@@ -244,21 +261,27 @@ const NAV_LABEL_KEYS = {
   templates: 'nav.templates',
   'data-sources': 'nav.data_sources',
   reviews: 'nav.reviews',
+  requests: 'nav.requests',
   schedule: 'nav.schedule',
   walls: 'nav.walls',
   reports: 'nav.reports',
   audience: 'nav.audience',
+  experiments: 'nav.experiments',
   servers: 'nav.servers',
   triggers: 'nav.triggers',
   'qr-codes': 'nav.qr_codes',
   social: 'nav.social',
   alerts: 'nav.alerts',
+  'site-caches': 'nav.site_caches',
   'emergency-feeds': 'nav.emergency_feeds',
   automation: 'nav.automation',
   // corporate is relabelled per viewer (Corporate / Head office) by syncCorporateNav.
   kiosk: 'nav.kiosk',
   designer: 'nav.designer',
   activity: 'nav.activity',
+  freshness: 'nav.freshness',
+  energy: 'nav.energy',
+  accessibility: 'nav.accessibility',
   teams: 'nav.teams',
   members: 'nav.members',
   help: 'nav.help',
@@ -276,17 +299,18 @@ function renderNavLabels() {
   });
 }
 
-// Translate any element marked with data-i18n / data-i18n-placeholder /
-// data-i18n-html. Runs on init and on every language change. Used for static
-// HTML in index.html (e.g. the Add-Display modal) where t() can't be inlined
-// at template time.
+// Translate any element marked with data-i18n / data-i18n-placeholder. Runs on
+// init and on every language change. Used for static HTML in index.html (e.g.
+// the Add-Display modal) where t() can't be inlined at template time.
+//
+// There used to be a data-i18n-html variant that assigned t(key) to innerHTML.
+// Nothing carried the attribute, and it was a trap waiting to be used: a missing
+// key falls back to the key text itself, and {brandName} is a white-label
+// setting, both of which it would have parsed as markup. Text only now.
 function translateStaticDom(root = document) {
   root.querySelectorAll('[data-i18n]').forEach((el) => {
     const key = el.getAttribute('data-i18n');
     el.textContent = t(key);
-  });
-  root.querySelectorAll('[data-i18n-html]').forEach((el) => {
-    el.innerHTML = t(el.getAttribute('data-i18n-html'));
   });
   root.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
     el.placeholder = t(el.getAttribute('data-i18n-placeholder'));
@@ -538,12 +562,24 @@ function route() {
     }
   }
 
+  // 3.0: the Manager app's "Advanced" lands here in the phone's browser: turn Advanced on for this
+  // account and go to the dashboard (or ?next=help). Never inside the app itself.
+  if (hash.startsWith('#/switch-advanced') && isAuthenticated()) {
+    const next = new URLSearchParams(hash.split('?')[1] || '').get('next') === 'help' ? '#/help' : '#/';
+    Promise.resolve(setUiMode('advanced')).finally(() => { window.location.hash = next; });
+    return;
+  }
+
   // Onboarding for new users
-  if (hash === '#/onboarding' && isAuthenticated()) {
+  // 3.0: #/add-screen is the same guide, for every later screen (Simple view's Add screen).
+  if ((hash === '#/onboarding' || hash === '#/add-screen') && isAuthenticated()) {
+    // A view-only member cannot add a screen; Simple view does not offer it, so a stray link goes home.
+    if (hash === '#/add-screen' && !simpleHome.simpleCanChange(getCurrentUser())) { window.location.hash = '#/'; return; }
+    simpleHome.removeBackBar();
     sidebar.style.display = 'none';
     if (mainWrapper) mainWrapper.style.marginLeft = '0';
     currentView = onboarding;
-    onboarding.render(app);
+    onboarding.render(app, { mode: hash === '#/add-screen' ? 'add' : 'first' });
     return;
   }
 
@@ -560,11 +596,37 @@ function route() {
     return;
   }
 
-  // Show sidebar for authenticated views
-  sidebar.style.display = '';
-  if (mainWrapper) mainWrapper.style.marginLeft = '';
+  /*
+   * 3.0 Simple view: guide-style home and tasks, no sidebar (views/simple-home.js). Only these
+   * routes; every other page — a bookmark, a link from Help — opens with the full shell as before.
+   */
+  if (isSimpleMode() && simpleHome.isSimpleRoute(hash)) {
+    document.documentElement.classList.remove('nav-pending');
+    sidebar.style.display = 'none';
+    if (mainWrapper) mainWrapper.style.marginLeft = '0';
+    const smb = document.getElementById('mobileMenuBtn');
+    if (smb) smb.style.display = 'none';
+    updateSidebarUser(); // banners (trial, billing, verify) and the view switch stay in step
+    currentView = simpleHome;
+    simpleHome.render(app, hash);
+    return;
+  }
+
+  // Show sidebar for authenticated views (and drop nav-prime.js's first-paint hide).
+  document.documentElement.classList.remove('nav-pending');
   const mb = document.getElementById('mobileMenuBtn');
-  if (mb) mb.style.display = '';
+  if (isSimpleMode()) {
+    // 3.0 Simple view on any other page: no sidebar, and a bar with the way home (simple-home.js).
+    sidebar.style.display = 'none';
+    if (mainWrapper) mainWrapper.style.marginLeft = '0';
+    if (mb) mb.style.display = 'none';
+    simpleHome.mountBackBar();
+  } else {
+    simpleHome.removeBackBar();
+    sidebar.style.display = '';
+    if (mainWrapper) mainWrapper.style.marginLeft = '';
+    if (mb) mb.style.display = '';
+  }
 
   // Update user info in sidebar
   updateSidebarUser();
@@ -573,21 +635,26 @@ function route() {
   navLinks.forEach(link => {
     link.classList.remove('active');
     if (hash === '#/' && link.dataset.view === 'dashboard') link.classList.add('active');
-    else if (hash.startsWith('#/content') && link.dataset.view === 'content') link.classList.add('active');
-    else if (hash.startsWith('#/settings') && link.dataset.view === 'settings') link.classList.add('active');
+    else if ((hash.startsWith('#/content') || hash.startsWith('#/migrate')) && link.dataset.view === 'content') link.classList.add('active');
+    else if ((hash.startsWith('#/settings') || hash === '#/privacy' || hash.startsWith('#/org-import')) && link.dataset.view === 'settings') link.classList.add('active');
     else if (hash.startsWith('#/billing') && link.dataset.view === 'billing') link.classList.add('active');
     else if ((hash.startsWith('#/layout') || hash === '#/layouts') && link.dataset.view === 'layouts') link.classList.add('active');
     else if ((hash === '#/playlists' || hash.startsWith('#/playlists/')) && link.dataset.view === 'playlists') link.classList.add('active');
     else if (hash === '#/schedule' && link.dataset.view === 'schedule') link.classList.add('active');
     else if (hash === '#/widgets' && link.dataset.view === 'widgets') link.classList.add('active');
-    else if (hash === '#/slides' && link.dataset.view === 'slides') link.classList.add('active');
+    else if ((hash === '#/slides' || hash.startsWith('#/slides?') || hash.startsWith('#/signs') || hash.startsWith('#/ai-setup') || hash.startsWith('#/translate')) && link.dataset.view === 'slides') link.classList.add('active');
     else if (hash === '#/social' && link.dataset.view === 'social') link.classList.add('active');
     else if (hash === '#/templates' && link.dataset.view === 'templates') link.classList.add('active');
     else if ((hash === '#/data-sources' || hash.startsWith('#/data-sources/')) && link.dataset.view === 'data-sources') link.classList.add('active');
     else if ((hash.startsWith('#/wall') || hash === '#/walls') && link.dataset.view === 'walls') link.classList.add('active');
+    else if (hash === '#/site-caches' && link.dataset.view === 'site-caches') link.classList.add('active');
     else if (hash === '#/reports' && link.dataset.view === 'reports') link.classList.add('active');
     else if (hash === '#/audience' && link.dataset.view === 'audience') link.classList.add('active');
+    else if ((hash === '#/experiments' || hash.startsWith('#/experiments/')) && link.dataset.view === 'experiments') link.classList.add('active');
     else if (hash === '#/activity' && link.dataset.view === 'activity') link.classList.add('active');
+    else if ((hash === '#/freshness' || hash.startsWith('#/freshness?')) && link.dataset.view === 'freshness') link.classList.add('active');
+    else if ((hash === '#/energy' || hash.startsWith('#/energy?')) && link.dataset.view === 'energy') link.classList.add('active');
+    else if (hash === '#/accessibility' && link.dataset.view === 'accessibility') link.classList.add('active');
     else if ((hash === '#/designer' || hash.startsWith('#/designer/')) && link.dataset.view === 'designer') link.classList.add('active');
     else if ((hash === '#/kiosk' || hash.startsWith('#/kiosk/')) && link.dataset.view === 'kiosk') link.classList.add('active');
     else if (hash === '#/help' && link.dataset.view === 'help') link.classList.add('active');
@@ -619,18 +686,37 @@ function route() {
   } else if (hash === '#/schedule') {
     currentView = schedule;
     schedule.render(app);
-  } else if (hash === '#/slides') {
+  } else if (hash === '#/slides' || hash.startsWith('#/slides?')) {
     currentView = slides;
     slides.render(app);
+  } else if (hash === '#/signs' || hash.startsWith('#/signs?')) {
+    // 3.0 Make a sign, in the full shell (Slides → New from template). Simple view has #/simple/sign.
+    currentView = makeSign;
+    makeSign.render(app, hash);
+  } else if (hash === '#/ai-setup' || hash.startsWith('#/ai-setup?')) {
+    // 3.0 Private AI: "Set up my screens with AI" in the full shell. Simple view has #/simple/ai-setup.
+    currentView = aiSetup;
+    aiSetup.render(app, hash);
+  } else if (hash === '#/translate' || hash.startsWith('#/translate?')) {
+    // 3.0 Private AI: auto-translate signs and decks, and each screen's language.
+    currentView = translateView;
+    translateView.render(app, hash);
   } else if (hash === '#/templates') {
     currentView = templates;
     templates.render(app);
+  } else if (hash === '#/migrate' || hash.startsWith('#/migrate?')) {
+    // 3.0 switch to ScreenTinker: import from another signage CMS (views/migrate.js).
+    currentView = migrate;
+    migrate.render(app);
   } else if (hash === '#/data-sources' || hash.startsWith('#/data-sources/')) {
     currentView = dataSources;
     dataSources.render(app);
   } else if (hash === '#/reviews') {
     currentView = reviews;
     reviews.render(app);
+  } else if (hash === '#/requests' || hash.startsWith('#/requests?')) {
+    currentView = contentRequests;
+    contentRequests.render(app);
   } else if (hash === '#/widgets') {
     currentView = widgets;
     widgets.render(app);
@@ -646,6 +732,10 @@ function route() {
   } else if (hash === '#/social') {
     currentView = socialFeeds;
     socialFeeds.render(app);
+  } else if (hash === '#/site-caches') {
+    // 3.0 site caches (docs/site-cache.md): LAN cache boxes, their status and which screens use them.
+    currentView = siteCaches;
+    siteCaches.render(app);
   } else if (hash === '#/alerts') {
     currentView = alerts;
     alerts.render(app);
@@ -677,9 +767,25 @@ function route() {
   } else if (hash === '#/reports') {
     currentView = reports;
     reports.render(app);
+  } else if (hash === '#/freshness' || hash.startsWith('#/freshness?')) {
+    // 3.0 content freshness: what is going stale, worst first (?ws= from the weekly digest).
+    currentView = freshness;
+    freshness.render(app);
+  } else if (hash === '#/energy' || hash.startsWith('#/energy?')) {
+    // 3.0 energy & carbon: estimated kWh / CO2e, schedule savings, what-if, ESG exports.
+    currentView = energy;
+    energy.render(app);
+  } else if (hash === '#/accessibility') {
+    // 3.0 accessibility checker: what on the screens may be hard to read or unsafe, worst first.
+    currentView = accessibility;
+    accessibility.render(app);
   } else if (hash === '#/audience') {
     currentView = audience;
     audience.render(app);
+  } else if (hash === '#/experiments' || hash.startsWith('#/experiments/')) {
+    // 3.0 Experiments: list, #/experiments/new(?id=…) and #/experiments/<id> (views/experiments.js).
+    currentView = experiments;
+    experiments.render(app);
   } else if (hash === '#/kiosk' || hash.startsWith('#/kiosk/')) {
     currentView = kiosk;
     kiosk.render(app);
@@ -720,6 +826,14 @@ function route() {
   } else if (hash.startsWith('#/platform/')) {
     currentView = admin;
     admin.render(app, hash.slice(11).split(/[/?]/)[0]);
+  } else if (hash === '#/privacy') {
+    // 3.0 Settings -> Data & privacy (docs/trust.md).
+    currentView = privacy;
+    privacy.render(app);
+  } else if (hash.startsWith('#/org-import')) {
+    // 3.0 Import an organization / the whole server (docs/move-server.md). Prefix: ?job=… and ?kind=….
+    currentView = orgImport;
+    orgImport.render(app);
   } else if (hash === '#/settings' || hash.startsWith('#/settings?')) {
     // `?` prefix too: a credit-pack Checkout returns to `#/settings?credits=success` (the same trap
     // the #/billing route below documents). Not a bare startsWith, so no future #/settings-x matches.
@@ -776,7 +890,9 @@ function updateSidebarUser() {
   if (!user) return;
   updateVerifyBanner(user);
   updateBillingBanner(user);
+  updateTrialBanner(user);
   updateWidgetSandboxWarningBanner(user);
+  applyUiMode(user);
 
   // The Platform nav group is for platform admins only (legacy 'superadmin' or 'platform_admin').
   // nav-groups.js hides a group whose every link is hidden, so hiding the items hides the group.
@@ -859,9 +975,9 @@ function updateSidebarUser() {
 
   userEl.innerHTML = `
     ${user.avatar_url ? `<img src="${user.avatar_url}" style="width:28px;height:28px;border-radius:50%">` :
-      `<div style="width:28px;height:28px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:white">${esc((user.name || user.email)[0].toUpperCase())}</div>`}
+      `<div style="width:28px;height:28px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:white">${esc(((user.name || user.email || '?')[0] || '?').toUpperCase())}</div>`}
     <div style="flex:1;min-width:0">
-      <div style="font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(user.name || user.email)}</div>
+      <div style="font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(user.name || user.email || '')}</div>
       <div style="font-size:10px;color:var(--text-muted)">${user.role}</div>
     </div>
     <button id="logoutBtn" class="btn-icon" title="${t('auth.sign_out')}" style="flex-shrink:0">
@@ -976,12 +1092,61 @@ async function refreshReviewsBadge() {
   } catch { badge.style.display = 'none'; }
 }
 window.addEventListener('hashchange', () => { if (location.hash === '#/reviews' || location.hash === '#/members') refreshReviewsBadge(); });
+
+// 3.0 content requests: how many requests from outside are waiting for a decision. Requests need an
+// approve step whether or not the workspace requires approval, so this lights up either way.
+async function refreshRequestsBadge() {
+  const badge = document.getElementById('requestsNavBadge');
+  if (!badge || !isAuthenticated()) return;
+  try {
+    const rows = await api.get('/content-requests/requests?status=pending');
+    const n = Array.isArray(rows) ? rows.length : 0;
+    badge.textContent = String(n);
+    badge.style.display = n > 0 ? '' : 'none';
+  } catch { badge.style.display = 'none'; }
+}
+window.addEventListener('hashchange', () => { if (location.hash.startsWith('#/requests')) refreshRequestsBadge(); });
+setTimeout(refreshRequestsBadge, 1800);
 setTimeout(refreshReviewsBadge, 1500);
+
+/*
+ * 3.0: the first-run guide, reached. 2.x only sent someone to #/onboarding when they loaded #/login
+ * while already signed in, and a new signup's login handler goes straight to #/ and reloads — so the
+ * wizard was effectively unreachable and nearly every new account started on an empty dashboard.
+ *
+ * Now /me says whether this ACCOUNT has finished or skipped it (users.onboarded_at). Sent there only
+ * from the dashboard, only once per browser session, never for a viewer (they cannot pair), and
+ * never into a workspace that already has screens — a colleague joining an existing estate is
+ * marked done instead of being walked through pairing a screen someone else already set up.
+ */
+let firstRunChecked = false;
+async function maybeStartFirstRun(user) {
+  if (firstRunChecked || !user || user.onboarded_at !== null) return; // undefined = older server
+  firstRunChecked = true;
+  const hash = window.location.hash || '#/';
+  if (hash !== '#/' && hash !== '#') return;
+  if (localStorage.getItem('rd_onboarded')) { api.updateMe({ onboarded: true }).catch(() => {}); return; }
+  if (!user.current_workspace_id || user.current_workspace_role === 'workspace_viewer') return;
+  try {
+    const devices = await api.getDevices();
+    if (Array.isArray(devices) && devices.length > 0) { api.updateMe({ onboarded: true }).catch(() => {}); return; }
+  } catch { return; }
+  if ((window.location.hash || '#/') === hash) window.location.hash = '#/onboarding';
+}
 
 // Initialize
 renderNavLabels();
 translateStaticDom();
 initNavGroups();
+installPlanNudges();
+window.addEventListener('user-refreshed', (e) => {
+  const fresh = e.detail;
+  applyUiMode(fresh);
+  // The past-due banner used to be drawn once at boot from the cached user; /me now carries
+  // subscription_status (3.0), so keep it in step with every refresh.
+  updateBillingBanner(fresh);
+  maybeStartFirstRun(fresh);
+});
 window.addEventListener('language-changed', () => {
   renderNavLabels();
   translateStaticDom();
@@ -1102,6 +1267,12 @@ if (isAuthenticated()) {
   }, 60000);
 }
 window.addEventListener('hashchange', route);
+// 3.0 content freshness: "Stale" / "Mentions a past date" chips on screen, playlist and content cards.
+installFreshnessChips(app);
+// 3.0 accessibility: badges on content items, playlists and slide decks with errors or warnings.
+installA11yBadges(app);
+// 3.0: Simple and Advanced render #/ differently, so a view switch re-routes the current page.
+window.addEventListener('st:ui-mode', () => { if (isAuthenticated()) route(); });
 enableHelpTips();
 route();
 

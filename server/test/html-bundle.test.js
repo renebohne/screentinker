@@ -271,3 +271,32 @@ test('the bundle mime matches nothing the media routing looks for', () => {
   assert.ok(!bundle.BUNDLE_MIME.startsWith('video/'));
   assert.match(bundle.BUNDLE_MIME, /^application\//);
 });
+
+/* ------------------------------------------------- real-byte caps (a lying central directory) */
+
+test('readBundleEntry stops at the CLAIMED size: an entry claiming 10 bytes that inflates to 4 MB is refused', async () => {
+  const bomb = Buffer.alloc(4 * 1024 * 1024, 0x20);
+  const p = writeZip([
+    { name: 'index.html', data: HTML },
+    { name: 'big.js', data: bomb, method: 8, sizes: { uncompressed: 10 } },
+  ]);
+  await bundle.validateBundle(p);   // the claims pass the policy filter...
+  await assert.rejects(() => bundle.readBundleEntry(p, 'big.js'), /inflates past its declared size/);
+  // ...and a normal entry still reads.
+  assert.equal((await bundle.readBundleEntry(p, 'index.html')).toString(), HTML);
+});
+
+test('readBundleEntry refuses an entry that claims more than maxBytes, before inflating it', async () => {
+  const p = writeZip([{ name: 'index.html', data: HTML }, { name: 'a.js', data: 'x'.repeat(2000), method: 8 }]);
+  await assert.rejects(() => bundle.readBundleEntry(p, 'a.js', { maxBytes: 1000 }), (e) => e.code === 'ENTRY_TOO_LARGE');
+  assert.equal((await bundle.readBundleEntry(p, 'a.js', { maxBytes: 5000 })).length, 2000);
+});
+
+test('validateBundle: a config.xml that inflates past its claim is refused, not buffered', async () => {
+  const xml = '<widget><content src="index.html"/></widget>' + ' '.repeat(2 * 1024 * 1024);
+  const p = writeZip([
+    { name: 'config.xml', data: xml, method: 8, sizes: { uncompressed: 64 } },
+    { name: 'index.html', data: HTML },
+  ]);
+  await assert.rejects(() => bundle.validateBundle(p), /config\.xml inflates past/);
+});

@@ -14,11 +14,14 @@
  * both panels without any panel being in charge.
  */
 
-// Every screen whose payload depends on a layout: screens that use it themselves, and members of a
-// wall that uses it. Two placeholders, both the layout id.
+// Every screen whose payload depends on a layout: screens that use it themselves, members of a
+// wall that uses it, and screens that draw it right now for any other reason (a schedule's layout,
+// or the layout of the playlist they play — the resolver view says which). Three placeholders, all
+// the layout id.
 const SCREENS_ON_LAYOUT_SQL = `SELECT id FROM devices WHERE layout_id = ?
   UNION SELECT device_id AS id FROM video_wall_devices
-    WHERE wall_id IN (SELECT id FROM video_walls WHERE layout_id = ?)`;
+    WHERE wall_id IN (SELECT id FROM video_walls WHERE layout_id = ?)
+  UNION SELECT device_id AS id FROM device_resolved_playlist WHERE layout_id = ?`;
 
 // A layout only counts as a wall layout when it can place more than the whole stage: one zone is
 // the same as no layout (the payload already strips zone ids below two zones).

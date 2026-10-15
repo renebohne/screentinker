@@ -86,6 +86,36 @@ scripts/upgrade.sh              # latest stable release
 scripts/upgrade.sh v1.2.3       # or pin one
 ```
 
+Before it changes anything it checks the host can run the target: a Node at least the release's
+`engines` floor and, for a release on `better-sqlite3`, `python3`/`make`/`g++`. When something is
+missing and you are at a terminal it **offers to fix it** (`Upgrade Node to 22.x now? [Y/n]`) and
+carries on: Node from NodeSource's apt repository (a node apt does not own, such as nvm, is left
+alone with instructions), the toolchain with `apt-get`. With no terminal it stops instead;
+`ST_AUTO_INSTALL_PREREQS=1` answers yes in advance, `ST_ALLOW_OLD_NODE=1` skips the Node check.
+After `npm ci` it opens a database with the new driver, and if that fails it puts the previous
+release back and stops **without** restarting, so the running server is never replaced by one that
+cannot start.
+
+**Every run is recorded** in `backups/upgrade-history.jsonl` (beside the database backups), one
+JSON line whatever the outcome: when and by whom, the release and commit it came **from** and went
+**to**, Node before and after, what it changed on the host, the backup it took, and the result
+(`done`, `refused`, `rolled_back`, `failed`, ...). When it upgrades Node it first saves the old
+NodeSource apt files and version in `backups/node-apt-before-<time>/`, named in that line, so Node
+can be put back exactly. The dashboard updater appends to the same file.
+
+⚠️ **Run the TARGET release's copy of the script.** `upgrade.sh` is tracked, so the copy in your
+checkout is the one from the release you are LEAVING, and checks added in a newer release do not
+protect the upgrade to it. Run the new one against your checkout instead:
+
+```bash
+cd /opt/screentinker && git fetch --tags origin
+git show v1.2.3:scripts/upgrade.sh > /tmp/st-upgrade.sh
+APP_DIR=/opt/screentinker bash /tmp/st-upgrade.sh v1.2.3
+```
+
+The dashboard updater (`st-updater.sh`) is a copy too: re-run `scripts/updater/install-systemd.sh`
+from the new release to pick up its checks.
+
 If you are doing it by hand, the order matters:
 
 ```bash
@@ -272,8 +302,20 @@ both the old and new Node major first, confirm it on the runtime you already hav
 change Node. Each half is then independently reversible. Doing both at once means a failure gives
 you nothing to bisect and no single step to undo.
 
-**Check the version floor: Node 22.12 or newer** (`engines` in `server/package.json`).
+**Check the version floor: Node 22.14 or newer** (`engines` in `server/package.json`).
 
+**Since 3.0 the floor is enforced at boot.** `server/lib/node-guard.js` runs before anything else in
+`server.js`: on an older Node the server prints the version it needs, the binary it is running
+(`process.execPath`, which is how an nvm path left in a unit's `ExecStart` shows up), and exits with
+code **78**. The shipped units carry `RestartPreventExitStatus=78`, so systemd stops instead of
+looping; add the same line to a unit you wrote yourself. `ST_ALLOW_OLD_NODE=1` downgrades the refusal
+to a warning (unsupported). 2.x only warned here.
+
+- `better-sqlite3` 13, the database driver, is a Node-API 10 build and needs **22.14**. On an older
+  Node it would crash the process outright, so the server never loads it there: preflight switches
+  to Node's built-in `node:sqlite` where that exists (unflagged since Node 22.13; experimental, so it
+  prints an `ExperimentalWarning`), and otherwise refuses to start with
+  a message saying to upgrade Node. A 22.x host older than 22.14 must be upgraded first.
 - `puppeteer-core` 25, which renders widgets and slides for players that cannot (Roku, BrightSign
   frames), needs **22.12**. On an older Node, npm skips it: the server still starts, preflight warns
   that it is below the floor, and Chromium rendering is off until Node is upgraded.
@@ -284,25 +326,29 @@ you nothing to bisect and no single step to undo.
 **Moving from Node 20: change Node FIRST, on the release you already run, then upgrade the app.**
 Releases up to 2.6.x run on both Node 20 and Node 22, so that order is the two-step path above:
 upgrade Node, confirm the server on it, then run `scripts/upgrade.sh` to the release that needs 22.
-`upgrade.sh` warns before it changes anything if the target release needs a newer Node than the
-host has (`ST_REQUIRE_NODE_FLOOR=1` makes that a refusal).
+`upgrade.sh` refuses, before it changes anything, a target release that needs a newer Node than the
+host has: below the floor the server no longer starts (see the database driver below), so this is
+a refusal rather than the warning it once was. `ST_ALLOW_OLD_NODE=1` proceeds anyway.
 
-**One native module has to survive the move.** `better-sqlite3` is compiled against a single Node
-ABI, so changing Node invalidates it. Two things make this survivable:
+**The native database module.** `better-sqlite3` 13 is a Node-API build: one binary serves every
+Node from 22.14 on, so moving between Node versions above that floor no longer invalidates it.
 
-- `lib/preflight-deps.js` runs before anything else at boot, detects the mismatch by *opening a
-  database* (a bare `require` succeeds even on a wrong ABI, so it is not a valid check), and repairs
-  it with `npm rebuild better-sqlite3`.
-- The pinned version ships **prebuilt binaries for both the current and the next Node major**, so
-  that repair downloads a binary instead of compiling one.
-
-⚠️ **That second point is why the version is pinned exactly rather than with a caret**, and why
-widening it is risky in a way `package.json` does not show. A version with no prebuild for your Node
-falls back to a from-source `node-gyp` build — and because preflight rebuilds *synchronously before
-the server listens*, a compile that outlives `TimeoutStartSec` turns `Restart=always` into a boot
-loop that never finishes. Before changing that pin, check the project's release assets and confirm a
-prebuild exists for every Node ABI you intend to run. A build toolchain (`python3`, `make`, `g++`)
-should still be present as a fallback.
+- Its prebuilt binaries ship inside the npm package for Linux, macOS and Windows on x64 and arm64.
+  The Linux ones need **glibc 2.34+** (Debian 12 Bookworm, Ubuntu 22.04 or newer) or musl. Debian 11
+  Bullseye and Ubuntu 20.04 cannot load them, so a native install there must move to a newer OS.
+- `lib/preflight-deps.js` runs before anything else at boot. It refuses to load the module on a Node
+  below 22.14 (see the floor above), detects a broken install by *opening a database* (a bare
+  `require` can succeed on a binary that cannot run), and repairs it with `npm rebuild better-sqlite3`.
+- ⚠️ **`python3`, `make` and `g++` must be installed even where a prebuild exists.** npm runs the
+  package's `node-gyp rebuild` install step regardless, and node-gyp cannot start without them; npm
+  then *silently* drops `better-sqlite3` as a failed optional dependency and the server runs on
+  Node's experimental built-in `node:sqlite` (Node 22.13+), or not at all on an older Node. The
+  install scripts and the Docker build install them. Check with `ls server/node_modules/better-sqlite3`
+  after any `npm ci`.
+- Anywhere with no prebuild (32-bit ARM, for example) that repair is a from-source compile needing
+  a C++20 toolchain. Because preflight rebuilds *synchronously before the server listens*, a compile
+  that outlives `TimeoutStartSec` turns `Restart=always` into a boot loop. The version is pinned
+  exactly for that reason: check the prebuilds before changing the pin.
 
 **Native (git + systemd)**
 

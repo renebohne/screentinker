@@ -1,5 +1,19 @@
+// FIRST of all: 3.0 refuses to start below engines.node (lib/node-guard.js explains why).
+require('./lib/node-guard').guardNode();
+
 /*
- * FIRST, before any dependency is required: make sure they are installed and loadable.
+ * 3.0 SITE CACHE MODE (docs/site-cache.md). With SITE_CACHE_FOR set, this process is not a server at
+ * all: it is the small LAN cache box that downloads a site's media once from that origin and serves it
+ * to the screens next to it. Checked BEFORE the dependency preflight, because the cache node uses Node
+ * built-ins only — a Pi with a bare checkout and no `npm install` runs it.
+ */
+if (process.env.SITE_CACHE_FOR) {
+  require('./lib/site-cache/node').main();
+  return;
+}
+
+/*
+ * Then, before any dependency is required: make sure they are installed and loadable.
  *
  * A rollback restores an older package.json but not its packages, and a Node upgrade leaves the
  * native database module compiled against the wrong ABI. Both present as a server that will not
@@ -13,6 +27,7 @@ const express = require('express');
 const http = require('http');
 const https = require('https');
 const { Server } = require('socket.io');
+const { trimTrailing } = require('./lib/trim-trailing');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
@@ -48,6 +63,9 @@ process.on('unhandledRejection', (reason) => logFatalAndExit('unhandledRejection
 });
 
 const app = express();
+// First, before anything can send a file: Express 5 refuses a dot-directory anywhere in an absolute
+// sendFile path, so an install under ~/.local (or any dot-dir) would 404 every page. See the module.
+app.use(require('./middleware/send-file-compat').sendFileCompat);
 const { trustedProxies } = require('./config/cloudflareIps');
 const { getClientIp } = require('./services/activity');
 // Trust loopback / link-local / unique-local (local dev, LAN reverse proxies)
@@ -94,6 +112,13 @@ try {
 } catch (e) {
   console.warn('[go2rtc] live-publish WS proxy not attached:', e && e.message);
 }
+// 3.0: screen share signalling (lib/screen-share.js) — /api/screen-share/ws (the sharer's browser)
+// and /api/devices/:id/screen-share/ws (the screen). Same 'upgrade' pattern: only its own paths.
+try {
+  require('./lib/screen-share').attach(server);
+} catch (e) {
+  console.warn('[screen-share] signalling WS not attached:', e && e.message);
+}
 
 // Middleware
 const helmet = require('helmet');
@@ -108,7 +133,7 @@ const helmet = require('helmet');
 // dashboard buttons — TODO: refactor these to addEventListener and tighten further.
 // styleSrcAttr 'unsafe-inline' is required because the views use inline style="..."
 // attributes extensively for layout.
-const dashboardCsp = helmet.contentSecurityPolicy({
+const DASHBOARD_CSP = {
   useDefaults: true,
   directives: {
     defaultSrc: ["'self'"],
@@ -137,7 +162,7 @@ const dashboardCsp = helmet.contentSecurityPolicy({
     // protected by the HSTS header set above.
     upgradeInsecureRequests: null,
   },
-});
+};
 
 /*
  * FIRST: mark "an HTTP request is being served", for the corporate backstop's tripwire — a write to
@@ -146,30 +171,43 @@ const dashboardCsp = helmet.contentSecurityPolicy({
  */
 app.use(require('./lib/corporate/actor').httpMarker);
 
+/*
+ * 3.0 outbound connections ledger (lib/outbound-ledger.js, docs/trust.md): counts every external
+ * host this process contacts, per day and feature, host only. Listens on Node's diagnostics
+ * channels, so no request is altered; the middleware only lets a fetch made while serving a request
+ * name that request's workspace.
+ */
+require('./lib/outbound-ledger').install({ db: require('./db/database').db });
+app.use(require('./lib/outbound-ledger').middleware);
+
 app.use(helmet({
-  contentSecurityPolicy: false,        // we apply our own below, scoped to non-render paths
+  // The dashboard policy, on every response; the middleware below strips it from the render paths
+  // that need inline script and set their own (stripped rather than never set, so a new route is
+  // covered by default instead of exempt by default).
+  contentSecurityPolicy: DASHBOARD_CSP,
   crossOriginEmbedderPolicy: false,    // allow loading external widget content
   hsts: { maxAge: 31536000, includeSubDomains: true },
 }));
 
-// Apply CSP everywhere except routes that legitimately need inline scripts:
+// CSP (set by helmet above) applies everywhere except routes that legitimately need inline scripts:
 // - widget/kiosk renders (public, fetched by devices, intentionally inline)
 // - /player (the web player has inline JS, served to display devices)
 // - /         (landing page has inline JSON-LD + a pricing fetch script)
 // The dashboard at /app uses ES modules only and gets the strict policy.
 app.use((req, res, next) => {
-  if (req.path === '/' || req.path === '/landing.html') return next();
-  if (req.path.startsWith('/player')) return next();
-  if (req.path.startsWith('/view/')) return next(); // view-only display page: the web player (routes/view.js)
-  if (req.path === '/docs') return next(); // Redoc API reference needs a relaxed CSP
-  if (req.path.startsWith('/api/widgets/') && req.path.endsWith('/render')) return next();
-  if (req.path.startsWith('/api/widgets/') && req.path.endsWith('/data.json')) return next();
-  if (req.path.startsWith('/api/widgets/preview-session/')) return next();
+  const exempt = () => { res.removeHeader('Content-Security-Policy'); return next(); };
+  if (req.path === '/' || req.path === '/landing.html') return exempt();
+  if (req.path.startsWith('/player')) return exempt();
+  if (req.path.startsWith('/view/')) return exempt(); // view-only display page: the web player (routes/view.js)
+  if (req.path === '/docs') return exempt(); // Redoc API reference needs a relaxed CSP
+  if (req.path.startsWith('/api/widgets/') && req.path.endsWith('/render')) return exempt();
+  if (req.path.startsWith('/api/widgets/') && req.path.endsWith('/data.json')) return exempt();
+  if (req.path.startsWith('/api/widgets/preview-session/')) return exempt();
   // Template previews carry their own sandboxing CSP (lib/templates/render.js).
-  if (req.path.startsWith('/api/templates/preview/')) return next();
-  if (req.path.startsWith('/api/templates/asset/')) return next();   // sets its own `sandbox` CSP
-  if (req.path.startsWith('/api/templates/demo/')) return next();    // the gallery preview: same CSP as a render
-  if (req.path.startsWith('/api/kiosk/') && req.path.endsWith('/render')) return next();
+  if (req.path.startsWith('/api/templates/preview/')) return exempt();
+  if (req.path.startsWith('/api/templates/asset/')) return exempt();   // sets its own `sandbox` CSP
+  if (req.path.startsWith('/api/templates/demo/')) return exempt();    // the gallery preview: same CSP as a render
+  if (req.path.startsWith('/api/kiosk/') && req.path.endsWith('/render')) return exempt();
   /*
    * ⚠️ AN HTML BUNDLE IS THE SAME CASE AS A WIDGET RENDER, and it fails the same way without this.
    * The document is flattened to data: URIs, so the dashboard's `script-src 'self'` blocks every
@@ -177,13 +215,13 @@ app.use((req, res, next) => {
    * — a blank rectangle with nothing in any log. What contains a bundle is BUNDLE_SANDBOX_CSP,
    * which the two bundle routes set themselves (see there), not this policy.
    */
-  if (req.path.startsWith('/api/content/') && req.path.endsWith('/bundle')) return next();
-  if (/^\/api\/content\/[^/]+\/bundle-preview\//.test(req.path)) return next();
+  if (req.path.startsWith('/api/content/') && req.path.endsWith('/bundle')) return exempt();
+  if (/^\/api\/content\/[^/]+\/bundle-preview\//.test(req.path)) return exempt();
   // Plugin static files are operator HTML/JS, same CSP case as a widget render. Only skip
   // the dashboard policy when the loader is actually on — otherwise /plugins/* is just 404
   // and must not look different from any other unknown path.
-  if (config.pluginsEnabled && req.path.startsWith('/plugins/')) return next();
-  return dashboardCsp(req, res, next);
+  if (config.pluginsEnabled && req.path.startsWith('/plugins/')) return exempt();
+  return next();
 });
 // CORS policy.
 // - SELF_HOSTED=true: allow all origins (operator controls their own deployment).
@@ -278,6 +316,18 @@ const globalCors = cors({
   credentials: true,
 });
 app.use((req, res, next) => (isMcpPath(req.path) ? mcpCors : globalCors)(req, res, next));
+
+/*
+ * The global abuse backstop (lib/backstop-limit.js: keys, numbers, what is never counted).
+ *
+ * ⚠️ MOUNTED HERE ON PURPOSE: after CORS, so a 429 carries the headers a dashboard needs to read
+ * it, and BEFORE every route below — the Stripe webhook included — so nothing is mounted ahead of
+ * it by accident. It is additive: the per-endpoint rateLimit() limits further down are unchanged
+ * and are still what bounds login, uploads, MCP and the rest. Its ceilings are far above any real
+ * client; RATE_LIMIT_BACKSTOP=0 turns it off.
+ */
+app.use(require('./lib/backstop-limiter'));
+
 // Stripe webhook needs raw body (before express.json parses it)
 const stripeRouter = require('./routes/stripe');
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), stripeRouter);
@@ -322,7 +372,11 @@ const jsonBody = express.json({ limit: '12mb' });
  * limit never applied because this 12 MB parser had already consumed the body. routes/mcp.js has
  * the parser and the error handler both.
  */
-app.use((req, res, next) => (/^\/api\/embedded\/logs\/?$/i.test(req.path) || req.path === '/api/templates/import' || req.path.startsWith('/api/hooks/in/') || isMcpPath(req.path) ? next() : jsonBody(req, res, next)));
+// /scim parses its own body too (routes/scim.js): application/scim+json, a 1 MB limit, after the
+// bearer token is checked, and a parse failure answered in SCIM's error envelope.
+app.use((req, res, next) => (/^\/api\/embedded\/logs\/?$/i.test(req.path) || req.path === '/api/templates/import' || req.path.startsWith('/api/hooks/in/') || req.path.startsWith('/scim/') || isMcpPath(req.path) ? next() : jsonBody(req, res, next)));
+// Express 5 / body-parser 2 leave req.body undefined when no body was parsed (v4 gave {}).
+app.use((req, res, next) => { if (req.body === undefined) req.body = {}; next(); });
 const { sanitizeBody } = require('./middleware/sanitize');
 app.use(sanitizeBody);
 
@@ -489,7 +543,9 @@ function sendMarkdown(req, res, file, canonicalPath) {
     // `.md` is its own URL; the HTML page URL keeps its edge caching.
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Link', aiSurface.linkHeader(base));
-    return res.send(mdRendition.toMarkdown(html, { url: base + canonicalPath, origin: base }));
+    // encodeURI: canonicalPath comes from req.path. Only known pages reach here, whose paths are
+    // already plain, but what goes into a response body is encoded, not trusted to be.
+    return res.send(mdRendition.toMarkdown(html, { url: base + encodeURI(canonicalPath), origin: base }));
   } catch (e) {
     return res.status(404).type('text/plain').send('not found');
   }
@@ -567,6 +623,14 @@ app.get('/app', (req, res) => {
   }
 });
 
+// 3.0: the meeting-room share page (frontend/share.html). Module scripts only, so it runs under the
+// strict dashboard CSP. The code may arrive in the fragment (#ABCD1234, from the screen's QR), which
+// the browser never sends here.
+app.get(['/share', '/share/'], (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(config.frontendDir, 'share.html'));
+});
+
 // Sitemap and robots — served explicitly so the Content-Type is guaranteed
 // and these endpoints are immune to any future static-middleware reshuffle.
 app.get('/sitemap.xml', (req, res) => {
@@ -633,6 +697,8 @@ app.get(['/solutions', '/solutions/'], (req, res) => {
   res.sendFile(path.join(config.frontendDir, 'solutions', 'index.html'));
 });
 
+// Express 5 (send 1.x) ignores dotfile paths by default: certbot webroot needs this mount.
+app.use('/.well-known/acme-challenge', express.static(path.join(config.frontendDir, '.well-known', 'acme-challenge'), { index: false }));
 // Serve frontend static files
 // JS/CSS/HTML: no-cache (always revalidate, uses ETag/304)
 // Images/fonts/icons: long cache for Cloudflare + browser
@@ -771,6 +837,13 @@ app.get('/player/talk.js', (req, res) => {
   res.sendFile(path.join(__dirname, 'lib', 'talk-web.js'));
 });
 
+// 3.0: the web-player screen-share receiver (lib/screen-share-player.js), same serving pattern.
+// Inert until a device:screenshare-start (or a meeting-room code) arrives.
+app.get('/player/screen-share.js', (req, res) => {
+  res.type('application/javascript').setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(__dirname, 'lib', 'screen-share-player.js'));
+});
+
 app.get('/player/talk-legacy.js', (req, res) => {
   res.type('application/javascript').setHeader('Cache-Control', 'no-cache');
   res.sendFile(path.join(__dirname, 'player', 'talk-legacy.js'));
@@ -796,15 +869,26 @@ app.get('/player/talk-legacy.js', (req, res) => {
  *
  * /player/sw.js keeps working for players still asking for it.
  */
+/*
+ * 3.0 site cache: a worker's fetches obey the CSP its OWN script was served with, and the dashboard
+ * policy helmet puts on every response allows connect-src 'self' https: only. That silently blocked
+ * the player's worker from reaching a site cache box at http://10.x on the LAN (docs/site-cache.md)
+ * — the player page itself (/player) is exempt from that policy, so the worker was the one place
+ * stricter than the page it serves. This policy keeps the worker to same-origin scripts and lets it
+ * connect over http(s); it runs only this file and the cache-policy module it imports.
+ */
+const SW_CSP = "default-src 'self'; script-src 'self'; connect-src 'self' http: https:; object-src 'none'; base-uri 'none'";
 app.get('/sw.js', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Service-Worker-Allowed', '/');   // belt: harmless, and correct where it survives
+  res.setHeader('Content-Security-Policy', SW_CSP);
   res.sendFile(path.join(__dirname, 'player', 'sw.js'));
 });
 
 app.get('/sw-legacy.js', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Service-Worker-Allowed', '/');
+  res.setHeader('Content-Security-Policy', SW_CSP);
   res.sendFile(path.join(__dirname, 'player', 'sw-legacy.js'));
 });
 
@@ -1298,6 +1382,16 @@ app.use('/api/auth/support', (req, res, next) => (req.path === '/' ? supportRede
 // 6-digit code. Cap attempts/min here; the per-user lockout (lib/totp-lockout) sits
 // on top in the handler.
 app.use('/api/auth/totp/verify', rateLimit(60000, 10));
+// 3.0 passkeys (routes/passkeys.js). Options are minted on every login-page view (for autofill), so
+// that bucket is roomier; verification is the attempt itself and is capped like a password. The
+// second-factor pair sits atop the per-user TOTP lockout, which passkey failures also feed. The
+// register pair is authenticated, but its options call checks the account password again.
+app.use('/api/auth/passkeys/login/options', rateLimit(60000, 60));
+app.use('/api/auth/passkeys/login/verify', rateLimit(60000, 20));
+app.use('/api/auth/passkeys/mfa/options', rateLimit(60000, 20));
+app.use('/api/auth/passkeys/mfa/verify', rateLimit(60000, 10));
+app.use('/api/auth/passkeys/register/options', rateLimit(60000, 10));
+app.use('/api/auth/passkeys/register/verify', rateLimit(60000, 10));
 // Email-verification resend: cap so it can't be used to spray mail at an address.
 app.use('/api/auth/resend-verification', rateLimit(60000, 5));
 // Domain lookup is unauthenticated by necessity (it runs before login). Rate limited so it
@@ -1314,6 +1408,7 @@ app.use('/api/auth/oidc', rateLimit(60000, 120));
 // 32-byte-token guess, capped mostly to keep the bcrypt work bounded.
 app.use('/api/auth/forgot-password', rateLimit(60000, 5));
 app.use('/api/auth/reset-password', rateLimit(60000, 10));
+app.use('/api/auth/sso/app-exchange', rateLimit(60000, 20)); // 3.0: the Manager app's sign-in hand-off
 // Admin password-reset endpoint: even if an admin's session is compromised,
 // cap the blast radius to 20 resets/min/IP. Express matches the longest
 // path prefix first, so this fires before /api/auth catches the request.
@@ -1337,6 +1432,37 @@ app.use('/api/auth/users', rateLimit(60000, 20));
  */
 app.get('/q/:code', rateLimit(60000, 120), require('./routes/qr-links').redirect);
 /*
+ * 3.0 content requests (lib/content-requests.js, docs/content-requests.md): the public request page
+ * /r/<code> (and its status page /r/status#<token>) and the API behind it. No account by design; the
+ * code in the URL is the form's secret. The page is static (the code is read client-side), so the
+ * limit here only bounds page loads; every API action has its own, tighter per-IP limit inside
+ * routes/request-public.js, and this outer cap is sized for a chunked video upload (1 MiB a request).
+ */
+app.get(['/r/status', '/r/:code'], rateLimit(60000, 60), (req, res) => {
+  res.set('Referrer-Policy', 'no-referrer');   // the code must not leak to a logo's host
+  res.set('X-Robots-Tag', 'noindex, nofollow');
+  res.set('Cache-Control', 'no-store');
+  res.sendFile(path.join(config.frontendDir, 'request.html'));
+});
+app.use('/api/public/requests', rateLimit(60000, 1500), require('./routes/request-public'));
+/*
+ * 3.0 "Your data, provably" (routes/trust.js, docs/trust.md). The public data handling page and its
+ * JSON answer 404 until a platform admin switches the page on. The export download is public because
+ * a browser download cannot send an Authorization header: its short-lived key is the credential, and
+ * the person who asked must still have the access they asked with.
+ */
+{
+  const trustRoutes = require('./routes/trust');
+  app.get('/api/public/trust', rateLimit(60000, 60), trustRoutes.publicJson);
+  app.get('/trust', rateLimit(60000, 60), trustRoutes.publicPage((req, res) => {
+    res.set('X-Robots-Tag', 'noindex');
+    res.sendFile(path.join(config.frontendDir, 'trust.html'));
+  }));
+  app.get('/api/public/trust-export/:id', rateLimit(60000, 20), trustRoutes.download);
+  // 3.0 whole-server export (routes/org-import.js): the same rules, for a platform admin's bundle.
+  app.get('/api/public/instance-export/:id', rateLimit(60000, 20), require('./routes/org-import').instanceDownload);
+}
+/*
  * View-only display access (lib/view-access.js, routes/view.js): /view/<token> and the network-only
  * /view/screen/<id>, plus the read-only payload they poll. GET only, no session, no device row. The
  * token is the credential, so each IP gets one bucket per route shape (lib/limit-paths.js), not one
@@ -1359,6 +1485,20 @@ app.use('/api/hooks/in', rateLimit(60000, 240), require('./routes/hooks-in'));
  * purpose — every panel in a building polls from one NAT address.
  */
 app.use('/api/room-panel', rateLimit(60000, 1200), require('./routes/room-panel'));
+/*
+ * 3.0 site cache: the door a site's cache BOX uses (manifest, bytes, status) — routes/site-cache-node.js.
+ * Its own token, no session, so it is outside the router loops. 1200/min per IP: a box pre-warming a
+ * new playlist asks for one blob after another, and a whole site sits behind one NAT address.
+ */
+app.use('/api/site-cache/node', rateLimit(60000, 1200), require('./routes/site-cache-node'));
+
+/*
+ * 3.0: screen share, the meeting-room side (routes/screen-share-guest.js). No session by design —
+ * the code the screen shows is the credential — so it is limited hard per address: 10 tries a
+ * minute is plenty for a person mistyping, and nothing like enough to guess a 40-bit code that
+ * changes every ten minutes. The page itself is /share (below, with the dashboard pages).
+ */
+app.use('/api/share', rateLimit(60000, 10), require('./routes/screen-share-guest'));
 
 app.use('/unsubscribe',
   rateLimit(60000, 20),
@@ -1388,6 +1528,16 @@ app.use('/api/auth', require('./routes/auth'));
  * /api/auth/* already had a limit; this router was mounted without one.
  */
 app.use('/api/organizations', rateLimit(60000, 60), require('./routes/org-sso'));
+// 3.0: Settings > User provisioning (SCIM). Same mount, same org-admin gate, same limiter (above).
+app.use('/api/organizations', require('./routes/org-scim'));
+/*
+ * 3.0: SCIM 2.0 provisioning for an organization's identity provider (docs/scim.md). Bearer-token
+ * only, no cookies, so there is no CSRF surface. The per-IP limit here is a coarse ceiling: Okta and
+ * Entra call from shared egress addresses on behalf of many customers, so the real budget is per
+ * ORGANIZATION, inside the router (SCIM_RATE_LIMIT, default 600/min), with failed tokens counted
+ * per IP there too.
+ */
+app.use('/scim/v2', rateLimit(60000, 3000), require('./routes/scim'));
 // Rate limit pairing to prevent brute force (5 attempts per minute per IP).
 // #88: bind this to the whole /api/provision surface, not just /pair - the bare
 // POST /api/provision (routes/provisioning.js) is a second pairing endpoint that
@@ -1397,6 +1547,26 @@ app.use('/api/provision', rateLimit(60000, 5));
 // Rate limit expensive operations
 app.use('/api/status/export', rateLimit(60000, 5)); // 5 exports per minute
 app.use('/api/status/import', rateLimit(60000, 3)); // 3 imports per minute
+// 3.0 complete exports and "delete everything" (routes/trust.js). The daily export cap lives in the
+// database (lib/trust/export.js); these only stop a client hammering the endpoints.
+app.use('/api/trust/exports', rateLimit(60000, 20));
+app.use('/api/trust/org-deletion', rateLimit(60000, 10));
+/*
+ * 3.0 organization import (routes/org-import.js). An uploaded archive arrives as many chunk PATCHes
+ * (8 MB each), so those get the upload-session budget; everything else — starting jobs, restoring,
+ * the screen handover, pairing into an imported screen — stays tight. The per-day cap per
+ * organization lives in the database (lib/trust/import.js).
+ */
+{
+  const importChunks = rateLimit(60000, 600);
+  const importOps = rateLimit(60000, 30);
+  app.use('/api/org-import', (req, res, next) => {
+    const p = (req.originalUrl || req.url || '').split('?')[0].replace(/\/+$/, '');
+    if (req.method === 'PATCH' && /^\/api\/org-import\/jobs\/[^/]+\/upload$/.test(p)) return importChunks(req, res, next);
+    if (req.method === 'GET' || req.method === 'HEAD') return next();
+    return importOps(req, res, next);
+  });
+}
 /*
  * ⚠️ A CHUNKED UPLOAD IS MANY REQUESTS BY CONSTRUCTION, so it cannot share the general content
  * budget. At the 1 MiB chunk size (lib/upload-session) a 500 MB file is ~500 PATCHes, and on a
@@ -1414,9 +1584,16 @@ app.use('/api/content', (req, res, next) => {
   // Operations on an OPEN session (chunk PATCH, offset GET, DELETE, finalize) — never creation,
   // which has no id segment and stays on the general budget.
   const p = (req.originalUrl || req.url || '').split('?')[0].replace(/\/+$/, '');
-  return /^\/api\/content\/uploads\/[^/]+(\/finalize)?$/.test(p)
-    ? uploadSessionLimiter(req, res, next)
-    : contentLimiter(req, res, next);
+  if (/^\/api\/content\/uploads\/[^/]+(\/finalize)?$/.test(p)) return uploadSessionLimiter(req, res, next);
+  /*
+   * 3.0: READS are not "content operations". Listing the library counted against the same 30/min
+   * per-IP budget as uploads, so an office behind one NAT — or one person flicking between
+   * Content, a playlist's picker and Schedule — was refused a list and saw an empty page. Reads
+   * stay bounded by the global backstop (lib/backstop-limiter.js); writes and session creation keep
+   * the tight budget above, which is what it was for.
+   */
+  if (req.method === 'GET' || req.method === 'HEAD') return next();
+  return contentLimiter(req, res, next);
 });
 
 // Subscription routes (mixed auth)
@@ -1675,14 +1852,22 @@ app.get('/api/content/:id/bundle', async (req, res) => {
 // becomes a clean 404/502. Restricted to image/* responses (modest SSRF hardening; the
 // URL is server-set at ingest, not caller-supplied). Thumbnails are small, so buffering
 // is fine and avoids partial-stream error handling.
+// ⚠️ Through lib/ssrf-guard guardedRequest, not fetch(): a bare fetch with redirect:'follow' would
+// chase a public thumbnail URL's 302 to a LAN / metadata address and serve the answer, publicly.
+// guardedRequest vets and pins every hop and caps the body (thumbnails are small).
 async function proxyRemoteThumbnail(url, res) {
   try {
-    const upstream = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(8000) });
-    if (upstream.status === 404) return res.status(404).json({ error: 'Thumbnail not found' });
-    if (!upstream.ok) return res.status(502).json({ error: 'Thumbnail upstream error' });
-    const ct = upstream.headers.get('content-type') || 'image/jpeg';
+    let upstream;
+    try {
+      upstream = await require('./lib/ssrf-guard').guardedRequest(url, { timeoutMs: 8000, maxBytes: 5 * 1024 * 1024, responseType: 'buffer' });
+    } catch (e) {
+      if (e && e.statusCode === 404) return res.status(404).json({ error: 'Thumbnail not found' });
+      if (e && e.code === 'upstream-status') return res.status(502).json({ error: 'Thumbnail upstream error' });
+      throw e;
+    }
+    const ct = String(upstream.headers['content-type'] || 'image/jpeg');
     if (!/^image\//i.test(ct)) return res.status(502).json({ error: 'Thumbnail upstream is not an image' });
-    const buf = Buffer.from(await upstream.arrayBuffer());
+    const buf = upstream.buffer;
     res.set('Content-Type', ct);
     res.set('Cache-Control', 'public, max-age=86400');
     res.set('Access-Control-Allow-Origin', '*');
@@ -1717,6 +1902,30 @@ app.get('/api/content/:id/thumbnail', (req, res) => {
     return require('./lib/storage/serve').serveFromStorage(req, res, content, 'thumb', { harden: hardenUploadResponse });
   }
   hardenUploadResponse(res, content.thumbnail_path);
+  res.sendFile(safePath);
+});
+
+/*
+ * 3.0 TV-safe video copies (lib/video-variants.js): a tall video re-encoded for a Tizen TV — turned
+ * for a portrait-mounted screen (rot_cw / rot_ccw) or fitted inside 1920x1080 (fit). The SAME gate
+ * as /file: a copy is the original's pixels, so it is readable exactly when the original is. Local
+ * files only (a cache this server made); a missing copy is a 404 and the player falls back.
+ */
+app.get('/api/content/:id/variant/:kind', (req, res) => {
+  const { db } = require('./db/database');
+  const vv = require('./lib/video-variants');
+  if (!vv.KINDS.includes(req.params.kind)) return res.status(404).json({ error: 'Not found' });
+  const content = db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id);
+  if (!content || !content.filepath) return res.status(404).json({ error: 'Content not found' });
+  if (!isReferencedForPlayers(db, content) && !requesterCanAccessContent(req, content)) return res.status(403).json({ error: 'Content not assigned to any playlist or widget' });
+  const v = db.prepare("SELECT filepath FROM content_video_variants WHERE content_id = ? AND kind = ? AND status = 'ready' AND source_file = ?")
+    .get(content.id, req.params.kind, path.basename(content.filepath));
+  if (!v || !v.filepath || !vv.FILE_RE.test(v.filepath)) return res.status(404).json({ error: 'No TV copy yet' });
+  const safePath = path.resolve(config.contentDir, path.basename(v.filepath));
+  if (!safePath.startsWith(path.resolve(config.contentDir)) || !fs.existsSync(safePath)) return res.status(404).json({ error: 'No TV copy yet' });
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  hardenUploadResponse(res, v.filepath);
   res.sendFile(safePath);
 });
 
@@ -1875,6 +2084,13 @@ app.use('/api/ai/generate-layered', rateLimit(60000, 3));
  */
 app.use('/api/ai/hosted/generate', rateLimit(60000, 10));
 app.use('/api/ai/hosted/checkout', rateLimit(60000, 10));
+/*
+ * 3.0 Private AI (routes/ai-private.js). Each of these is an outbound call to the workspace's AI
+ * server with a long budget; a starter set or a translation is several model calls per press.
+ */
+app.use('/api/ai/private/test', rateLimit(60000, 20));
+app.use('/api/ai/private/starter', rateLimit(60000, 6));
+app.use('/api/ai/private/translate', rateLimit(60000, 4));
 {
   /*
    * Hosted-AI housekeeping. A reservation left 'pending' is an attempt a crash interrupted: refund
@@ -1892,14 +2108,45 @@ app.use('/api/ai/hosted/checkout', rateLimit(60000, 10));
   setInterval(aiHousekeeping, 10 * 60 * 1000).unref();
 }
 app.use('/api/widgets/preview', rateLimit(60000, 30)); // base64 inline = memory-intensive
+// 3.0 Make a sign: one gallery request renders every built-in template, and the form re-renders as
+// the person types (debounced). Generous for a person, a ceiling for a loop.
+app.use('/api/signs/preview', rateLimit(60000, 120));
+// 3.0 accessibility: the Make-a-sign check rides along with every preview; captions start an
+// ffmpeg encode and an upload to an AI endpoint, so they are counted like the AI generators.
+app.use('/api/accessibility/check/sign', rateLimit(60000, 120));
+const captionsLimit = rateLimit(60000, 10);
+app.use('/api/accessibility/captions', (req, res, next) => (req.method === 'POST' ? captionsLimit(req, res, next) : next()));
 app.use('/api/widgets/preview-session', rateLimit(60000, 30)); // preview session creation retains rendered HTML in memory for 5min
 // `/test` triggers an outbound fetch of an arbitrary calendar feed; cap it so a single
 // workspace cannot fan out unbounded requests to third-party URLs.
 app.use('/api/data-sources/test', rateLimit(60000, 10));
 app.use('/api/cap-feeds/test', rateLimit(60000, 10));   // fetches an arbitrary public URL, like the data-source test
+// 3.0 Experiments: a sales import or a location lookup calls Square/Shopify with a store's token.
+app.use('/api/experiments/:id/import-sales', rateLimit(60000, 6));
+app.use('/api/experiments/:id/pos-locations', rateLimit(60000, 10));
+// Free stock search/import (routes/stock-media.js): every miss spends the instance's provider quota.
+// Per IP here; lib/stock-media.js also limits per person and per workspace.
+app.use('/api/stock', rateLimit(60000, 90));
+// 3.0 switch to ScreenTinker (routes/migrate.js): each connect makes the server call another vendor's
+// API with a key the person pasted, and the wizard polls a job while it runs.
+app.use('/api/migrate', rateLimit(60000, 120));
+app.post('/api/migrate/jobs', rateLimit(3600000, 30));
+app.post('/api/migrate/jobs/upload', rateLimit(3600000, 30));
 app.post('/api/plugin-submissions', rateLimit(3600000, 10)); // 10 plugin zips per hour per IP
 app.post('/api/admin/plugins/submissions', rateLimit(3600000, 20));
 app.get('/api/kiosk/:id/render', (req, res, next) => { req._skipAuth = true; next(); });
+/*
+ * 3.0 news feeds (lib/news-feed, routes/news-feeds.js): the items and pictures a widget page reads.
+ * Public — a widget page is a null-origin frame with no session — and answered from this server's
+ * shared cache. Each address carries this server's signature over the feed it names, so these serve
+ * what some widget was rendered with and nothing else. Limited per address like the social wall's
+ * reads: a site behind one NAT address can have hundreds of screens.
+ */
+app.get('/api/news-feeds/items', rateLimit(60000, 600), (req, res) => require('./routes/news-feeds').itemsHandler(req, res));
+app.get('/api/news-feeds/image', rateLimit(60000, 3000), (req, res) => require('./routes/news-feeds').imageHandler(req, res));
+// The editor's "Find feeds" reads a site and up to a handful of its paths: generous for a person.
+app.use('/api/news-feeds/discover', rateLimit(60000, 20));
+app.use('/api/news-feeds/preview', rateLimit(60000, 60));
 
 /*
  * Templates: the two public reads (a preview token and a thumbnail by package hash) are served by
@@ -2510,6 +2757,7 @@ app.use('/media', require('./routes/media'));
 const setupWebSockets = require('./ws');
 const { deviceNs, dashboardNs } = setupWebSockets(io);
 app.set('io', io);
+require('./lib/screen-share').init(io);   // 3.0: screen share — reaches the screens over /device
 
 // Start heartbeat checker
 const { startHeartbeatChecker } = require('./services/heartbeat');
@@ -2541,6 +2789,10 @@ require('./lib/corporate/emergency-live').init(io);
 require('./lib/smart-playlist').start(io);
 require('./lib/ota-rollout').start();   // player rollouts: waves, automatic halt and rollback
 require('./lib/local-conditions').start(io);   // local weather for weather conditions
+require('./lib/experiments/sweep').start(io);   // experiments: end dates, exposure copies, hourly sales import
+// 3.0 switch to ScreenTinker: imports a dead process left running become 'interrupted', and the
+// sweep that deletes expired source credentials and export uploads starts (lib/migrate).
+try { require('./lib/migrate').boot(); } catch (e) { console.error('[migrate] boot:', e && e.name); }
 // Dynamic device groups: a backstop for membership inputs changed by a path that does not reconcile
 // (an import, a mesh sync, a direct fix-up). A sweep that finds nothing to change writes nothing.
 {
@@ -2552,6 +2804,15 @@ require('./lib/local-conditions').start(io);   // local weather for weather cond
 require('./lib/cap/feeds').start(io);   // CAP emergency feeds: polling, expiry, pushes
 require('./lib/canva').start(io);       // Canva: re-export linked designs that changed
 require('./lib/cloud-folders').start(io);   // SharePoint/OneDrive folder syncs
+// 3.0 TV-safe video copies: resume the queue (lib/video-variants.js). A finished copy re-sends the
+// payload of every screen playing that video, so it switches to the copy without a reboot.
+require('./lib/video-variants').start({
+  push: (deviceIds) => {
+    const { buildPlaylistPayload } = require('./ws/deviceSocket');
+    const commandQueue = require('./lib/command-queue');
+    for (const id of new Set(deviceIds || [])) commandQueue.queueOrEmitPlaylistUpdate(io.of('/device'), id, buildPlaylistPayload);
+  },
+});
 require('./lib/automation/overrides').setIo(io);   // automation: timed playlist overrides
 require('./lib/automation/events').start();          // automation: REST-hook deliveries, screen up/down events
 require('./lib/social/feeds').start(io);   // social walls: fetch feeds, cache images
@@ -2560,6 +2821,12 @@ require('./lib/rooms/service').start();   // meeting rooms: release meetings nob
 // Start alert service
 const { startAlertService } = require('./services/alerts');
 startAlertService(io);
+// Screen verification (lib/screen-verify): panel checks, occasional verification screenshots and
+// its incident alerts, on its own minute tick. Frames are judged as they arrive via deviceSocket.
+require('./lib/screen-verify').start();
+// 3.0 energy & carbon (lib/energy, docs/energy.md): samples each screen's panel state once a minute
+// into the on-time tables, for this server's own workspaces only (never a scale-out copy).
+require('./lib/energy').start();
 
 // Start universal data sources background poller
 const { startDataSourcesPoller } = require('./lib/data-sources/service');
@@ -2673,6 +2940,15 @@ startDunning(io);
 // #73: agency-upload digest flush (batched draft/published notifications to admins + owner)
 const { startAgencyDigest } = require('./services/agency-digest');
 startAgencyDigest();
+// 3.0 content freshness: the weekly "what is going stale" digest. Daily check at 09:00 UTC, once a
+// week per person; does nothing without a mail transport and APP_URL (services/freshness-digest.js).
+try { require('./services/freshness-digest').startFreshnessDigest(); } catch (e) { console.warn(`[freshness] digest not scheduled: ${e && e.message}`); }
+// 3.0 complete exports and scheduled organization deletions (lib/trust): resume queued exports,
+// expire old archives, carry out deletions whose grace period has passed. Hourly or slower.
+try { require('./lib/trust/export').start(); require('./lib/trust/org-deletion').start(); } catch (e) { console.warn(`[trust] background jobs not scheduled: ${e && e.message}`); }
+// 3.0 organization imports and whole-server exports (lib/trust/import.js, instance-export.js): a
+// restart resumes a pull, a scan or a restore where it stopped.
+try { require('./lib/trust/import').start(); require('./lib/trust/instance-export').start(); } catch (e) { console.warn(`[import] background jobs not scheduled: ${e && e.message}`); }
 
 // Off-main-thread WAL checkpointer: disables inline auto-checkpoint on the main connection
 // (the ~60s p99 spike = a synchronous fsync-heavy checkpoint on the loop) and runs PASSIVE
@@ -2691,6 +2967,7 @@ function gracefulShutdown(sig) {
   console.log(`[shutdown] ${sig} — stopping WAL checkpointer + closing DB`);
   Promise.resolve(stopWalCheckpointer()).catch(() => {}).finally(() => {
     try { require('./lib/status-log-writer').flush(); } catch (_) {}
+    try { require('./lib/outbound-ledger').flush(); } catch (_) {}
     try { require('./db/database').db.close(); } catch (_) {}
     process.exit(0);
   });
@@ -2724,7 +3001,7 @@ const DEVICE_ADMIN_SIGNATURE_CHECKSUM =
   process.env.DEVICE_ADMIN_SIGNATURE_CHECKSUM || 's9ZOWAvn3qFYJxaaR0j41ZttQK1r6_XgaTMcB7rIqqI';
 app.get('/api/provision/device-owner-qr', requireAuth, async (req, res) => {
   try {
-    const base = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+    const base = trimTrailing(process.env.APP_URL || `${req.protocol}://${req.get('host')}`, '/');
     const apkUrl = `${base}/download/apk`;
     // Derive the signature checksum from the APK the device will actually download, so it can
     // never drift from the served build. Fall back to the configured constant if the APK isn't
@@ -2782,6 +3059,9 @@ const pairLockout = require('./lib/pair-lockout');
  * Same guards as pairing: authenticated, tenanted, and counted against the plan's device limit.
  */
 app.post('/api/devices/web-player', requireAuth, resolveTenancy, checkDeviceLimit, (req, res) => {
+  // ⚠️ A read-only member must not create displays (and mint their enrolment keys) in the
+  // workspace. Required inline: only this handler is touched, not the module-scope import.
+  if (require('./lib/tenancy').denyReadOnly(req, res)) return;
   const { name } = req.body || {};
   if (!req.workspaceId) return res.status(400).json({ error: 'No active workspace' });
 
@@ -2824,6 +3104,8 @@ app.post('/api/devices/web-player', requireAuth, resolveTenancy, checkDeviceLimi
     const { workspaceRoom: wsRoom, emitToWorkspace: emitWs } = require('./lib/socket-rooms');
     emitWs(io.of('/dashboard'), wsRoom(req.workspaceId), 'dashboard:device-added', createdForBroadcast);
   } catch (e) { /* the dashboard refreshes anyway; never fail the create over a notification */ }
+  // 3.0 funnel (hosted only, once per account; lib/conversion-events.js).
+  require('./lib/conversion-events').record(db, { userId: req.user.id, workspaceId: req.workspaceId || null, event: 'first_pair', meta: { via: 'web_player_url' } });
 
   res.status(201).json({
     success: true,
@@ -2834,6 +3116,9 @@ app.post('/api/devices/web-player', requireAuth, resolveTenancy, checkDeviceLimi
 });
 
 app.post('/api/provision/pair', requireAuth, resolveTenancy, checkDeviceLimit, (req, res) => {
+  // ⚠️ A read-only member must not claim screens into the workspace. Checked before the lockout
+  // bookkeeping so a viewer's attempts neither pair nor burn the IP's guess budget.
+  if (require('./lib/tenancy').denyReadOnly(req, res)) return;
   // #87: lock out an IP after repeated failed pairing-code guesses (brute-force defense
   // beyond the 5/min rate-limit on /api/provision).
   const ip = getClientIp(req);
@@ -2948,6 +3233,8 @@ app.post('/api/provision/pair', requireAuth, resolveTenancy, checkDeviceLimit, (
   // Phase 2.3: scope to the workspace the device was just claimed into.
   const { workspaceRoom, emitToWorkspace } = require('./lib/socket-rooms');
   emitToWorkspace(dashboardNs, workspaceRoom(updated.workspace_id), 'dashboard:device-added', updated);
+  // 3.0 funnel (hosted only, once per account; lib/conversion-events.js).
+  require('./lib/conversion-events').record(db, { userId: req.user.id, workspaceId: updated.workspace_id || null, event: 'first_pair', meta: { via: 'code' } });
 
   res.json(updated);
 });
@@ -3216,17 +3503,17 @@ const NOT_FOUND_PAGE = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-
  * days later, a long way from this change. Anything genuinely served by an earlier route or by
  * static has already answered by the time we get here.
  */
-app.all('/.well-known/*', (req, res) => {
+app.all('/.well-known/{*rest}', (req, res) => {
   /*
    * ⚠️ THE LIST IS DERIVED FROM THE ROUTES, NOT TYPED OUT. The first version named auth.md and
    * api-catalog by hand and was already wrong the same day, once the protected-resource metadata and
    * the MCP server card were added — a 404 that misdescribes what the server publishes is worse than
    * a bare one, because it is the document a client reads when it is already lost.
    */
-  const published = app._router.stack
+  const published = app.router.stack
     .map((l) => l.route && l.route.path)
     // …excluding this catch-all itself, which is a guard and not a document.
-    .filter((path) => typeof path === 'string' && path.startsWith('/.well-known/') && !path.endsWith('*'))
+    .filter((path) => typeof path === 'string' && path.startsWith('/.well-known/') && !path.endsWith('{*rest}'))
     .sort();
   res.status(404).type('text/plain; charset=utf-8').send(
     `Not found.\n\nThis instance publishes:\n${published.map((x) => `  ${x}\n`).join('')}`
@@ -3235,7 +3522,7 @@ app.all('/.well-known/*', (req, res) => {
     + 'at /auth.md: a human issues a scoped token, and there is no programmatic registration.\n');
 });
 
-app.get('*', (req, res) => {
+app.get('/{*splat}', (req, res) => {
   if (req.path.startsWith('/api/')) {
     return res.status(404).json({ error: 'Not found' });
   }

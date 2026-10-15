@@ -19,9 +19,13 @@ import { esc } from '../utils.js';
  * change nothing a user sees, and the keys are an internal address, not a label.
  */
 
-export async function openAiSettingsModal() {
+export async function openAiSettingsModal(opts = {}) {
   let cur = {};
   try { cur = await api.aiGetSettings(); } catch { /* show empty form */ }
+  // 3.0 accessibility: the speech-to-text endpoint "Generate captions" uses. Its own endpoint and
+  // save (routes/accessibility.js /stt), so this dialog's existing fields and save are untouched.
+  let stt = {};
+  try { stt = (await api.getSttSettings()) || {}; } catch { /* older server: section still shown, save reports */ }
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.style.display = 'flex';
@@ -32,6 +36,7 @@ export async function openAiSettingsModal() {
         <button class="btn-icon" data-ai-close aria-label="${t('common.close')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
       <div class="modal-body">
+        <div id="aiPrivateBlock"></div>
         <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">${t('designer.ai.settings_desc')}</p>
         <div class="form-group"><label>${t('designer.ai.base_url')}</label>
           <input id="aiBaseUrl" class="input" value="${esc(cur.base_url || '')}" placeholder="https://api.openai.com/v1  ·  http://localhost:11434/v1" style="width:100%"></div>
@@ -63,6 +68,17 @@ export async function openAiSettingsModal() {
         <div class="form-group"><label>${t('designer.ai.image_api_key')}</label>
           <input id="aiImageKey" class="input" type="password" autocomplete="off" placeholder="${cur.has_image_key ? t('designer.ai.key_set') : t('designer.ai.image_key_ph')}" style="width:100%">
           <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('designer.ai.image_key_hint')}</div></div>
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 10px">
+        <h4 style="font-size:13px;margin-bottom:4px">${esc(t('a11y.stt.title'))}</h4>
+        <p style="font-size:11px;color:var(--text-muted);margin-bottom:8px">${esc(t('a11y.stt.desc'))}</p>
+        <div class="form-group"><label for="aiSttBaseUrl">${esc(t('a11y.stt.base_url'))}</label>
+          <input id="aiSttBaseUrl" class="input" value="${esc(stt.base_url || '')}" placeholder="https://api.openai.com/v1  ·  http://localhost:8000/v1" style="width:100%"></div>
+        <div class="form-group"><label for="aiSttModel">${esc(t('a11y.stt.model'))}</label>
+          <input id="aiSttModel" class="input" value="${esc(stt.model || '')}" placeholder="whisper-1  ·  Systran/faster-whisper-small" style="width:100%"></div>
+        <div class="form-group"><label for="aiSttKey">${esc(t('a11y.stt.key'))}</label>
+          <input id="aiSttKey" class="input" type="password" autocomplete="off" placeholder="${esc(stt.has_key ? t('designer.ai.key_set') : t('a11y.stt.key_placeholder'))}" style="width:100%">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${esc(t('a11y.stt.privacy'))}</div></div>
         <div id="aiSettingsErr" style="display:none;color:var(--danger);font-size:13px;margin-top:8px"></div>
       </div>
       <div class="modal-footer">
@@ -71,7 +87,29 @@ export async function openAiSettingsModal() {
       </div>
     </div>`;
   document.body.appendChild(overlay);
-  const close = () => overlay.remove();
+  const close = () => { overlay.remove(); if (typeof opts.onClose === 'function') opts.onClose(); };
+
+  /*
+   * 3.0 Private AI (components/private-ai.js): "Where should AI run?" above the form. Choosing
+   * "Local / private" hides the bring-your-own fields below and Save saves the local server instead.
+   * Only those fields are hidden, found by their inputs, so a section added later stays visible.
+   */
+  let privateAi = null;
+  try {
+    const body = overlay.querySelector('.modal-body');
+    const legacyIds = ['aiBaseUrl', 'aiModel', 'aiKey', 'aiImageProvider', 'aiImageBaseUrl', 'aiImageModel', 'aiImageKey'];
+    const legacy = [...body.children].filter((el) => legacyIds.some((id) => el.querySelector(`#${id}`)));
+    const intro = body.querySelector(':scope > p');
+    const imgTitle = body.querySelector(':scope > h4');
+    if (intro) legacy.push(intro);
+    if (imgTitle) {
+      legacy.push(imgTitle);
+      if (imgTitle.previousElementSibling && imgTitle.previousElementSibling.tagName === 'HR') legacy.push(imgTitle.previousElementSibling);
+      if (imgTitle.nextElementSibling && imgTitle.nextElementSibling.tagName === 'P') legacy.push(imgTitle.nextElementSibling);
+    }
+    const { mountPrivateAiSettings } = await import('./private-ai.js');
+    privateAi = await mountPrivateAiSettings(overlay.querySelector('#aiPrivateBlock'), { legacy });
+  } catch { /* the bring-your-own form still works on its own */ }
   overlay.querySelectorAll('[data-ai-close]').forEach(b => b.onclick = close);
   overlay.onclick = (e) => { if (e.target === overlay) close(); };
 
@@ -100,6 +138,7 @@ export async function openAiSettingsModal() {
   overlay.querySelector('#aiSaveSettings').onclick = async () => {
     const errEl = overlay.querySelector('#aiSettingsErr');
     errEl.style.display = 'none';
+    if (privateAi && privateAi.isActive()) { if (await privateAi.save()) close(); return; }
     const data = {
       base_url: overlay.querySelector('#aiBaseUrl').value.trim(),
       model: overlay.querySelector('#aiModel').value.trim(),
@@ -111,8 +150,16 @@ export async function openAiSettingsModal() {
     if (key) data.api_key = key;
     const imgKey = overlay.querySelector('#aiImageKey').value;
     if (imgKey) data.image_api_key = imgKey;
+    const sttData = {
+      base_url: overlay.querySelector('#aiSttBaseUrl').value.trim(),
+      model: overlay.querySelector('#aiSttModel').value.trim(),
+    };
+    const sttKey = overlay.querySelector('#aiSttKey').value;
+    if (sttKey) sttData.api_key = sttKey;
+    const sttChanged = sttKey || sttData.base_url !== (stt.base_url || '') || sttData.model !== (stt.model || '');
     try {
       await api.aiSaveSettings(data);
+      if (sttChanged) await api.saveSttSettings(sttData);
       showToast(t('designer.ai.saved'), 'success');
       close();
     } catch (e2) {

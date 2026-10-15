@@ -55,6 +55,8 @@ cp ../server/lib/schedule-eval.js js/schedule-eval.js
 cp ../server/lib/play-order.js js/play-order.js
 # #473: the interactive-page rules, same single-source discipline (shared/kiosk-vectors.json tests the source).
 cp ../server/lib/kiosk-logic.js js/kiosk-logic.js
+# 3.0 screen share: the web player's receiver, same single-source discipline (js/screen-share-tizen.js is the glue).
+cp ../server/lib/screen-share-player.js js/screen-share.js
 
 # #299: same single-source discipline for the offline proof-of-play queue — the .wgt must never
 # carry a copy that has drifted from what the server and the web player agree on.

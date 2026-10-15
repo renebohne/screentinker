@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const { db } = require('../db/database');
 const config = require('../config');
 const enrolKey = require('../lib/enrol-key');   // #313
@@ -64,6 +66,7 @@ router.get('/', (req, res) => {
   // the device's active layout, so the dashboard can flag screens that need attention.
   const orphanCounts = orphanCountsByDevice(devices.map(d => d.id));
   const groupIds = groupIdsByDevice(devices.map(d => d.id));
+  const paused = pausedByPlan(devices);
   // The RESOLVED capability set, the same shape GET /:id returns. The raw column shipped here
   // before: a JSON *string* ('[]') or null, which every consumer would have had to parse — and
   // `Array.isArray("[]")` is false, so the dashboard's `can()` helper reads a device that declared
@@ -80,8 +83,43 @@ router.get('/', (req, res) => {
     orphan_count: orphanCounts[d.id] || 0,
     tags: parseTags(d.tags),
     group_ids: groupIds[d.id] || [],
+    // 3.0: { reason: 'trial_expired' | 'device_limit' } when the player is showing a paused card
+    // because of the plan, else null. The owner used to learn this only from the screen itself.
+    plan_paused: paused[d.id] || null,
   })));
 });
+
+/*
+ * 3.0: which listed screens the plan is holding back, using the PLAYER'S OWN check
+ * (ws/deviceSocket.js checkDeviceAccess) so the dashboard can never disagree with the screen.
+ * That check costs a few queries per device, so it only runs for owners who have more screens than
+ * their plan allows - for everyone else (nearly every account) this is one plan read per owner.
+ */
+function pausedByPlan(devices) {
+  const out = {};
+  let check;
+  try { check = require('../ws/deviceSocket').checkDeviceAccess; } catch { return out; }
+  if (typeof check !== 'function') return out; // socket layer not set up (tests, CLI)
+  const { getUserPlan, getUserDeviceCount } = require('../middleware/subscription');
+  const owners = new Map();
+  for (const d of devices) {
+    if (!d.user_id) continue;
+    if (!owners.has(d.user_id)) {
+      let over = false;
+      try {
+        const plan = getUserPlan(d.user_id);
+        over = !!plan && plan.max_devices !== -1 && getUserDeviceCount(d.user_id) > plan.max_devices;
+      } catch { /* unknown: do not mark */ }
+      owners.set(d.user_id, over);
+    }
+    if (!owners.get(d.user_id)) continue;
+    try {
+      const a = check(d.id);
+      if (a && a.allowed === false) out[d.id] = { reason: a.reason || 'device_limit' };
+    } catch { /* never fail the list over a badge */ }
+  }
+  return out;
+}
 
 /*
  * The device groups each screen belongs to, as { deviceId: [groupId, ...] }, ordered by group name.
@@ -477,7 +515,11 @@ router.get('/:id', dashboardDeviceReadLimiter, (req, res) => {
   // that never reported one, or whose block is unreadable — the card simply does not render.
   const edid = require('../lib/edid').parseEdid(device.hardware_edid);
 
-  res.json({ ...stripDeviceSecrets(device), tags: parseTags(device.tags), group_ids: groupIdsByDevice([device.id])[device.id] || [], local_weather: require('../lib/local-conditions').readingFor(device), capabilities, edid, telemetry, diagnostic_logs, screenshot, assignments, active_layout_zones, playlist_status, playlist_has_published, uptimeData, statusLog, deviceEvents });
+  // 3.0: which layout is on screen and who chose it (docs/layouts-and-campaigns.md).
+  let resolved_layout = null;
+  try { resolved_layout = require('../lib/resolve-device-playlist').resolvedLayoutInfo(req.params.id); } catch (_) { resolved_layout = null; }
+
+  res.json({ ...stripDeviceSecrets(device), tags: parseTags(device.tags), group_ids: groupIdsByDevice([device.id])[device.id] || [], local_weather: require('../lib/local-conditions').readingFor(device), capabilities, edid, telemetry, diagnostic_logs, screenshot, assignments, active_layout_zones, resolved_layout, playlist_status, playlist_has_published, uptimeData, statusLog, deviceEvents, ...mirrorFields(device) });
 });
 
 /*
@@ -496,6 +538,49 @@ function corpDeviceRouteRefused(req, res, actionLabel) {
 // Phase 2.2a: replaces user_id + team_members check. Allows: platform_admin,
 // org_owner/admin of the device's org (acting-as), workspace_admin/editor of
 // the device's workspace. Denies workspace_viewer and non-members.
+/*
+ * 3.0 display-link mirrors (lib/mirrors.js) on the device detail: an original lists its mirrors, a
+ * mirror names the original it plays. Same workspace by construction (a mirror is created in its
+ * original's workspace), so the caller's read access to this device covers both.
+ */
+function mirrorFields(device) {
+  const mirrorsLib = require('../lib/mirrors');
+  if (device.mirror_of) {
+    const src = db.prepare('SELECT id, name, status FROM devices WHERE id = ? AND workspace_id IS ?').get(device.mirror_of, device.workspace_id);
+    return { mirror_source: src || null, mirrors: [], mirror_playing: src ? mirrorPlaying(device, src) : null };
+  }
+  const list = mirrorsLib.mirrorsOf(device.id).map((m) => ({
+    id: m.id, name: m.name, status: m.status, last_heartbeat: m.last_heartbeat, location: m.mirror_location || null, created_at: m.created_at,
+  }));
+  return { mirror_source: null, mirrors: list };
+}
+
+/*
+ * What a mirror is playing. Its own row has no playlist (it follows its original at payload time,
+ * ws/deviceSocket.js buildPlaylistPayload), so "Now playing" read "No content assigned" on a screen
+ * that was plainly playing. Resolved from the ORIGINAL exactly as the payload is (the resolved
+ * playlist: schedule, wall, group, own), and the item from the mirror's OWN play_start reports
+ * (lib/now-playing.js, attributed to the mirror's id by its socket), else the original's.
+ * { playlist_id, playlist_name, items, now: { content_id, widget_id, name } | null }
+ */
+function mirrorPlaying(mirror, src) {
+  try {
+    const playlistId = require('../lib/resolve-device-playlist').resolveDevicePlaylistId(src.id);
+    const pl = playlistId ? db.prepare('SELECT id, name FROM playlists WHERE id = ?').get(playlistId) : null;
+    const items = pl ? db.prepare('SELECT COUNT(*) AS n FROM playlist_items WHERE playlist_id = ?').get(pl.id).n : 0;
+    const np = require('../lib/now-playing');
+    const cur = np.forDevice(mirror.id)[0] || np.forDevice(src.id)[0] || null;
+    let now = null;
+    if (cur && (cur.content_id || cur.widget_id)) {
+      const row = cur.content_id
+        ? db.prepare('SELECT filename AS name FROM content WHERE id = ? AND workspace_id IS ?').get(cur.content_id, mirror.workspace_id)
+        : db.prepare('SELECT name FROM widgets WHERE id = ? AND workspace_id IS ?').get(cur.widget_id, mirror.workspace_id);
+      now = { content_id: cur.content_id || null, widget_id: cur.widget_id || null, name: row ? row.name : null };
+    }
+    return { playlist_id: pl ? pl.id : null, playlist_name: pl ? pl.name : null, items, now };
+  } catch (e) { return null; }
+}
+
 function checkDeviceOwnership(req, res) {
   const device = db.prepare('SELECT * FROM devices WHERE id = ?').get(req.params.id);
   if (!device) { res.status(404).json({ error: 'Device not found' }); return null; }
@@ -570,6 +655,67 @@ router.get('/:id/diagnostic-logs', dashboardDeviceReadLimiter, (req, res) => {
   `).all(req.params.id);
 
   res.json({ logs });
+});
+
+/*
+ * "What will this screen show at…?" (docs/preview-at-time.md, lib/device-simulate.js).
+ *
+ * READ routes, gated exactly like the preview payload above: the device's workspace must be one the
+ * caller can see (viewers allowed, as for GET /:id). They change nothing — no schedule column is
+ * written, no payload is pushed — they ask the live rules a question about another instant.
+ */
+function deviceReadable(req, res) {
+  const device = db.prepare('SELECT id, workspace_id FROM devices WHERE id = ?').get(req.params.id);
+  if (!device) { res.status(404).json({ error: 'Device not found' }); return null; }
+  if (!device.workspace_id) { res.status(403).json({ error: 'Device not assigned to a workspace' }); return null; }
+  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(device.workspace_id);
+  const ctx = ws && resourceAccess(req, ws);
+  if (!ctx) { res.status(403).json({ error: 'Access denied' }); return null; }
+  return device;
+}
+
+function simulateParams(req, res) {
+  const sim = require('../lib/device-simulate');
+  const at = sim.parseInstant(req.query.at);
+  if (at === null) { res.status(400).json({ error: 'at must be an ISO 8601 date-time within a year back and five years ahead' }); return null; }
+  const weather = sim.parseWeather(req.query);
+  if (weather === false) { res.status(400).json({ error: 'weather must be one of clear, cloudy, fog, rain, snow, storm; temp_c a number of degrees' }); return null; }
+  return { sim, at, weather };
+}
+
+router.get('/:id/simulate', (req, res) => {
+  if (!deviceReadable(req, res)) return;
+  const p = simulateParams(req, res);
+  if (!p) return;
+  const out = p.sim.simulate(req.params.id, p.at, { weather: p.weather });
+  if (!out) return res.status(404).json({ error: 'Device not found' });
+  res.json(out);
+});
+
+// The payload the dashboard's preview frame renders for that instant (the player's ?preview=1&at=).
+router.get('/:id/simulate/payload', (req, res) => {
+  if (!deviceReadable(req, res)) return;
+  const p = simulateParams(req, res);
+  if (!p) return;
+  const out = p.sim.previewPayload(req.params.id, p.at, { weather: p.weather });
+  if (!out) return res.status(404).json({ error: 'Device not found' });
+  res.json(out);
+});
+
+router.get('/:id/timeline', (req, res) => {
+  if (!deviceReadable(req, res)) return;
+  const sim = require('../lib/device-simulate');
+  let from = sim.parseInstant(req.query.from);
+  if (from === null) return res.status(400).json({ error: 'from must be an ISO 8601 date-time' });
+  from = Math.floor(from / 60000) * 60000;   // every rule is minute-resolution; so are segments
+  const to = req.query.to ? sim.parseInstant(req.query.to, null) : from + 24 * 3600 * 1000;
+  if (to === null || to <= from) return res.status(400).json({ error: 'to must be an ISO 8601 date-time after from' });
+  if (to - from > sim.MAX_RANGE_MS) return res.status(400).json({ error: 'The range can be at most 14 days' });
+  const weather = sim.parseWeather(req.query);
+  if (weather === false) return res.status(400).json({ error: 'weather must be one of clear, cloudy, fog, rain, snow, storm; temp_c a number of degrees' });
+  const out = sim.timeline(req.params.id, from, to, { weather });
+  if (!out) return res.status(404).json({ error: 'Device not found' });
+  res.json(out);
 });
 
 // Update device
@@ -648,6 +794,16 @@ router.put('/:id', (req, res) => {
   }
   if (orientation !== undefined && !deviceSettings.ORIENTATIONS.has(orientation)) {
     return res.status(400).json({ error: `Invalid orientation. Allowed: ${[...deviceSettings.ORIENTATIONS].join(', ')}` });
+  }
+  // ⚠️ default_content_id is served to the player, so it must be content this device's workspace
+  // may show — its own, or a platform template (NULL workspace) — the same rule lib/device-move
+  // applies on a move and layout_id applies below. Unchecked, any editor could point a screen at
+  // another tenant's content id and have the player fetch it. null / '' still clear it.
+  if (default_content_id !== undefined && default_content_id !== null && default_content_id !== '') {
+    const c = db.prepare('SELECT workspace_id FROM content WHERE id = ?').get(String(default_content_id));
+    if (!c || (c.workspace_id && c.workspace_id !== device.workspace_id)) {
+      return res.status(400).json({ error: 'default_content_id not found in this workspace' });
+    }
   }
   // Whitelist allowed fields to prevent SQL injection via field names
   const ALLOWED_FIELDS = ['name', 'notes', 'timezone', 'orientation', 'background_color', 'default_content_id'];
@@ -1191,6 +1347,8 @@ router.post('/:id/settings-pin', (req, res) => {
 router.post('/:id/enrol-key', requireScope('full'), (req, res) => {
   const device = checkDeviceOwnership(req, res);
   if (!device) return;
+  // 3.0 mirrors: a link always names the ORIGINAL; a mirror is what a second opening of it becomes.
+  if (device.mirror_of) return res.status(409).json({ error: 'This screen is a mirror. Its display link is the original display’s link: open the original to see or replace it.', code: 'MIRROR' });
   const key = enrolKey.setEnrolKey(db, req.params.id);
   const rolled = !!device.enrol_key;
   console.warn(`[enrol] ${rolled ? 'rolled' : 'minted'} enrolment key for device ${req.params.id} (user ${req.user.id})`);
@@ -1371,32 +1529,49 @@ router.delete('/:id', (req, res) => {
   // #150: snapshot this device's settings (keyed by its fingerprint) BEFORE the row dies,
   // so a re-pair of the SAME physical device restores orientation/name/playlist/etc instead
   // of silently resetting to defaults. No-op if the device has no fingerprint link yet.
-  try { deviceSettings.snapshot(req.params.id); } catch (e) { console.warn(`[#150] settings snapshot failed for ${req.params.id}: ${e.message}`); }
+  // (Not for a mirror: it has no settings of its own to restore.)
+  if (!device.mirror_of) try { deviceSettings.snapshot(req.params.id); } catch (e) { console.warn(`[#150] settings snapshot failed for ${req.params.id}: ${e.message}`); }
 
   // Allowed on a head office screen (physical access is out of the threat model), but recorded.
   require('../lib/corporate/guard').auditMandatedAction(req, device, 'delete');
 
-  // Clean up related data (playlist is NOT deleted — may be shared with other devices)
-  db.prepare('DELETE FROM schedules WHERE device_id = ?').run(req.params.id);
-  // Head office mandates / slot content / emergency scopes naming this screen (no FK cascades them).
-  require('../lib/corporate/cleanup').removeTargets(db, 'device', req.params.id);
-  db.prepare('DELETE FROM screenshots WHERE device_id = ?').run(req.params.id);
-  db.prepare('DELETE FROM device_telemetry WHERE device_id = ?').run(req.params.id);
-  db.prepare('DELETE FROM video_wall_devices WHERE device_id = ?').run(req.params.id);
-  db.prepare('DELETE FROM devices WHERE id = ?').run(req.params.id);
-
-  // Notify dashboard in real-time. Phase 2.3: scope to the device's
-  // (now-deleted but still-known) workspace room. `device.workspace_id`
-  // came from checkDeviceOwnership() above.
+  /*
+   * 3.0 mirrors: removing an original removes its mirrors (they play nothing without it), and
+   * removing a mirror tells that opening so — a player that understands it shows "This mirror was
+   * removed" and stops, instead of re-registering with the link and becoming a mirror again.
+   */
+  const removed = [req.params.id, ...(device.mirror_of ? [] : require('../lib/mirrors').mirrorsOf(req.params.id).map((m) => m.id))];
   const io = req.app.get('io');
-  if (io) {
-    const { workspaceRoom, emitToWorkspace } = require('../lib/socket-rooms');
-    emitToWorkspace(io.of('/dashboard'), workspaceRoom(device.workspace_id), 'dashboard:device-removed', { device_id: req.params.id });
-    // Tell the screen now. Without this a connected player only learned on its next register (a
-    // reconnect, or an app restart), and sat on its old content until then. `reason: 'deleted'` is
-    // what lets a player wipe its downloads: the not_found a register gets is also what a restored
-    // backup or an unreplicated edge says, so players must never wipe on that.
-    io.of('/device').to(req.params.id).emit('device:unpaired', { reason: 'deleted' });
+  for (const id of removed) {
+    // 3.0 screen share: a removed screen's leg of a share ends now (a removed mirror drops out of
+    // its display's share; the display and its other mirrors carry on), and its code goes.
+    try { require('../lib/screen-share').deviceGone(id); } catch (_) { /* never block a delete */ }
+    // Clean up related data (playlist is NOT deleted — may be shared with other devices)
+    db.prepare('DELETE FROM schedules WHERE device_id = ?').run(id);
+    // Head office mandates / slot content / emergency scopes naming this screen (no FK cascades them).
+    require('../lib/corporate/cleanup').removeTargets(db, 'device', id);
+    db.prepare('DELETE FROM screenshots WHERE device_id = ?').run(id);
+    db.prepare('DELETE FROM device_telemetry WHERE device_id = ?').run(id);
+    db.prepare('DELETE FROM video_wall_devices WHERE device_id = ?').run(id);
+    db.prepare('DELETE FROM devices WHERE id = ?').run(id);
+
+    // Notify dashboard in real-time. Phase 2.3: scope to the device's
+    // (now-deleted but still-known) workspace room. `device.workspace_id`
+    // came from checkDeviceOwnership() above.
+    if (io) {
+      const { workspaceRoom, emitToWorkspace } = require('../lib/socket-rooms');
+      emitToWorkspace(io.of('/dashboard'), workspaceRoom(device.workspace_id), 'dashboard:device-removed', { device_id: id });
+      const mirrorGone = id !== req.params.id || !!device.mirror_of;
+      if (mirrorGone) io.of('/device').to(id).emit('device:mirror-removed', { device_id: id });
+      // Tell the screen now. Without this a connected player only learned on its next register (a
+      // reconnect, or an app restart), and sat on its old content until then. `reason: 'deleted'` is
+      // what lets a player wipe its downloads: the not_found a register gets is also what a restored
+      // backup or an unreplicated edge says, so players must never wipe on that.
+      io.of('/device').to(id).emit('device:unpaired', { reason: 'deleted' });
+    }
+  }
+  if (removed.length > 1 || device.mirror_of) {
+    require('../lib/audit').auditFromReq(req, 'device.mirror_removed', { workspace_id: device.workspace_id, device_id: req.params.id, removed: removed.length });
   }
 
   res.json({ success: true });

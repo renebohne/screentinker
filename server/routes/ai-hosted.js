@@ -15,6 +15,8 @@
 
 const express = require('express');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const { db } = require('../db/database');
 const config = require('../config');
 const credits = require('../lib/ai-credits');
@@ -23,6 +25,9 @@ const { canRead, isOrgAdmin } = require('../lib/permissions');
 const { requirePlatformAdmin } = require('../middleware/auth');
 const { logActivity, getClientIp } = require('../services/activity');
 const stripeClient = require('../lib/stripe-client');
+const { trimTrailing } = require('../lib/trim-trailing');
+// 3.0 Private AI: an organization that allows private AI only never sends a prompt to a platform provider.
+const { onlyPrivate } = require('../lib/private-ai');
 
 // Content-edit rights, as routes/ai.js has them — EXCEPT a platform operator acting as an org. On
 // the BYO path that cost nothing; here every image spends the CUSTOMER'S credits on the platform's
@@ -55,6 +60,7 @@ function balanceView(orgId, req) {
 router.get('/status', (req, res) => {
   if (!hosted.enabled()) return res.json({ enabled: false });
   if (!req.organizationId || !canRead(req)) return res.json({ enabled: false });
+  if (onlyPrivate(req.organizationId)) return res.json({ enabled: false, reason: 'private_only' });
   res.json({
     enabled: true,
     catalog: hosted.catalog(),
@@ -82,6 +88,9 @@ router.post('/generate', async (req, res) => {
   if (!canEdit(req)) return res.status(403).json({ error: 'Editor access required' });
   if (!hosted.enabled()) return res.status(404).json({ error: 'Hosted AI is not enabled on this server.' });
   if (!req.organizationId) return res.status(403).json({ error: 'No organization context' });
+  if (onlyPrivate(req.organizationId)) {
+    return res.status(403).json({ error: 'Your organization allows private AI only, so ScreenTinker-hosted images are off.', code: 'private_only' });
+  }
   const b = req.body || {};
   const prompt = String(b.prompt || '').trim().slice(0, 500);
   if (!prompt) return res.status(400).json({ error: 'Prompt required' });
@@ -176,7 +185,7 @@ router.post('/checkout', async (req, res) => {
     return res.status(503).json({ error: 'Online purchase is not available on this server — contact your administrator.', code: 'checkout_unavailable' });
   }
   const raw = req.headers.origin || process.env.APP_URL || `${req.protocol}://${req.get('host') || ''}`;
-  const base = `${String(raw).replace(/\/+$/, '')}/app`;
+  const base = `${trimTrailing(raw, '/')}/app`;
   try {
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',

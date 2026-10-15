@@ -86,10 +86,12 @@ test('Roku is listed but never offered as a file', () => {
   for (const state of [{}, FULL]) {
     const roku = di.entries(state).find((x) => x.id === 'roku');
     assert.ok(roku, 'Roku row present');
-    assert.equal(roku.available, false);
-    assert.equal(roku.url, null, 'Roku must have no download URL in any state');
+    // Live in the Roku Channel Store: the row links to the store, never to a file on this instance.
+    assert.equal(roku.available, true);
+    assert.equal(roku.url, 'https://my.roku.com/account/add/Screentinker');
+    assert.equal(roku.file, null, 'Roku is never a download from this instance');
     assert.equal(roku.guide, '/guides/roku-digital-signage.html');
-    assert.ok(roku.absent);
+    assert.equal(roku.external, true, 'the store link opens in a new tab');
   }
 });
 

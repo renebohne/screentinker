@@ -127,7 +127,8 @@ async function ingestUploadedFile({ file, userId, workspaceId, folderId = null }
   const id = uuidv4();
   // Content-derived extension + mime. Throws UnsupportedUploadError (and removes the temp
   // file) when the bytes are not a supported media type; the caller maps that to a 400.
-  let { filepath, mime } = finalizeUpload(file);
+  // `abs` is the contained path finalizeUpload checked; everything below opens that, not file.path.
+  let { filepath, mime, abs } = finalizeUpload(file);
 
   /*
    * A zip is only accepted when it is an HTML BUNDLE, and that is decided here rather than in the
@@ -148,7 +149,7 @@ async function ingestUploadedFile({ file, userId, workspaceId, folderId = null }
     }
   }
 
-  const { width, height, durationSec, thumbnailPath } = await deriveMediaMetadata(file.path, filepath, mime);
+  const { width, height, durationSec, thumbnailPath } = await deriveMediaMetadata(abs, filepath, mime);
 
   /*
    * ⚠️ byte_digest IS SET HERE TOO, AND THAT IS THE POINT OF THE COLUMN.
@@ -221,7 +222,15 @@ async function ingestUploadedFile({ file, userId, workspaceId, folderId = null }
   } catch { /* hooks must not fail an upload */ }
   require('./smart-playlist').notifyContentChanged(workspaceId);
 
-  return db.prepare('SELECT * FROM content WHERE id = ?').get(id);
+  const row = db.prepare('SELECT * FROM content WHERE id = ?').get(id);
+  // 3.0 accessibility: start the flash/caption check of a video or GIF now, while its bytes are
+  // certainly local, so the report and the publish warning usually have the answer before anyone
+  // asks. Best-effort and queued (lib/a11y/media.js); never delays or fails the upload.
+  try { require('./a11y/media').queueVideo(row); } catch { /* checked later, on demand */ }
+  // 3.0 TV-safe video: a tall video gets the copies this workspace's TVs need, queued in the
+  // background (lib/video-variants.js). Nothing is queued when no screen needs one.
+  try { require('./video-variants').onContentIngested(row); } catch { /* queued lazily later */ }
+  return row;
 }
 
 /*

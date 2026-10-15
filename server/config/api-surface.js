@@ -95,10 +95,24 @@ const JWT_ONLY_ROUTERS = [
    * in order, and listing it after would run /api/ai's auth + tenancy first for every hosted call.
    */
   { path: '/api/ai/hosted',   mod: './routes/ai-hosted',    tenancy: true },
+  // 3.0 Private AI (docs/private-ai.md): local provider, starter set, translations. Before /api/ai too.
+  { path: '/api/ai/private',  mod: './routes/ai-private',   tenancy: true },
   { path: '/api/ai',          mod: './routes/ai',           tenancy: true },
   { path: '/api/provision',   mod: './routes/provisioning', tenancy: true },
   { path: '/api/teams',       mod: './routes/teams',        tenancy: true },
   { path: '/api/white-label', mod: './routes/white-label',  tenancy: true },
+  /*
+   * 3.0 Make a sign (lib/sign-templates.js) and the workspace brand kit (lib/brand-kit.js). JWT only:
+   * they are dashboard authoring surfaces for a person; an integrator who wants a slide already has
+   * /api/slide-decks on the token door.
+   */
+  { path: '/api/signs',       mod: './routes/signs',        tenancy: true },
+  { path: '/api/brand-kit',   mod: './routes/brand-kit',    tenancy: true },
+  /*
+   * 3.0 Experiments (lib/experiments). JWT only: a test switches what screens show and reads a
+   * store's sales through a saved POS credential — a person's decision, made in the dashboard.
+   */
+  { path: '/api/experiments', mod: './routes/experiments',  tenancy: true },
   { path: '/api/workspaces',  mod: './routes/workspaces' },
   // Player rollouts (lib/ota-rollout.js). Before /api/admin: Express walks mounts in order.
   { path: '/api/admin/ota-rollouts', mod: './routes/ota-rollouts' },
@@ -114,6 +128,18 @@ const JWT_ONLY_ROUTERS = [
    */
   { path: '/api/alert-channels', mod: './routes/alert-channels', tenancy: true },
   /*
+   * 3.0 site caches (lib/site-cache, docs/site-cache.md). JWT only: creating one mints a credential
+   * that downloads this workspace's media. The box's own door is /api/site-cache/node, mounted in
+   * server.js and authenticated by the box's token.
+   */
+  { path: '/api/site-caches', mod: './routes/site-caches', tenancy: true },
+  /*
+   * Screen verification (lib/screen-verify): what each screen is actually showing, its incidents,
+   * and the workspace's settings. JWT only alongside alert channels: the settings decide how often
+   * every screen is asked for a screenshot and who is paged.
+   */
+  { path: '/api/screen-verification', mod: './routes/screen-verification', tenancy: true },
+  /*
    * Canva (lib/canva.js). JWT only: a Canva connection is a person's grant to read their designs,
    * and the org integration holds a client secret. The OAuth callback is mounted on its own in
    * server.js, because the browser comes back from canva.com without a bearer token.
@@ -125,11 +151,28 @@ const JWT_ONLY_ROUTERS = [
    */
   { path: '/api/m365', mod: './routes/m365', tenancy: true },
   /*
+   * Free stock photos and videos (lib/stock-media.js). JWT only: the provider keys and their quota
+   * are the operator's, and the pickers that use this are dashboard pages, not integrations.
+   */
+  { path: '/api/stock', mod: './routes/stock-media', tenancy: true },
+  /*
    * BI connections (lib/bi/connections.js): an organization's Grafana / Power BI / Tableau
    * credentials. JWT only for the same reason as alert channels — they reach into someone else's
    * systems. The dashboard widget's public endpoints are on /api/widgets.
    */
   { path: '/api/bi-connections', mod: './routes/bi-connections', tenancy: true },
+  /*
+   * 3.0 "Your data, provably" (routes/trust.js): the data handling report, the outbound connections
+   * ledger, complete exports and "delete everything". JWT only: an export is everything an
+   * organization has, and no API token should be able to take it or end the organization.
+   */
+  { path: '/api/trust', mod: './routes/trust', tenancy: true },
+  /*
+   * 3.0 move an organization to another server (routes/org-import.js, docs/move-server.md): imports,
+   * the screen handover and the whole-server export. JWT only, for the same reason as /api/trust —
+   * it writes a whole organization and can send every screen to another address.
+   */
+  { path: '/api/org-import', mod: './routes/org-import', tenancy: true },
   /*
    * Automation (lib/automation): inbound hook URLs are credentials that can take over screens, so
    * minting, rotating and test-firing them is a signed-in admin's act. JWT only.
@@ -140,6 +183,12 @@ const JWT_ONLY_ROUTERS = [
    * returned) and a workspace's feeds and moderation queue. JWT only — no API token reaches them.
    */
   { path: '/api/social', mod: './routes/social', tenancy: true },
+  /*
+   * 3.0 news feeds (lib/news-feed): "Find feeds" on a pasted site and item previews for the widget
+   * editor and the designer. JWT only — each call makes this server read a third-party site. The
+   * screen-facing reads (/api/news-feeds/items and /image) are mounted in server.js, signed.
+   */
+  { path: '/api/news-feeds', mod: './routes/news-feeds', tenancy: true },
   /*
    * Meeting-room displays (lib/rooms). JWT only: a connection holds an organization's Microsoft 365
    * client secret or Google service-account key, and a room may hold a private calendar address.
@@ -171,6 +220,41 @@ const JWT_ONLY_ROUTERS = [
    * repoint every store's screens. Authoring is a signed-in human action.
    */
   { path: '/api/corporate',   mod: './routes/corporate',    tenancy: true },
+  /*
+   * Content freshness (lib/freshness.js): the stale-content report, thresholds, snoozes and the
+   * caller's own weekly-digest preference. JWT only: the digest preference is a person's, and the
+   * report is a dashboard surface, not an integration one.
+   */
+  { path: '/api/freshness',   mod: './routes/freshness',    tenancy: true },
+  /*
+   * 3.0: screen share (lib/screen-share.js). JWT only: putting your screen on a TV is a person at a
+   * browser. The meeting-room join is /api/share, mounted separately in server.js (no account).
+   */
+  { path: '/api/screen-share', mod: './routes/screen-share', tenancy: true },
+  /*
+   * 3.0 content requests (lib/content-requests.js): request forms and the requests they collect.
+   * JWT only: a form decides who OUTSIDE the workspace may put things in front of a reviewer, which
+   * is a signed-in person's call. The public side is /api/public/requests, mounted in server.js.
+   */
+  { path: '/api/content-requests', mod: './routes/content-requests', tenancy: true },
+  /*
+   * 3.0 energy & carbon (lib/energy, docs/energy.md): estimated kWh / CO2e, schedule savings, the
+   * ESG exports and the org rollup. JWT only: it is a dashboard report, and the org rollup is a
+   * signed-in org admin's view across workspaces, which a workspace-bound token must not reach.
+   */
+  { path: '/api/energy',      mod: './routes/energy',       tenancy: true },
+  /*
+   * 3.0 switch to ScreenTinker (lib/migrate): import from another signage CMS. JWT only: the person
+   * pastes THEIR key for another vendor's account, and the server pulls with it; that is a signed-in
+   * human's act, never an API token's.
+   */
+  { path: '/api/migrate', mod: './routes/migrate', tenancy: true },
+  /*
+   * 3.0 accessibility checker (lib/a11y, docs/accessibility.md): the report, the pre-publish check,
+   * settings and "Generate captions". JWT only, like freshness: a dashboard surface, and captions
+   * send a video's audio to an endpoint, which is a person's decision at a browser.
+   */
+  { path: '/api/accessibility', mod: './routes/accessibility', tenancy: true },
 ];
 
 // #73: AGENCY_ROUTERS - capability-restricted ('agency' scope) surface. Mounted with

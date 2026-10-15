@@ -168,8 +168,15 @@ test('THE FIX: publishing after the upload is what actually puts content on the 
 
 test('onboarding publishes what it assigns', () => {
   const onboarding = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'js', 'views', 'onboarding.js'), 'utf8');
-  assert.match(onboarding, /\/api\/playlists\/\$\{playlistId\}\/publish/,
-    'onboarding must publish through POST /api/playlists/:id/publish, or the wizard finishes on a blank screen');
+  // 3.0: through components/release.js publishOrSubmit, which publishes via api.publishPlaylist
+  // (POST /api/playlists/:id/publish) and, when the workspace requires review, submits it instead.
+  const release = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'js', 'components', 'release.js'), 'utf8');
+  const api = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'js', 'api.js'), 'utf8');
+  assert.match(onboarding, /await publishOrSubmit\(playlistId/,
+    'onboarding must publish what it assigns, or the wizard finishes on a blank screen');
+  assert.match(release, /api\.publishPlaylist\(playlistId\)/, 'publishOrSubmit must publish through the API');
+  assert.match(api, /publishPlaylist: \(id\) => request\(`\/playlists\/\$\{id\}\/publish`/,
+    'api.publishPlaylist must be POST /api/playlists/:id/publish');
   assert.match(onboarding, /const published = await publish\(assignedPlaylistId\)/,
     'the upload step must publish the playlist it just created');
   // A playlist that already has a snapshot may carry someone's in-progress draft edits; a setup

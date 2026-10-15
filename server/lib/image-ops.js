@@ -61,24 +61,63 @@ function failAll(reason) {
   for (const job of dead) job.reject(new Error(reason));
 }
 
+/*
+ * ⚠️ BOUNDED, BECAUSE THE INPUT IS AN UPLOAD. A hostile image (a decompression bomb the header
+ * check cannot see, a pathological codec input) used to be able to grow this worker without limit
+ * or spin it forever, and with ONE job at a time a spinning worker stalls every thumbnail after it.
+ * resourceLimits caps the JS heap (the worker dies with ERR_WORKER_OUT_OF_MEMORY rather than the
+ * process), and a per-job timeout terminates the worker, rejects that one job, and lets pump()
+ * start a fresh worker for the rest. A 12 MP photo is ~1 s; the timeout is far beyond any real one.
+ */
+const WORKER_RESOURCE_LIMITS = { maxOldGenerationSizeMb: 1024, maxYoungGenerationSizeMb: 64 };
+let jobTimeoutMs = 60_000;
+let jobTimer = null;
+function clearJobTimer() {
+  if (jobTimer) { clearTimeout(jobTimer); jobTimer = null; }
+}
+
 function ensureWorker() {
   if (worker) return worker;
   const { Worker } = require('worker_threads');
-  worker = new Worker(WORKER_PATH);
-  worker.unref();
-  worker.on('message', (msg) => {
+  const w = new Worker(WORKER_PATH, { resourceLimits: WORKER_RESOURCE_LIMITS });
+  worker = w;
+  w.unref();
+  // Every handler checks it is still the CURRENT worker: a timed-out generation's late events
+  // must not fail the jobs of the worker that replaced it.
+  w.on('message', (msg) => {
+    if (worker !== w) return;
     const job = inFlight;
     if (!job || job.id !== msg.id) return;   // a reply from a terminated generation; ignore
+    clearJobTimer();
     inFlight = null;
     if (msg.ok) job.resolve(msg.result); else job.reject(new Error(msg.error));
     pump();
   });
-  worker.on('error', (err) => { worker = null; failAll(`image worker failed: ${err.message}`); });
-  worker.on('exit', (code) => {
+  w.on('error', (err) => {
+    if (worker !== w) return;
+    clearJobTimer();
+    worker = null;
+    failAll(`image worker failed: ${err.message}`);
+  });
+  w.on('exit', (code) => {
+    if (worker !== w) return;
+    clearJobTimer();
     worker = null;
     if (inFlight || queue.length) failAll(`image worker exited (code ${code})`);
   });
-  return worker;
+  return w;
+}
+
+function onJobTimeout() {
+  jobTimer = null;
+  const job = inFlight;
+  if (!job) return;
+  inFlight = null;
+  const w = worker;
+  worker = null;                       // detach first: its exit must not touch the queue
+  if (w) w.terminate().catch(() => {});
+  job.reject(Object.assign(new Error(`image job timed out after ${jobTimeoutMs}ms`), { code: 'IMAGE_TIMEOUT' }));
+  pump();                              // the next job gets a fresh worker
 }
 
 function pump() {
@@ -88,6 +127,9 @@ function pump() {
   inFlight = queue.shift();
   const w = ensureWorker();
   w.ref();   // a job is running: hold the process open until it finishes
+  clearJobTimer();
+  jobTimer = setTimeout(onJobTimeout, jobTimeoutMs);
+  jobTimer.unref?.();
   w.postMessage(inFlight.job);
 }
 
@@ -98,6 +140,8 @@ async function runInline(job) {
   const core = require('./image-ops-core');
   if (job.op === 'metadata') return core.metadata(job.src);
   if (job.op === 'cutout') return core.cutout(job.src, job.dest, job.opts);
+  if (job.op === 'frameMetrics') return core.frameMetrics(job.src);
+  if (job.op === 'luminanceGrid') return core.luminanceGrid(job.src, job.cols);
   if (job.op === 'measureAndThumbnail') return core.measureAndThumbnail(job.src, job.dest, job.width, job.quality);
   return core.writeThumbnail(job.src, job.dest, job.width, job.quality);
 }
@@ -140,10 +184,16 @@ function measureAndThumbnail(src, dest, width, quality = 70) {
 /* Drop the worker now rather than waiting out the idle timer. For shutdown paths and tests. */
 async function shutdown() {
   clearIdleTimer();
+  clearJobTimer();
   const w = worker;
   worker = null;
   if (w) await w.terminate();
+  // The exit handler ignores a detached worker, so fail what was outstanding here (as it used to).
+  if (inFlight || queue.length) failAll('image worker exited (shutdown)');
 }
+
+/* Tests only: shorten the per-job timeout. Returns the previous value. */
+function _setJobTimeoutMs(ms) { const prev = jobTimeoutMs; jobTimeoutMs = ms; return prev; }
 
 /*
  * Key a flat backdrop out of `src` and write the trimmed result to `destPath` as a PNG with alpha.
@@ -153,4 +203,26 @@ function cutout(src, dest, opts) {
   return submit({ op: 'cutout', src, dest, opts: opts || {} });
 }
 
-module.exports = { metadata, writeThumbnail, measureAndThumbnail, cutout, shutdown };
+/*
+ * Screen verification metrics for one frame (lib/screen-verify/frame-metrics.js). `src` is a path
+ * or a Buffer of image bytes. Shares the one-job-at-a-time queue: a capture is small next to an
+ * upload, and the caller (lib/screen-verify) bounds how many it ever has waiting here.
+ */
+function frameMetrics(src) {
+  return submit({ op: 'frameMetrics', src });
+}
+
+/*
+ * 3.0 accessibility: a photo's luminance as a small grid (image-ops-core.luminanceGrid), so text laid
+ * over it can be checked. Best-effort callers check pending() first: this shares the one queue.
+ */
+function luminanceGrid(src, cols = 64) {
+  return submit({ op: 'luminanceGrid', src, cols });
+}
+
+/* How many jobs are queued or running, so a best-effort caller can back off instead of piling on. */
+function pending() {
+  return queue.length + (inFlight ? 1 : 0);
+}
+
+module.exports = { metadata, writeThumbnail, measureAndThumbnail, cutout, frameMetrics, luminanceGrid, pending, shutdown, _setJobTimeoutMs };

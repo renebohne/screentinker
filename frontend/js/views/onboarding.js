@@ -1,10 +1,39 @@
 import { showToast } from '../components/toast.js';
 import { api, browserTimezone } from '../api.js';
 import { t } from '../i18n.js';
+import { esc, isTouchFirst } from '../utils.js';
+import { publishOrSubmit } from '../components/release.js';
+import { mountStockPicker } from '../components/stock-picker.js';
+import { isSimpleMode } from '../components/ui-mode.js';
+import { mountMigrate, cleanup as cleanupMigrate } from './migrate.js';
+
+// 3.0: the sample a first-run user can show instead of hunting for a file (brand-neutral on purpose).
+const SAMPLE_URL = '/assets/samples/welcome-screen.jpg';
+
+function cachedUser() {
+  try { return JSON.parse(localStorage.getItem('user') || 'null'); } catch { return null; }
+}
+
+/*
+ * 3.0: the hosted trial, said once at the moment it means most — right after the first screen
+ * lights up. Never on a self-hosted instance or one with billing hidden, and never for an account
+ * that is not on a running trial.
+ */
+function trialBlock() {
+  const u = cachedUser();
+  const tr = u && u.trial;
+  if (!u || u.self_hosted || u.hide_billing || !tr || !tr.active) return '';
+  const devices = u.plan_limits && u.plan_limits.max_devices > 0 ? u.plan_limits.max_devices : 25;
+  return `<div style="background:var(--bg-input);border:1px solid var(--accent);border-radius:8px;padding:16px;margin-bottom:16px">
+      <p style="font-size:14px;color:var(--text-primary);font-weight:600;margin-bottom:6px">${esc(t('onboarding.trial.title', { plan: u.plan_name || 'Pro', n: tr.days_left }))}</p>
+      <p style="font-size:13px;color:var(--text-secondary);line-height:1.5">${esc(t('onboarding.trial.body', { devices }))}</p>
+      <a href="#/billing?from=onboarding" id="onboardSeePlans" style="display:inline-block;margin-top:8px;font-size:13px;color:var(--accent);font-weight:600">${esc(t('onboarding.trial.see_plans'))} →</a>
+    </div>`;
+}
 
 // Steps are computed lazily so translated strings refresh on language change.
-function getSteps() {
-  return [
+function getSteps(addMode = false) {
+  const steps = [
     {
       title: t('onboarding.step.welcome.title'),
       icon: '&#128075;',
@@ -21,7 +50,16 @@ function getSteps() {
       title: t('onboarding.step.player.title'),
       icon: '&#128229;',
       content: `<p style="color:var(--text-secondary);margin-bottom:16px">${t('onboarding.step.player.intro')}</p>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <!-- 3.0: the fastest path to "a screen is playing something I chose" needs no hardware at all. -->
+        <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;background:var(--bg-input);border:1px solid var(--accent);border-radius:8px;padding:14px 16px;margin-bottom:12px">
+          <div style="font-size:28px">&#128187;</div>
+          <div style="flex:1 1 200px;min-width:0">
+            <div style="font-weight:600;font-size:14px">${t('onboarding.step.player.try_browser_title')}</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${t('onboarding.step.player.try_browser_desc')}</div>
+          </div>
+          <a href="/player" target="_blank" rel="noopener" class="btn btn-primary btn-sm" style="white-space:nowrap;margin-left:auto">${t('onboarding.step.player.try_browser_btn')}</a>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
           <a href="/download/apk" style="background:var(--bg-input);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;text-decoration:none;color:var(--text-primary)">
             <div style="font-size:32px;margin-bottom:8px">&#129302;</div>
             <div style="font-weight:600;font-size:14px">${t('onboarding.step.player.android_label')}</div>
@@ -86,9 +124,28 @@ function getSteps() {
       content: `<p style="color:var(--text-secondary);margin-bottom:16px">${t('onboarding.step.upload.intro')}</p>
         <div style="border:2px dashed var(--border);border-radius:12px;padding:32px;text-align:center;cursor:pointer" id="onboardUploadArea">
           <div style="font-size:32px;margin-bottom:8px">&#128193;</div>
-          <p style="color:var(--text-secondary)">${t('onboarding.step.upload.click_to_select')}</p>
+          <p style="color:var(--text-secondary)">${t(isTouchFirst() ? 'onboarding.step.upload.tap_to_select' : 'onboarding.step.upload.click_to_select')}</p>
           <p style="color:var(--text-muted);font-size:12px;margin-top:4px">${t('onboarding.step.upload.formats')}</p>
-          <input type="file" id="onboardFileInput" style="display:none" accept="video/*,image/*,audio/*">
+          <input type="file" id="onboardFileInput" style="display:none" accept="video/*,image/*,audio/*" multiple>
+        </div>
+        <div style="text-align:center;margin-top:12px">
+          <span style="color:var(--text-muted);font-size:12px;margin-right:8px">${t('onboarding.step.upload.or')}</span>
+          <button type="button" class="btn btn-secondary btn-sm" id="onboardUseSample">${t('onboarding.step.upload.use_sample')}</button>
+          <!-- 3.0 Make a sign: no photos needed — a real sign from a built-in template, in a minute. -->
+          <button type="button" class="btn btn-secondary btn-sm" id="onboardMakeSign" style="margin-left:4px">&#127991;&#65039; ${esc(t('signs.onboarding_btn'))}</button>
+          <p style="color:var(--text-muted);font-size:12px;margin-top:8px">${esc(t('signs.onboarding_hint'))}</p>
+        </div>
+        <!-- 3.0 free stock photos (components/stock-picker.js); hidden when the server has no key. -->
+        <div id="onboardStock" class="onboard-stock" hidden></div>
+        <!-- 3.0 Add screen: a second screen usually shows what the first one does. Filled in by
+             populateSameAs() from the workspace's playlists; hidden when there are none. -->
+        <div id="onboardSameAsBlock" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+          <label for="onboardSameAs" style="display:block;font-size:13px;color:var(--text-secondary);margin-bottom:8px">${t('onboarding.step.upload.same_as_label')}</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <select class="input" id="onboardSameAs" style="flex:1;min-width:180px"></select>
+            <button type="button" class="btn btn-primary btn-sm" id="onboardSameAsBtn">${t('onboarding.step.upload.same_as_btn')}</button>
+          </div>
+          <p id="onboardSameAsStatus" style="color:var(--text-muted);font-size:12px;margin-top:6px"></p>
         </div>
         <div id="onboardUploadProgress" style="display:none;margin-top:12px">
           <div style="height:4px;background:var(--bg-primary);border-radius:2px;overflow:hidden">
@@ -127,27 +184,50 @@ function getSteps() {
           </select>
           <p id="onboardAssignStatus" style="color:var(--text-muted);font-size:12px;margin-top:8px"></p>
         </div>
+        ${addMode ? '' : trialBlock()}
+        <!-- 3.0: next steps a first-week user can actually take, in the order they tend to need them;
+             the power-user surfaces (layouts, kiosk, widgets...) are one toggle away, and say so. -->
         <div style="background:var(--bg-input);border-radius:8px;padding:16px;margin-bottom:16px">
           <p style="font-size:14px;color:var(--text-primary);font-weight:600;margin-bottom:8px">${t('onboarding.step.done.whats_next')}</p>
           <ul style="color:var(--text-muted);font-size:13px;padding-left:20px;line-height:2">
-            <li>${t('onboarding.step.done.next_content')}</li>
-            <li>${t('onboarding.step.done.next_layouts')}</li>
+            <li>${t('onboarding.step.done.next_another_screen')}</li>
+            <li>${t('onboarding.step.done.next_playlist')}</li>
             <li>${t('onboarding.step.done.next_schedule')}</li>
-            <li>${t('onboarding.step.done.next_widgets')}</li>
-            <li>${t('onboarding.step.done.next_kiosk')}</li>
-            <li>${t('onboarding.step.done.next_designer')}</li>
+            <li>${t('onboarding.step.done.next_templates')}</li>
+            <li>${t('onboarding.step.done.next_all_features')}</li>
           </ul>
         </div>`,
       action: null
     }
   ];
+  // 3.0 Add screen (Simple view): the same guide for every later screen, without the welcome.
+  if (addMode) return steps.slice(1);
+  /*
+   * 3.0 switch to ScreenTinker: right after the welcome, a new account is asked whether it is coming
+   * from another signage app. "No, start fresh" is the Next button, so the guide is exactly what it
+   * was for everyone who says no. Choosing an app runs the import wizard (views/migrate.js, guide
+   * mode) inside this step's card, one question at a time; finishing or skipping it moves on to the
+   * player step, and the done step's playlist picker then offers the imported playlists for the
+   * first screen. An import keeps running on the server if the person moves on or the app is
+   * backgrounded; coming back to this step shows its progress.
+   */
+  const importStep = {
+    title: t('migrate.guide.title'),
+    icon: '&#128230;',
+    content: '<div id="onboardImport"></div>',
+    action: 'import',
+  };
+  return [steps[0], importStep, ...steps.slice(1)];
 }
 
-export function render(container) {
+export function render(container, { mode = 'first' } = {}) {
+  // 'add': Simple view's Add screen — the first-run guide for screen two, three... (#/add-screen).
+  const addMode = mode === 'add';
   let currentStep = 0;
   let pairedDeviceId = null;
   let assignedPlaylistId = null;   // whatever the upload step put on this device, if anything
   let createdPlayerUrl = null;     // #313: set once a no-storage display has been created here
+  let sentForReview = false;       // 3.0: the content went to the review queue, not to the screen
   // Playlists in this workspace that have NEVER been published, from the picker's own fetch.
   // Assigning one of these without publishing hands the screen an empty list (see publish()).
   const neverPublished = new Set();
@@ -171,21 +251,34 @@ export function render(container) {
   async function publish(playlistId) {
     if (!playlistId) return { ok: true };
     try {
-      const token = localStorage.getItem('token');
-      const res = await fetch(`/api/playlists/${playlistId}/publish`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) { neverPublished.delete(playlistId); return { ok: true }; }
-      const data = await res.json().catch(() => ({}));
-      return { ok: false, error: data.error };
+      // 3.0: a workspace that requires review gets it SUBMITTED for review (components/release.js),
+      // and the last step then says "Sent for review" instead of claiming it is playing.
+      const state = await publishOrSubmit(playlistId, { note: 'From the setup guide' });
+      neverPublished.delete(playlistId);
+      if (state === 'review') sentForReview = true;
+      return { ok: true, review: state === 'review' };
     } catch (err) {
       return { ok: false, error: err.message };
     }
   }
 
+  /*
+   * 3.0: finishing or skipping is remembered on the ACCOUNT (users.onboarded_at), not only in this
+   * browser, so the guide does not start again on a new laptop. The localStorage flag stays as the
+   * offline/old-server fallback the router has always read.
+   */
+  async function finish(how) {
+    if (addMode) { window.location.hash = '#/'; return; } // not the first run: nothing to record
+    localStorage.setItem('rd_onboarded', 'true');
+    api.trackEvent(how === 'skip' ? 'onboarding_skipped' : 'onboarding_completed', { step: currentStep });
+    try { await api.updateMe({ onboarded: true }); } catch { /* the local flag still holds */ }
+    window.location.hash = '#/';
+    window.location.reload();
+  }
+
   function renderStep() {
-    const STEPS = getSteps();
+    cleanupMigrate();
+    const STEPS = getSteps(addMode);
     const step = STEPS[currentStep];
     const isFirst = currentStep === 0;
     const isLast = currentStep === STEPS.length - 1;
@@ -210,8 +303,8 @@ export function render(container) {
           <div style="display:flex;justify-content:space-between">
             ${isFirst ? '<div></div>' : `<button class="btn btn-secondary" id="prevBtn">${t('onboarding.back')}</button>`}
             <div style="display:flex;gap:8px">
-              ${!isLast ? `<button class="btn btn-secondary" id="skipBtn" style="color:var(--text-muted)">${t('onboarding.skip')}</button>` : ''}
-              <button class="btn btn-primary" id="nextBtn">${isLast ? t('onboarding.go_to_dashboard') : step.action === 'pair' ? t('onboarding.pair_display') : t('onboarding.next')}</button>
+              ${!isLast ? `<button class="btn btn-secondary" id="skipBtn" style="color:var(--text-muted)">${t(addMode ? 'common.cancel' : 'onboarding.skip')}</button>` : ''}
+              <button class="btn btn-primary" id="nextBtn">${isLast ? t('onboarding.go_to_dashboard') : step.action === 'pair' ? t('onboarding.pair_display') : step.action === 'import' ? esc(t('migrate.guide.fresh')) : t('onboarding.next')}</button>
             </div>
           </div>
         </div>
@@ -219,12 +312,13 @@ export function render(container) {
     `;
 
     document.getElementById('prevBtn')?.addEventListener('click', () => { currentStep--; renderStep(); });
-    document.getElementById('skipBtn')?.addEventListener('click', () => {
-      localStorage.setItem('rd_onboarded', 'true');
-      window.location.hash = '#/';
-      window.location.reload();
-    });
+    document.getElementById('skipBtn')?.addEventListener('click', () => finish('skip'));
     document.getElementById('nextBtn')?.addEventListener('click', handleNext);
+
+    if (step.action === 'import') {
+      const advance = () => { if (currentStep === STEPS.indexOf(step)) { currentStep++; renderStep(); } };
+      mountMigrate(document.getElementById('onboardImport'), { guide: true, onSkip: advance, onFinish: advance });
+    }
 
     if (step.action === 'pair') {
       const box = document.getElementById('onboardNoStorage');
@@ -279,11 +373,30 @@ export function render(container) {
       const area = document.getElementById('onboardUploadArea');
       const input = document.getElementById('onboardFileInput');
       area?.addEventListener('click', () => input.click());
-      input?.addEventListener('change', handleUpload);
+      input?.addEventListener('change', () => { const picked = [...(input.files || [])]; input.value = ''; uploadFiles(picked); });
+      // Dropping a handful of photos straight from the desktop works too.
+      area?.addEventListener('dragover', (e) => { e.preventDefault(); area.style.borderColor = 'var(--accent)'; });
+      area?.addEventListener('dragleave', () => { area.style.borderColor = ''; });
+      area?.addEventListener('drop', (e) => { e.preventDefault(); area.style.borderColor = ''; uploadFiles([...(e.dataTransfer?.files || [])]); });
+      document.getElementById('onboardUseSample')?.addEventListener('click', useSample);
+      // Free stock photos land in the library like an upload; then the same assign-and-publish.
+      mountStockPicker(document.getElementById('onboardStock'), { collapsed: true, onAdded: (rows) => placeItems(rows) });
+      document.getElementById('onboardMakeSign')?.addEventListener('click', makeSign);
+      populateSameAs();
     }
 
+    if (isLast && sentForReview) {
+      // Nothing is playing yet: the workspace reviews changes first. Say so, plainly.
+      const h2 = container.querySelector('h2');
+      if (h2) h2.textContent = t('simple.done.review_title');
+      const icon = h2?.previousElementSibling;
+      if (icon) icon.innerHTML = '&#9203;';
+      const intro = document.querySelector('#onboardDonePlayerUrl')?.previousElementSibling;
+      if (intro) intro.textContent = t('onboarding.step.done.intro_review');
+    }
     if (isLast) {
       populatePlaylistPicker();
+      document.getElementById('onboardSeePlans')?.addEventListener('click', () => api.trackEvent('trial_banner_clicked', { from: 'onboarding' }));
       // The URL this run produced, if any — the one thing the operator cannot reconstruct by
       // guessing, so it is on the step they actually finish on.
       if (createdPlayerUrl) {
@@ -344,7 +457,7 @@ export function render(container) {
   }
 
   async function handleNext() {
-    const STEPS = getSteps();
+    const STEPS = getSteps(addMode);
     const step = STEPS[currentStep];
 
     if (step.action === 'pair') {
@@ -451,9 +564,7 @@ export function render(container) {
         }
       }
 
-      localStorage.setItem('rd_onboarded', 'true');
-      window.location.hash = '#/';
-      window.location.reload();
+      await finish('done');
       return;
     }
 
@@ -461,70 +572,162 @@ export function render(container) {
     renderStep();
   }
 
-  async function handleUpload() {
-    const file = document.getElementById('onboardFileInput')?.files[0];
-    if (!file) return;
+  // 3.0: the sample is fetched from this server and uploaded like any other file, so it lands in the
+  // library as ordinary content the user owns, edits and deletes — nothing is special-cased server-side.
+  async function useSample() {
+    const btn = document.getElementById('onboardUseSample');
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch(SAMPLE_URL);
+      if (!res.ok) throw new Error(String(res.status));
+      const blob = await res.blob();
+      api.trackEvent('sample_content_used', {});
+      uploadFiles([new File([blob], 'Welcome screen.jpg', { type: blob.type || 'image/jpeg' })]);
+    } catch {
+      showToast(t('onboarding.toast.sample_failed'), 'error');
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  /*
+   * 3.0: "Make a sign" instead of a photo. The sign task (views/make-sign.js) takes it from here with
+   * this screen preset, so the first thing on it is a real sign rather than a sample picture.
+   *
+   * ⚠️ THE GUIDE IS RECORDED AS FINISHED ON THE WAY OUT. The screen is paired, which is what the guide
+   * is for; the sign task ends at the dashboard, not back here, and leaving the flag unset would send
+   * this person through the whole guide again on their next sign-in.
+   */
+  async function makeSign() {
+    if (!addMode) {
+      localStorage.setItem('rd_onboarded', 'true');
+      api.trackEvent('onboarding_completed', { step: currentStep, via: 'sign' });
+      try { await api.updateMe({ onboarded: true }); } catch { /* the local flag still holds */ }
+    }
+    const q = `device=${encodeURIComponent(pairedDeviceId || '')}&from=${addMode ? 'add' : 'onboarding'}`;
+    window.location.hash = isSimpleMode() ? `#/simple/sign?${q}` : `#/signs?${q}`;
+  }
+
+  /*
+   * Upload one or MANY files and put them all on the screen, in the order picked. A first-run user
+   * with a folder of photos should not have to come back three times. Goes through api.uploadContent
+   * — the library's own uploader (batched requests, whole-selection progress, the server's reason on
+   * a refusal, and the upgrade prompt on a storage limit) — then adds each item to the screen's
+   * playlist and publishes ONCE at the end, so the screen restarts once, not per photo.
+   */
+  async function uploadFiles(files) {
+    files = (files || []).filter(Boolean);
+    if (!files.length) return;
 
     const progress = document.getElementById('onboardUploadProgress');
     const bar = document.getElementById('onboardProgressBar');
     const text = document.getElementById('onboardUploadText');
+    const area = document.getElementById('onboardUploadArea');
     if (progress) progress.style.display = 'block';
+    if (area) area.style.pointerEvents = 'none';
+    const fail = (msg) => {
+      if (text) text.textContent = msg;
+      if (area) area.style.pointerEvents = '';
+    };
+    if (text) text.textContent = files.length > 1
+      ? t('onboarding.step.upload.uploading_n', { n: files.length })
+      : t('onboarding.step.upload.uploading');
 
+    let uploaded;
     try {
-      const token = localStorage.getItem('token');
-      const formData = new FormData();
-      formData.append('file', file);
-
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/api/content');
-      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable && bar) bar.style.width = Math.round((e.loaded / e.total) * 100) + '%';
-      };
-      xhr.onload = async () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          const content = JSON.parse(xhr.responseText);
-          if (text) text.textContent = t('onboarding.toast.uploaded_assigning');
-
-          if (pairedDeviceId) {
-            try {
-              const assignRes = await fetch(`/api/assignments/device/${pairedDeviceId}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                // #237: no duration_sec — onboarding never asked the operator for one, and a
-                // hardcoded 10 cut their very first video off mid-play. Omitting it lets the
-                // server default to the clip's own length (still 10s for a photo).
-                body: JSON.stringify({ content_id: content.id })
-              });
-              // The created item names the playlist this device just got, so the last step can
-              // preselect it: "keep what is already playing" must be the default there.
-              if (assignRes.ok) assignedPlaylistId = (await assignRes.json()).playlist_id || null;
-            } catch {}
-          }
-
-          // The assign above only marks the playlist a draft. Publish it, or the screen stays
-          // blank behind a success message.
-          const published = await publish(assignedPlaylistId);
-          if (!published.ok) {
-            if (text) text.textContent = published.error || t('onboarding.toast.publish_failed');
-            return;
-          }
-
-          showToast(t('onboarding.toast.content_assigned'), 'success');
-          currentStep++;
-          renderStep();
-        } else {
-          if (text) text.textContent = t('onboarding.toast.upload_failed');
-        }
-      };
-      xhr.onerror = () => { if (text) text.textContent = t('onboarding.toast.upload_failed'); };
-      xhr.send(formData);
+      uploaded = await api.uploadContent(files, (pct) => { if (bar) bar.style.width = pct + '%'; });
     } catch (err) {
-      if (text) text.textContent = t('onboarding.toast.error_with_error', { error: err.message });
+      return fail(err.message || t('onboarding.toast.upload_failed'));
     }
+    if (bar) bar.style.width = '100%';
+    return placeItems(Array.isArray(uploaded) ? uploaded : [uploaded]);
   }
 
+  /*
+   * Put library items (just uploaded, or just added from free stock photos) on the screen in the
+   * order given, and publish ONCE at the end, so the screen restarts once, not per photo.
+   */
+  async function placeItems(items) {
+    const progress = document.getElementById('onboardUploadProgress');
+    const text = document.getElementById('onboardUploadText');
+    const area = document.getElementById('onboardUploadArea');
+    if (progress) progress.style.display = 'block';
+    const fail = (msg) => {
+      if (text) text.textContent = msg;
+      if (area) area.style.pointerEvents = '';
+    };
+    if (text) text.textContent = t('onboarding.toast.uploaded_assigning');
+
+    if (pairedDeviceId) {
+      for (const content of items) {
+        if (!content || !content.id) continue;
+        try {
+          // #237: no duration_sec — the server defaults to the clip's own length (10s for a photo).
+          const r = await api.addAssignment(pairedDeviceId, { content_id: content.id });
+          // The created item names the playlist this device just got, so the last step can
+          // preselect it: "keep what is already playing" must be the default there.
+          if (r && r.playlist_id) assignedPlaylistId = r.playlist_id;
+        } catch { /* one refused item must not strand the rest */ }
+      }
+    }
+
+    // The adds above only mark the playlist a draft. Publish it, or the screen stays blank behind a
+    // success message.
+    const published = await publish(assignedPlaylistId);
+    if (!published.ok) return fail(published.error || t('onboarding.toast.publish_failed'));
+
+    showToast(published.review ? t('onboarding.toast.sent_for_review')
+      : items.length > 1 ? t('onboarding.toast.content_assigned_n', { n: items.length }) : t('onboarding.toast.content_assigned'), 'success');
+    if (assignedPlaylistId && !published.review) api.trackEvent('first_publish', { from: 'onboarding', items: items.length });
+    currentStep++;
+    renderStep();
+  }
+
+  /*
+   * "Show the same as another screen": the existing playlists, most recently used first as the API
+   * returns them. Assigning goes through POST /playlists/:id/assign (the same write the screen page
+   * makes, so the screen follows that playlist), and a playlist that was never published is
+   * published, exactly as the last step's picker does — otherwise the screen would get an empty list.
+   */
+  async function populateSameAs() {
+    const block = document.getElementById('onboardSameAsBlock');
+    const select = document.getElementById('onboardSameAs');
+    if (!block || !select || !pairedDeviceId) return;
+    let playlists = [];
+    try { playlists = await api.getPlaylists(); } catch { return; }
+    playlists = (playlists || []).filter((p) => (p.item_count || 0) > 0);
+    if (!playlists.length) return;
+    for (const p of playlists) {
+      if (!p.published_snapshot) neverPublished.add(p.id);
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = `${p.name} (${p.item_count || 0})`;
+      select.appendChild(opt);
+    }
+    block.style.display = 'block';
+    document.getElementById('onboardSameAsBtn').addEventListener('click', async (e) => {
+      const status = document.getElementById('onboardSameAsStatus');
+      const pick = select.value;
+      if (!pick) return;
+      e.target.disabled = true;
+      try {
+        await api.assignPlaylistToDevice(pick, pairedDeviceId);
+        if (neverPublished.has(pick)) {
+          const published = await publish(pick);
+          if (!published.ok) throw new Error(published.error || t('onboarding.toast.publish_failed'));
+        }
+        assignedPlaylistId = pick;
+        showToast(t('onboarding.toast.playlist_assigned'), 'success');
+        currentStep++;
+        renderStep();
+      } catch (err) {
+        if (status) status.textContent = err.message || t('onboarding.toast.assign_failed');
+        e.target.disabled = false;
+      }
+    });
+  }
+
+  if (!addMode) api.trackEvent('onboarding_started', {});
   renderStep();
 }
 
-export function cleanup() {}
+export function cleanup() { cleanupMigrate(); }

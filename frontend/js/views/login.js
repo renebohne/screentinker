@@ -1,8 +1,9 @@
 import { showToast } from '../components/toast.js';
 import { loginFormState } from '../lib/login-form-state.js';
 import { t } from '../i18n.js';
-import { esc } from '../utils.js';
+import { esc, inManagerApp } from '../utils.js';
 import { applyAccent } from '../branding.js';
+import { passkeysUsableHere, conditionalMediationAvailable, getPasskey, isUserCancel } from '../lib/passkeys.js';
 
 
 /*
@@ -30,6 +31,11 @@ const GENERIC_ICON = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none
 </svg>`;
 
 const providerIcon = (slug) => PROVIDER_ICONS[slug] || GENERIC_ICON;
+
+// 3.0: the passkey mark (a key), drawn inline for the same reason as the provider icons.
+const PASSKEY_ICON = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+  <circle cx="8" cy="15" r="4"/><path d="M10.85 12.15 19 4"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/>
+</svg>`;
 
 let authConfig = null;
 
@@ -75,6 +81,8 @@ export async function render(container) {
   const isSetup = config.needsSetup;
   // registration_enabled may be absent on older servers — treat as enabled for back-compat
   const canRegister = config.registration_enabled !== false;
+  // 3.0: only where the browser can actually complete it — see lib/passkeys.js passkeysUsableHere.
+  const passkeyUsable = !isSetup && passkeysUsableHere(config.passkeys, { inApp: inManagerApp() });
 
   applyLoginBrandingDoc(branding);
   const brandName = branding.brand_name || 'ScreenTinker';
@@ -96,7 +104,7 @@ export async function render(container) {
           <p style="color:var(--text-secondary);font-size:13px;margin-top:4px">
             ${isSetup ? t('auth.subtitle_setup') : t('auth.subtitle_signin')}
           </p>
-          ${!isSetup && canRegister ? `<p style="color:var(--warning);font-size:12px;margin-top:8px">${t('auth.trial_notice')}</p>` : ''}
+          ${!isSetup && canRegister && config.trial_offered !== false && !inManagerApp() ? `<p style="color:var(--warning);font-size:12px;margin-top:8px">${t('auth.trial_notice')}</p>` : ''}
         </div>
 
         <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px">
@@ -104,7 +112,7 @@ export async function render(container) {
           <div id="localAuthForm">
             <div class="form-group">
               <label>${t('auth.email')}</label>
-              <input type="email" id="loginEmail" class="input" placeholder="${t('auth.placeholder_email')}" autocomplete="email">
+              <input type="email" id="loginEmail" class="input" placeholder="${t('auth.placeholder_email')}" autocomplete="${passkeyUsable ? 'email webauthn' : 'email'}">
             </div>
             <div class="form-group">
               <label id="loginPasswordLabel" for="loginPassword">${t('auth.password')}</label>
@@ -130,6 +138,12 @@ export async function render(container) {
             <button class="btn btn-primary" id="loginBtn" style="width:100%;justify-content:center;padding:10px">
               ${isSetup ? t('auth.create_admin_account') : t('auth.sign_in')}
             </button>
+            ${passkeyUsable ? `
+            <!-- 3.0: no address needed - the browser asks which passkey, and the passkey names the account. -->
+            <button type="button" class="btn btn-secondary" id="passkeyLoginBtn" style="width:100%;justify-content:center;padding:10px;margin-top:8px;gap:8px">
+              ${PASSKEY_ICON} ${esc(t('passkey.signin'))}
+            </button>
+            ` : ''}
             ${!isSetup ? `
             <p style="text-align:center;margin-top:10px">
               <a href="#" id="forgotLink" style="color:var(--text-secondary);font-size:12px;text-decoration:none">${t('auth.forgot_password')}</a>
@@ -174,6 +188,8 @@ export async function render(container) {
                      placeholder="123456" maxlength="40" style="letter-spacing:6px;text-align:center;font-family:monospace;font-size:18px">
             </div>
             <button class="btn btn-primary" id="mfaVerifyBtn" style="width:100%;justify-content:center;padding:10px">${t('auth.mfa_verify')}</button>
+            <!-- 3.0: shown by showMfaChallenge() when the account has a passkey and this page can use it. -->
+            <button type="button" class="btn btn-secondary" id="mfaPasskeyBtn" style="display:none;width:100%;justify-content:center;padding:10px;margin-top:8px;gap:8px">${PASSKEY_ICON} ${esc(t('passkey.mfa_use'))}</button>
             <button class="btn btn-secondary" id="mfaBackBtn" style="width:100%;justify-content:center;padding:10px;margin-top:8px">${t('auth.back_to_signin')}</button>
             <p style="color:var(--text-muted);font-size:11px;text-align:center;margin-top:12px">${t('auth.mfa_recovery_hint')}</p>
           </div>
@@ -254,10 +270,10 @@ export async function render(container) {
     </div>
   `;
 
-  setupHandlers(config, isSetup);
+  setupHandlers(container, config, isSetup, passkeyUsable);
 }
 
-function setupHandlers(config, isSetup) {
+function setupHandlers(container, config, isSetup, passkeyUsable = false) {
   const showError = (msg) => {
     const el = document.getElementById('loginError');
     el.textContent = msg;
@@ -406,7 +422,7 @@ function setupHandlers(config, isSetup) {
       // Unverified account (hosted hard-gate): no session — prompt to check email.
       if (data.verification_required) { showVerifyNotice(data.email || email); return; }
       // #100: TOTP-enabled accounts get no session yet — a second step verifies a code.
-      if (data.mfa_required) { showMfaChallenge(data.mfa_token); return; }
+      if (data.mfa_required) { showMfaChallenge(data.mfa_token, !!data.passkey); return; }
       onAuthSuccess(data);
     } catch (err) {
       showError(t('auth.error_login_failed'));
@@ -514,7 +530,8 @@ function setupHandlers(config, isSetup) {
   }
 
   // Swap the card to the 6-digit challenge and exchange mfa_token + code for a session.
-  function showMfaChallenge(mfaToken) {
+  function showMfaChallenge(mfaToken, hasPasskey = false) {
+    stopConditional();   // the address field it was attached to is going away
     ['localAuthForm', 'registerForm', 'ssoBlock', 'supportDetails'].forEach((id) => {
       const el = document.getElementById(id); if (el) el.style.display = 'none';
     });
@@ -542,6 +559,26 @@ function setupHandlers(config, isSetup) {
       }
     };
     document.getElementById('mfaVerifyBtn').addEventListener('click', verify);
+    /*
+     * 3.0: a passkey in place of the code. Only offered when the server said this account has one
+     * (`passkey` on the mfa_required answer) and this page can run the ceremony.
+     */
+    const pkBtn = document.getElementById('mfaPasskeyBtn');
+    if (pkBtn && hasPasskey && passkeyUsable) {
+      pkBtn.style.display = '';
+      pkBtn.addEventListener('click', async () => {
+        pkBtn.disabled = true;
+        try {
+          const opts = await postJson('/api/auth/passkeys/mfa/options', { mfa_token: mfaToken });
+          if (!opts.ok) { showError(opts.data.error || t('passkey.err_signin')); return; }
+          let response;
+          try { response = await getPasskey(opts.data.options); }
+          catch (err) { if (!isUserCancel(err)) showError(t('passkey.err_signin')); return; }
+          await finishPasskey('/api/auth/passkeys/mfa/verify', { mfa_token: mfaToken, challenge_id: opts.data.challenge_id, response });
+        } catch { showError(t('auth.error_login_failed')); }
+        finally { pkBtn.disabled = false; }
+      });
+    }
     codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') verify(); });
     document.getElementById('mfaBackBtn').addEventListener('click', () => { window.location.reload(); });
   }
@@ -567,6 +604,87 @@ function setupHandlers(config, isSetup) {
     } catch (err) {
       showError(t('auth.error_registration_failed'));
     }
+  }
+
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, data };
+  }
+
+  // Shared by sign-in and the second-factor step. False when the server refused.
+  async function finishPasskey(url, payload) {
+    const r = await postJson(url, payload);
+    if (!r.ok) {
+      if (r.data.code === 'sso_required') showError(t('auth.sso_required'));
+      else if (r.data.code === 'challenge_expired') showError(t('passkey.err_expired'));
+      else if (r.status === 429) showError(r.data.error || t('passkey.err_signin'));
+      else showError(t('passkey.err_signin'));
+      return false;
+    }
+    if (r.data.verification_required) { showVerifyNotice(r.data.email || ''); return true; }
+    onAuthSuccess(r.data);
+    return true;
+  }
+
+  let conditionalAbort = null;
+  function stopConditional() {
+    if (conditionalAbort) { try { conditionalAbort.abort(); } catch { /* */ } conditionalAbort = null; }
+  }
+
+  // `ctrl` given = the autofill flavour, already registered as conditionalAbort by startConditional.
+  async function passkeySignIn({ ctrl = null } = {}) {
+    const conditional = !!ctrl;
+    if (!conditional) stopConditional();
+    try {
+      const opts = await postJson('/api/auth/passkeys/login/options', {});
+      if (conditional && ctrl.signal.aborted) return;   // the button was pressed meanwhile
+      if (!opts.ok) { if (!conditional) showError(opts.data.error || t('passkey.err_signin')); return; }
+      let response;
+      try {
+        response = await getPasskey(opts.data.options, conditional ? { mediation: 'conditional', signal: ctrl.signal } : {});
+      } catch (err) {
+        // Closing the sheet, or our own abort of the autofill request, is not an error to show.
+        if (!isUserCancel(err) && !conditional) showError(t('passkey.err_signin'));
+        if (!conditional) startConditional();
+        return;
+      }
+      // This autofill request is finished; clear it now so a refusal below can offer a fresh one.
+      if (ctrl && conditionalAbort === ctrl) conditionalAbort = null;
+      if (!response) return;
+      const ok = await finishPasskey('/api/auth/passkeys/login/verify', { challenge_id: opts.data.challenge_id, response });
+      if (!ok) startConditional();   // offer the autofill again after a refusal
+    } catch {
+      if (!conditional) showError(t('auth.error_login_failed'));
+    } finally {
+      if (ctrl && conditionalAbort === ctrl) conditionalAbort = null;
+    }
+  }
+
+  async function startConditional() {
+    if (!passkeyUsable || conditionalAbort) return;
+    // Claimed BEFORE any await, so a button press in the meantime finds something to cancel and the
+    // browser never sees two requests at once (it refuses the second).
+    const ctrl = new AbortController();
+    conditionalAbort = ctrl;
+    if (!(await conditionalMediationAvailable()) || ctrl.signal.aborted) {
+      if (conditionalAbort === ctrl) conditionalAbort = null;
+      return;
+    }
+    passkeySignIn({ ctrl });
+  }
+
+  // Inside the Manager app the provider buttons hand their start URL to the app (startSso above).
+  // Delegated on the container, so it holds whenever the buttons render (they can arrive after this
+  // runs). The app also intercepts a start URL itself (MainActivity), so neither layer is load-bearing alone.
+  if (inManagerApp() && !container.dataset.ssoDelegated) {
+    container.dataset.ssoDelegated = '1';
+    container.addEventListener('click', (e) => {
+      const a = e.target.closest && e.target.closest('a[href^="/api/auth/oidc/"], a[href^="/api/auth/saml/"]');
+      if (!a) return;
+      e.preventDefault();
+      startSso(a.getAttribute('href'));
+    }, true);
   }
 
   /*
@@ -650,6 +768,9 @@ function setupHandlers(config, isSetup) {
      */
     const reg = document.getElementById('showRegisterBtn');
     if (reg) reg.style.display = ssoOnlyDomain ? 'none' : '';
+    // 3.0: nor a passkey, which the server refuses for these organizations just as it does a password.
+    const pk = document.getElementById('passkeyLoginBtn');
+    if (pk) pk.style.display = ssoOnlyDomain ? 'none' : '';
     const forgot = document.getElementById('forgotLink');
     if (forgot) {
       const wrap = forgot.parentElement && forgot.parentElement.tagName === 'P' ? forgot.parentElement : forgot;
@@ -740,7 +861,7 @@ function setupHandlers(config, isSetup) {
           });
           const body = await r.json().catch(() => ({}));
           if (!r.ok || !body.start_url) throw new Error(body.error || `start ${r.status}`);
-          window.location.assign(body.start_url);
+          startSso(body.start_url);
         } catch {
           btn.disabled = false;
           showError(t('auth.sso_err_provider_unavailable'));
@@ -770,6 +891,21 @@ function setupHandlers(config, isSetup) {
    */
   if (isSetup) identified = true;   // first-run setup needs both fields at once
   applyFormState();
+
+  /*
+   * 3.0: passkeys. Two ways in, one finisher:
+   *   - the button: a modal "choose a passkey" sheet, no address typed;
+   *   - autofill (conditional mediation): the browser lists passkeys under the address field, so
+   *     someone who starts typing their address can just pick one. It is a pending request that
+   *     waits for the person; it must be ABORTED before the modal one starts, or the browser refuses
+   *     the second.
+   * The server's answer is handled exactly like a password login's (session, verification notice,
+   * or an SSO-only refusal).
+   */
+  if (passkeyUsable) {
+    document.getElementById('passkeyLoginBtn')?.addEventListener('click', () => passkeySignIn());
+    startConditional();
+  }
 
   /*
    * Completing an SSO login.
@@ -809,10 +945,21 @@ function setupHandlers(config, isSetup) {
     const known = ['expired', 'bad_state', 'no_code', 'no_email', 'email_unverified',
       'verification_failed', 'provider_refused', 'provider_unavailable', 'unknown_provider',
       'registration_disabled', 'account_exists_local', 'subject_mismatch', 'server_error',
-      'domain_not_allowed', 'account_exists_other_provider', 'sso_required', 'saml_transient_nameid'];
+      'domain_not_allowed', 'account_exists_other_provider', 'sso_required', 'saml_transient_nameid', 'account_disabled'];
     const key = known.includes(ssoError) ? `auth.sso_err_${ssoError}` : 'auth.sso_failed';
     showToast(t(key), 'error');
   }
+}
+
+/*
+ * 3.0: begin single sign-on. On the web, a navigation. Inside the ScreenTinker Manager app, the app
+ * runs it in the phone's browser (Google and most providers refuse an embedded WebView) and takes
+ * the session back over its own hand-off (routes/auth.js /sso/app-exchange).
+ */
+function startSso(startUrl) {
+  const bridge = window.STManager;
+  if (inManagerApp() && bridge && typeof bridge.startSso === 'function') { bridge.startSso(startUrl); return; }
+  window.location.assign(startUrl);
 }
 
 function onAuthSuccess(data) {

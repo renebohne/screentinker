@@ -86,6 +86,20 @@ write_json() { # file, json — atomic, world-readable
 set_status() { # state, message
   write_json "$OUT_DIR/status.json" "{\"id\":\"$(jstr "$JOB_ID")\",\"mode\":\"$MODE\",\"state\":\"$1\",\"target\":\"$(jstr "$JOB_TARGET")\",\"from\":\"$(jstr "$JOB_FROM")\",\"message\":\"$(jstr "$2")\",\"backup\":\"$(jstr "$JOB_BACKUP")\",\"started_at\":$JOB_STARTED,\"updated_at\":$(date +%s)}"
   log "[$1] $2"
+  case "$1" in done|failed|rolled_back) record_history "$1" "$2" ;; esac
+}
+
+# The same upgrade history scripts/upgrade.sh keeps (one JSON line per run, beside the database
+# backups), so a dashboard upgrade and a hand-run one read as one timeline of what came from what.
+# Kept owned like the backups directory: this runs as root, upgrade.sh as the service user.
+record_history() { # result, message
+  _hdir="${BACKUP_DIR:-$OUT_DIR}"
+  [ -d "$_hdir" ] || return 0
+  _hist="$_hdir/upgrade-history.jsonl"
+  printf '{"at":"%s","by":"dashboard updater (job %s)","result":"%s","from":"%s","to":"v%s","node":"%s","mode":"%s","backup":"%s","detail":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(jstr "$JOB_ID")" "$1" "$(jstr "$JOB_FROM")" "$(jstr "$JOB_TARGET")" \
+    "$(node -v 2>/dev/null || echo none)" "$MODE" "$(jstr "$JOB_BACKUP")" "$(jstr "$2")" >> "$_hist" 2>/dev/null || return 0
+  chown --reference="$_hdir" "$_hist" 2>/dev/null || true
 }
 
 heartbeat() {
@@ -167,6 +181,34 @@ git_backup() {
   [ "$_integ" = ok ] || { set_status failed "Backup failed its integrity check (${_integ:-no answer}) - nothing was changed."; return 1; }
 }
 
+# What the TARGET needs from this host, checked before anything changes (same rules as
+# scripts/upgrade.sh, which explains them). Read from the tag: this copy of the updater predates it.
+git_preflight() { # ref
+  _pkg="$(as_owner git -C "$APP_DIR" show "$1:server/package.json" 2>/dev/null || true)"
+  _floor="$(printf '%s' "$_pkg" | sed -n 's/.*"node": *">= *v\{0,1\}\([0-9][0-9.]*\)".*/\1/p' | head -1)"
+  _have="$(node -p 'process.versions.node' 2>/dev/null || echo 0)"
+  if [ -n "$_floor" ] && [ "$(printf '%s\n%s\n' "$_floor" "$_have" | sort -V | head -1)" != "$_floor" ]; then
+    set_status failed "$1 needs Node >= $_floor; $SERVICE_NAME runs Node $_have, and the new release would not start on it. Upgrade Node first: run scripts/upgrade.sh on the host once, which offers to (docs/operations.md, \"Upgrading Node.js\") - nothing was changed."
+    return 1
+  fi
+  NATIVE_DRIVER=0
+  if printf '%s' "$_pkg" | grep -q '"better-sqlite3"'; then
+    NATIVE_DRIVER=1
+    _missing=""
+    for _t in python3 make g++; do command -v "$_t" >/dev/null 2>&1 || _missing="$_missing $_t"; done
+    if [ -n "$_missing" ]; then
+      set_status failed "Missing on the host:$_missing. npm needs them to install the database driver and skips it silently without them. Install them (apt-get install -y python3 make g++), or run scripts/upgrade.sh on the host once, which offers to - nothing was changed."
+      return 1
+    fi
+  fi
+}
+
+# The driver loads under THIS Node, proven before the restart (a database opened, not a require).
+git_verify_driver() {
+  [ "$NATIVE_DRIVER" = 1 ] || return 0
+  ( cd "$APP_DIR/server" && as_owner node -e "const D = require('better-sqlite3'); new D(':memory:').close()" ) >> "$LOG" 2>&1
+}
+
 git_install() { # ref
   as_owner git -C "$APP_DIR" checkout -q "$1" >> "$LOG" 2>&1 || return 1
   ( cd "$APP_DIR/server" && as_owner npm ci --omit=dev --no-audit --no-fund ) >> "$LOG" 2>&1
@@ -213,9 +255,12 @@ do_git() {
     set_status failed "The checkout at $APP_DIR has local changes. Commit or discard them, then try again - nothing was changed."
     return 0
   fi
+  git_preflight "v$JOB_TARGET" || return 0
   PREV="$(as_owner git -C "$APP_DIR" rev-parse HEAD)"
   set_status install "Installing v$JOB_TARGET (checkout + npm ci)"
   git_install "v$JOB_TARGET" || { git_rollback "Installing v$JOB_TARGET failed."; return 0; }
+  # NEW_STARTED is still unset here, so this rollback only puts the old code back: no DB restore.
+  git_verify_driver || { git_rollback "v$JOB_TARGET installed, but its database driver (better-sqlite3) will not load."; return 0; }
   set_status restart "Restarting $SERVICE_NAME"
   NEW_STARTED=1
   run_logged "$SYSTEMCTL" restart "$SERVICE_NAME" || { git_rollback "The service would not restart."; return 0; }

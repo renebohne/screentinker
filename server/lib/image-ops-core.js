@@ -70,6 +70,21 @@ async function wasmDecode(mime, buf) {
 }
 
 /*
+ * ⚠️ REFUSE A HUGE CANVAS BEFORE DECODING IT. Decoding allocates width*height*4 bytes up front, and
+ * the header is the uploader's claim: a few-KB PNG declaring 50000x50000 asked for 10 GB. ~50 MP
+ * (a 50 MP phone sensor is 8160x6120) is ~200 MB of RGBA, which is already the most a thumbnail
+ * should cost. Unknown/unreadable headers fall through to the decoder as before.
+ */
+const MAX_DECODE_PIXELS = 50 * 1024 * 1024;
+function assertDecodableSize(buf, mime) {
+  const dims = require('./image-dims').headerDims(buf, mime);
+  if (dims && dims.width * dims.height > MAX_DECODE_PIXELS) {
+    throw Object.assign(new Error(`image is too large to decode (${dims.width}x${dims.height}, limit ${MAX_DECODE_PIXELS} pixels)`),
+      { code: 'IMAGE_TOO_LARGE' });
+  }
+}
+
+/*
  * Decode to a Jimp image whatever the format. Reuses sniffMime rather than carrying a second copy
  * of the magic-byte table — routes/media.js already duplicating it once is noted there as a smell.
  * Throws on anything undecodable, which is the contract callers already handle (a failure yields
@@ -78,6 +93,7 @@ async function wasmDecode(mime, buf) {
 async function readImage(src) {
   const buf = await fs.promises.readFile(src);
   const mime = sniffMime(buf);
+  assertDecodableSize(buf, mime);
 
   if (WASM_CODECS[mime]) {
     const raw = await wasmDecode(mime, buf);
@@ -193,4 +209,60 @@ async function cutout(src, destPath, opts = {}) {
   };
 }
 
-module.exports = { metadata, writeThumbnail, measureAndThumbnail, readImage, cutout };
+/*
+ * Screen verification (lib/screen-verify): the handful of numbers that describe what a captured
+ * frame looks like. `src` is a file path (a content thumbnail used as the reference) or the raw
+ * bytes of a screenshot as the player sent it. ON THE WORKER SIDE for the same reason as cutout:
+ * a 1080p capture is two million pixels of arithmetic, and screenshots arrive continuously while
+ * anyone has the dashboard open.
+ *
+ * ⚠️ The bytes are the PLAYER'S, so they get the same header-size refusal as an upload: the 2MB
+ * cap on a screenshot bounds the compressed size, not what a PNG header claims it decodes to.
+ * Only JPEG and PNG are accepted from a player; every player sends one or the other.
+ */
+const FRAME_MAX_PIXELS = 3840 * 2160;
+async function frameMetrics(src) {
+  let img;
+  if (typeof src === 'string') {
+    img = await readImage(src);
+  } else {
+    const buf = Buffer.from(src);
+    const mime = sniffMime(buf);
+    if (mime !== 'image/jpeg' && mime !== 'image/png') throw new Error(`unsupported frame type ${mime || 'unknown'}`);
+    const dims = require('./image-dims').headerDims(buf, mime);
+    if (dims && dims.width * dims.height > FRAME_MAX_PIXELS) throw new Error('frame is too large to analyse');
+    img = await jimp().Jimp.read(buf);
+  }
+  return require('./screen-verify/frame-metrics').metricsFromBitmap(img.bitmap);
+}
+
+/*
+ * 3.0 accessibility (lib/a11y): the WCAG relative luminance of a photo, as a small grid of cells.
+ *
+ * Text over a photo can only be checked against what is under it, and the checker needs that for
+ * arbitrary rectangles (every text box on every slide that uses the photo). A grid computed once per
+ * image and cached answers all of them without decoding again. 64 cells across keeps a headline's
+ * box several cells tall on any normal photo, and the grid keeps the image's aspect so the checker
+ * can reproduce `background-size: cover` cropping. Area-averaged (resize), so a cell is the mean of
+ * the pixels it stands for, not one sampled pixel.
+ */
+async function luminanceGrid(src, cols = 64) {
+  const img = await readImage(src);
+  const { width, height } = img.bitmap;
+  const w = Math.max(1, Math.min(cols, width));
+  const h = Math.max(1, Math.min(64, Math.round((height / width) * w)));
+  img.resize({ w, h });
+  const d = img.bitmap.data;
+  const lin = (c) => { const v = c / 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+  const lum = new Array(w * h);
+  for (let p = 0; p < w * h; p++) {
+    const o = p * 4;
+    const a = d[o + 3] / 255;
+    // A transparent pixel shows whatever is under the photo, which is not known here; it is read as
+    // its own colour at its alpha over black. Photos used as backgrounds are almost always opaque.
+    lum[p] = Math.round(a * (0.2126 * lin(d[o]) + 0.7152 * lin(d[o + 1]) + 0.0722 * lin(d[o + 2])) * 1000) / 1000;
+  }
+  return { w, h, lum, width, height };
+}
+
+module.exports = { metadata, writeThumbnail, measureAndThumbnail, readImage, cutout, frameMetrics, luminanceGrid, MAX_DECODE_PIXELS };

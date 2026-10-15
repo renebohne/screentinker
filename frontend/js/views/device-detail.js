@@ -1,6 +1,9 @@
 import { api } from '../api.js';
+import { publishOrSubmit } from '../components/release.js';
+import { isSimpleMode } from '../components/ui-mode.js';
 import { on, off, requestScreenshot, startRemote, stopRemote, sendTouch, sendSwipe, sendKey, sendCommand, requestLivePublish, startTalk, stopTalk, ptyOpen, ptyInput, ptyResize, ptyClose } from '../socket.js';
 import { TalkClient } from '../lib/talk-client.js';
+import { renderScreenShareCard, startScreenShare } from '../components/screen-share.js';   // 3.0 screen share
 import { showToast } from '../components/toast.js';
 import { openContentPicker } from '../components/content-picker.js';
 import { esc, livenessBadge, hydrateAuthImages, screenshotUrl } from '../utils.js';
@@ -13,6 +16,8 @@ import { renderPowerScheduleEditor, readPowerScheduleEditor, presetWindows, prob
 import * as cui from '../components/corporate-ui.js';
 import { openDeviceMoveDialog } from '../components/device-move-dialog.js';
 import { setupViewAccess } from '../components/view-access-card.js';
+import { mountDeviceSection as mountScreenVerify } from '../components/screen-verify.js';
+import { mountPreviewAtTime, renderGroupAt } from '../components/preview-at-time.js';
 
 // The player distinguishes three cases for the Wi-Fi name, because "--" was hiding a real
 // answer: Android 8.1+ refuses to reveal the SSID to an app without location permission, and a
@@ -209,6 +214,7 @@ let liveViewer = null;        // #go2rtc WebRTC viewer for the Now Playing tile
 let liveViewerDispose = null; // IntersectionObserver disposer for the live tile
 let remoteActive = false;
 let talkClient = null;        // #talk: active two-way intercom client, or null
+let screenShareCardDispose = null;   // 3.0 screen share: the Now Playing card's poller
 
 // #talk: tear down any live intercom. Safe to call unconditionally (leaving the view, ending a
 // session, or an error). Also tells the device to leave so it stops capturing its mic.
@@ -707,6 +713,8 @@ export function render(container, deviceId) {
 
   playbackHandler = (data) => {
     if (data.device_id !== deviceId) return;
+    // A mirror's line names its original and playlist; a bare content id would replace it with less.
+    if (currentDevice && currentDevice.mirror_source) return;
     const el = document.getElementById('nowPlayingInfo');
     if (el && data.current_content_id) {
       el.textContent = t('device.now_playing_id', { id: data.current_content_id });
@@ -740,6 +748,19 @@ export function render(container, deviceId) {
     showToast(`Diagnostic logs received (${data.log_count || 0} entries)`);
   };
   on('embedded-logs', embeddedLogsHandler);
+}
+
+/*
+ * 3.0 display-link mirrors: a mirror has no playlist of its own (it plays its original's), so its
+ * "Now playing" line names the original and what that resolves to (routes/devices.js mirrorPlaying).
+ * Plain text: callers escape it.
+ */
+function mirrorPlayingText(device) {
+  const source = (device.mirror_source && device.mirror_source.name) || '';
+  const p = device.mirror_playing;
+  if (!p || !p.playlist_name) return t('device.mirror.now_nothing', { source });
+  if (p.now && p.now.name) return t('device.mirror.now_playing_item', { source, playlist: p.playlist_name, item: p.now.name });
+  return t('device.mirror.now_playing', { source, playlist: p.playlist_name });
 }
 
 async function loadDevice(deviceId, activeTab = null) {
@@ -801,14 +822,17 @@ async function loadDevice(deviceId, activeTab = null) {
             ${t('device.screenshot_btn')}
           </button>` : ''}
           ${talkAvailable && can('remote.talk') ? `
-          <button class="btn btn-secondary btn-sm" id="startTalkBtn">🎙️ ${t('device.talk.start')}</button>
-          ${can('remote.talk') ? `<button class="btn btn-secondary btn-sm" id="start2wayBtn">🎙️ ${t('device.talk.two_way')}</button>` : ''}
+          <button data-advanced-ui class="btn btn-secondary btn-sm" id="startTalkBtn">🎙️ ${t('device.talk.start')}</button>
+          ${can('remote.talk') ? `<button data-advanced-ui class="btn btn-secondary btn-sm" id="start2wayBtn">🎙️ ${t('device.talk.two_way')}</button>` : ''}
           <button class="btn btn-danger btn-sm" id="stopTalkBtn" style="display:none">${t('device.talk.stop')}</button>
           <button class="btn btn-secondary btn-sm" id="muteTalkBtn" style="display:none">${t('device.talk.mute')}</button>` : ''}
+          ${/* 3.0 screen share: hidden until the card below has asked the server whether this person
+                can share to this screen (capability, workspace switch, edit rights). */ ''}
+          ${can('remote.screen_share') ? `<button class="btn btn-secondary btn-sm" id="shareScreenBtn" style="display:none">&#128421;&#65039; ${t('screen_share.start')}</button>` : ''}
           ${device.android_version && !device.android_version.startsWith('Web/') && !isNativeDevice(device) && !isRokuDevice(device) ? `
-          <button class="btn btn-secondary btn-sm" id="deviceOwnerBtn" title="${t('device.owner_provision.tip')}">${t('device.owner_provision.btn')}</button>` : ''}
-          <button class="btn btn-secondary btn-sm" id="moveDeviceBtn">${t('move.button')}</button>
-          <button class="btn btn-secondary btn-sm" id="blockDeviceBtn">${device.blocked ? 'Unblock' : 'Block'}</button>
+          <button data-advanced-ui class="btn btn-secondary btn-sm" id="deviceOwnerBtn" title="${t('device.owner_provision.tip')}">${t('device.owner_provision.btn')}</button>` : ''}
+          <button data-advanced-ui class="btn btn-secondary btn-sm" id="moveDeviceBtn">${t('move.button')}</button>
+          <button data-advanced-ui class="btn btn-secondary btn-sm" id="blockDeviceBtn">${device.blocked ? 'Unblock' : 'Block'}</button>
           <button class="btn btn-danger btn-sm" id="deleteDeviceBtn">${t('device.remove')}</button>
         </div>
       </div>
@@ -820,7 +844,7 @@ async function loadDevice(deviceId, activeTab = null) {
            and it is how a Linux player that runs its own kiosk session gets these controls without
            claiming to be an Android device owner. Each button is gated on what it sends. */
         (device.tier === 2 || can('system.device_owner') || can('system.kiosk')) ? `
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 0 4px" title="${isNativeDevice(device) ? t('device.tier2.tip_linux') : t('device.tier2.tip')}">
+      <div data-advanced-ui style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 0 4px" title="${isNativeDevice(device) ? t('device.tier2.tip_linux') : t('device.tier2.tip')}">
         <span style="font-size:12px;color:var(--text-muted)">${isNativeDevice(device) ? t('device.tier2.label_linux') : t('device.tier2.label')}</span>
         ${(device.tier === 2 || can('system.reboot')) ? `
         <button class="btn btn-secondary btn-sm" id="t2Reboot">${t('device.tier2.reboot')}</button>` : ''}
@@ -831,6 +855,15 @@ async function loadDevice(deviceId, activeTab = null) {
         <button class="btn btn-secondary btn-sm" id="t2PowerMenu">${t('device.tier2.power_menu')}</button>
       </div>` : ''}
 
+      ${/* 3.0 display-link mirrors: a mirror plays its original's content, so say so up front. */
+        device.mirror_source ? `
+      <div class="info-card" id="mirrorBanner" style="margin:8px 0;padding:10px 14px;border-left:3px solid var(--accent, #3b82f6)">
+        ${esc(t('device.mirror.banner_prefix'))}
+        <a href="#/device/${esc(device.mirror_source.id)}"><strong>${esc(device.mirror_source.name)}</strong></a>.
+        ${esc(t('device.mirror.banner_body'))}
+        ${device.mirror_location ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${esc(t('device.mirror.location', { location: device.mirror_location }))}</div>` : ''}
+      </div>` : ''}
+
       <!-- Step 4 sends you to this page to assign a playlist. Losing the checklist on arrival is
            the same dead end the Content, Playlists and playlist-detail pages had. -->
       <div id="gettingStarted"></div>
@@ -839,15 +872,29 @@ async function loadDevice(deviceId, activeTab = null) {
         <div class="tab active" data-tab="nowplaying">${t('device.tab.now_playing')} <span class="help-tip" data-tip="${t('device.tab.now_playing_tip')}">?</span></div>
         <div class="tab" data-tab="playlist">${t('device.tab.playlist')} <span class="help-tip" data-tip="${t('device.tab.playlist_tip')}">?</span></div>
         <div class="tab" data-tab="info">${t('device.tab.info')} <span class="help-tip" data-tip="${t('device.tab.info_tip')}">?</span></div>
-        ${(can('remote.stream') || can('remote.input') || can('remote.screenshot')) ? `<div class="tab" data-tab="remote">${t('device.tab.remote')} <span class="help-tip" data-tip="${t('device.tab.remote_tip')}">?</span></div>` : ''}
-        ${((can('audio.volume') || can('display.brightness') || can('system.brightness') || can('system.screen_timeout')) || isEmbeddedDevice(device)) ? `<div class="tab" data-tab="controls">${t('device.tab.controls')} <span class="help-tip" data-tip="${t('device.tab.controls_tip')}">?</span></div>` : ''}
-        ${(device.tier === 2 || can('system.shell') || can('system.pty')) ? `<div class="tab" data-tab="terminal">${t('device.tab.terminal')} <span class="help-tip" data-tip="${t('device.tab.terminal_tip')}">?</span></div>` : ''}
+        ${(can('remote.stream') || can('remote.input') || can('remote.screenshot')) ? `<div class="tab" data-tab="remote" data-advanced-ui>${t('device.tab.remote')} <span class="help-tip" data-tip="${t('device.tab.remote_tip')}">?</span></div>` : ''}
+        ${((can('audio.volume') || can('display.brightness') || can('system.brightness') || can('system.screen_timeout')) || isEmbeddedDevice(device)) ? `<div class="tab" data-tab="controls" data-advanced-ui>${t('device.tab.controls')} <span class="help-tip" data-tip="${t('device.tab.controls_tip')}">?</span></div>` : ''}
+        ${(device.tier === 2 || can('system.shell') || can('system.pty')) ? `<div class="tab" data-tab="terminal" data-advanced-ui>${t('device.tab.terminal')} <span class="help-tip" data-tip="${t('device.tab.terminal_tip')}">?</span></div>` : ''}
         <!--
           #313 — only for a display that actually HAS an enrolment key, i.e. one created for a
           player that cannot stay paired. Every other display keeps its own credentials and would
           gain nothing from this tab but a durable secret it never needed.
         -->
-        ${device.enrol_key ? `<div class="tab" data-tab="webplayer">${t('device.tab.webplayer')} <span class="help-tip" data-tip="${t('device.tab.webplayer_tip')}">?</span></div>` : ''}
+        <div class="tab" data-tab="forecast" data-advanced-ui>${t('forecast.tab')} <span class="help-tip" data-tip="${t('forecast.tab_tip')}">?</span></div>
+        ${!device.mirror_of ? `<div class="tab" data-tab="webplayer">${t('device.tab.webplayer')} <span class="help-tip" data-tip="${t('device.tab.webplayer_tip')}">?</span></div>` : ''}
+      </div>
+
+      <!-- Preview at… (docs/preview-at-time.md): mounted on first open, it asks the server. -->
+      <div class="tab-content" id="tab-forecast">
+        <div id="forecastHost"></div>
+        <details class="pat-group" id="forecastGroup">
+          <summary>${t('forecast.group.title')}</summary>
+          <div class="pat-group-controls">
+            <select class="input" id="forecastGroupSel"><option value="">${t('forecast.group.pick')}</option></select>
+            <button type="button" class="btn btn-secondary btn-sm" id="forecastGroupGo">${t('forecast.group.show')}</button>
+          </div>
+          <div id="forecastGroupOut"></div>
+        </details>
       </div>
 
       <!-- Now Playing Tab -->
@@ -873,8 +920,10 @@ async function loadDevice(deviceId, activeTab = null) {
           }
         </div>
         <p id="nowPlayingInfo" style="color:var(--text-secondary);font-size:13px;">
-          ${device.assignments?.length ? tn('device.playlist_count', device.assignments.length) : t('device.no_content_assigned')}
+          ${device.mirror_source ? esc(mirrorPlayingText(device))
+            : device.assignments?.length ? tn('device.playlist_count', device.assignments.length) : t('device.no_content_assigned')}
         </p>
+        <div id="screenShareCard"></div>
       </div>
 
       <!-- Playlist Tab -->
@@ -897,8 +946,9 @@ async function loadDevice(deviceId, activeTab = null) {
           </div>
         </div>
         ` : ''}
-        <!-- Layout selector -->
-        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
+        <!-- Layout selector. 3.0: Advanced view only — unless this screen already runs a multi-zone
+             layout, in which case hiding it would hide why its content is split up. -->
+        <div ${activeLayoutIdOf(device) ? '' : 'data-advanced-ui'} style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="2">
             <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/>
           </svg>
@@ -907,6 +957,7 @@ async function loadDevice(deviceId, activeTab = null) {
             <select id="deviceLayoutSelect" class="input" style="background:var(--bg-input);padding:4px 8px;font-size:13px">
               <option value="">${t('device.layout.fullscreen_default')}</option>
             </select>
+            ${layoutSourceNote(device)}
           </div>
           <button class="btn btn-secondary btn-sm" id="applyLayoutBtn">${t('device.layout.apply')}</button>
         </div>
@@ -920,7 +971,7 @@ async function loadDevice(deviceId, activeTab = null) {
             ${playlistSourceBadge(device)}
           </div>
           <div style="display:flex;gap:6px">
-            <button class="btn btn-secondary btn-sm" id="copyPlaylistBtn">${t('device.playlist.copy_to_btn')}</button>
+            <button class="btn btn-secondary btn-sm" id="copyPlaylistBtn" data-advanced-ui>${t('device.playlist.copy_to_btn')}</button>
             <button class="btn btn-primary btn-sm" id="addContentBtn">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
@@ -1250,6 +1301,9 @@ async function loadDevice(deviceId, activeTab = null) {
 
         <div id="viewAccessCard"></div>
 
+        <!-- Screen verification: what the panel is actually SHOWING (components/screen-verify.js) -->
+        <div id="screenVerifyCard"></div>
+
         <!-- Uptime Timeline (24h) -->
         <div style="margin-top:20px">
           <h4 style="font-size:13px;margin-bottom:8px">${t('device.timeline.title')}</h4>
@@ -1429,17 +1483,20 @@ async function loadDevice(deviceId, activeTab = null) {
         ` : ''}
       </div>
 
-      ${(can('remote.stream') || can('remote.input') || can('remote.screenshot')) ? `
-      <!-- Remote Control Tab -->
-      <!-- Web player Tab (#313) -->
-      ${device.enrol_key ? `
+      <!-- Web player Tab (#313). 3.0: on every display that is not itself a mirror — one without a
+           link offers to create one, and the display's mirrors are listed here. Outside the remote
+           block below: a display without remote capabilities still has a link. -->
+      ${!device.mirror_of ? `
       <div class="tab-content" id="tab-webplayer">
         <h3 style="font-size:16px;margin-bottom:4px">${t('device.enrol.label')}</h3>
         <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px;max-width:70ch">${t('device.enrol.hint')}</div>
         <div id="enrolBody"></div>
+        <div id="mirrorList" style="margin-top:22px"></div>
       </div>
       ` : ''}
 
+      ${(can('remote.stream') || can('remote.input') || can('remote.screenshot')) ? `
+      <!-- Remote Control Tab -->
       <div class="tab-content" id="tab-remote">
         <div class="remote-container">
           ${can('remote.stream') ? `
@@ -1696,10 +1753,19 @@ async function loadDevice(deviceId, activeTab = null) {
     setupTabs();
     setupActions(device);
     setupRemote(device);
+    // 3.0 screen share: the card explains why a screen cannot be shared to, and drives the header button.
+    if (screenShareCardDispose) { try { screenShareCardDispose(); } catch (e) {} }
+    const shareBtn = document.getElementById('shareScreenBtn');
+    screenShareCardDispose = renderScreenShareCard(document.getElementById('screenShareCard'), device, {
+      onAvailable: (ok) => { if (shareBtn) shareBtn.style.display = ok ? '' : 'none'; },
+    });
+    shareBtn?.addEventListener('click', () => startScreenShare(device));
     setupPlaylistActions(device);
     setupCorporateDevice(device);
     setupEnrolKey(device);
     setupViewAccess(device);
+    mountScreenVerify(document.getElementById('screenVerifyCard'), device);
+    setupForecast(device);
 
     /*
      * The checklist, at the end of its own trail.
@@ -2212,19 +2278,78 @@ function renderPlaylist(assignments) {
  * none of this. A key created for all of them would be a durable secret sitting on rows that never
  * use one, for no benefit. So the operator asks for it on the screen that needs it.
  */
+/* A view-only member (workspace_viewer) can look but not change. The server enforces it. */
+function canEditWorkspace() {
+  try { const u = JSON.parse(localStorage.getItem('user') || 'null'); return !(u && u.current_workspace_role === 'workspace_viewer' && !u.acting_as); } catch { return true; }
+}
+
+/*
+ * 3.0 display-link mirrors: everywhere else this display's link is open right now (or was). Each is
+ * a screen of its own — status, where it is, last seen — and Remove disconnects that opening for
+ * good (only opening the link afresh there brings it back).
+ */
+function renderMirrors(device) {
+  const el = document.getElementById('mirrorList');
+  if (!el) return;
+  const list = Array.isArray(device.mirrors) ? device.mirrors : [];
+  if (!list.length) {
+    el.innerHTML = `<div style="font-size:12px;color:var(--text-muted);max-width:70ch">${esc(t('device.mirrors.none'))}</div>`;
+    return;
+  }
+  const seen = (ts) => (ts ? new Date(ts * 1000).toLocaleString() : t('device.mirrors.never'));
+  el.innerHTML = `
+    <h3 style="font-size:15px;margin-bottom:4px">${esc(t('device.mirrors.title', { n: list.length }))}</h3>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;max-width:70ch">${esc(t('device.mirrors.hint'))}</div>
+    <div class="mirror-rows" style="display:flex;flex-direction:column;gap:6px">
+      ${list.map((m) => { const b = livenessBadge(m); return `
+      <div class="mirror-row" data-mirror-id="${esc(m.id)}" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--border);border-radius:8px">
+        <a href="#/device/${esc(m.id)}" style="font-weight:600">${esc(m.name)}</a>
+        <span class="device-status-badge ${esc(b.state)}">${esc(b.label)}</span>
+        <span style="font-size:12px;color:var(--text-muted)">${esc(m.location || '')}</span>
+        <span style="font-size:12px;color:var(--text-muted)">${esc(t('device.mirrors.last_seen', { when: seen(m.last_heartbeat) }))}</span>
+        ${canEditWorkspace() ? `<button class="btn btn-danger btn-sm" data-remove-mirror="${esc(m.id)}" style="margin-left:auto">${esc(t('device.mirrors.remove'))}</button>` : ''}
+      </div>`; }).join('')}
+    </div>`;
+  el.querySelectorAll('[data-remove-mirror]').forEach((btn) => btn.addEventListener('click', async () => {
+    const id = btn.getAttribute('data-remove-mirror');
+    const m = list.find((x) => x.id === id);
+    if (!confirm(t('device.mirrors.confirm_remove', { name: m ? m.name : '' }))) return;
+    try {
+      await api.deleteDevice(id);
+      device.mirrors = list.filter((x) => x.id !== id);
+      renderMirrors(device);
+      showToast(t('device.mirrors.removed'));
+    } catch (err) { showToast(err.message, 'error'); }
+  }));
+}
+
 function setupEnrolKey(device) {
   const host = document.getElementById('enrolBody');
   if (!host) return;
 
   const draw = () => {
-    if (!device.enrol_key) return;   // the tab only renders for a display that has one
+    renderMirrors(device);
+    /*
+     * 3.0: a display paired by code (or any display without a link) can be given one here. The
+     * key is just another way to identify the same display — its player keeps its own token and is
+     * not disturbed — so this is safe to offer on every original. Editors and up; a view-only
+     * member sees that there is no link yet.
+     */
+    if (!device.enrol_key) {
+      host.innerHTML = canEditWorkspace()
+        ? `<button class="btn btn-primary btn-sm" id="enrolCreateBtn">${esc(t('device.enrol.create'))}</button>
+           <div style="font-size:12px;color:var(--text-muted);margin-top:6px;max-width:70ch">${esc(t('device.enrol.create_hint'))}</div>`
+        : `<div style="font-size:13px;color:var(--text-muted)">${esc(t('device.enrol.none'))}</div>`;
+      host.querySelector('#enrolCreateBtn')?.addEventListener('click', () => mint(false));
+      return;
+    }
     const url = `${window.location.origin}/player?k=${encodeURIComponent(device.enrol_key)}`;
     host.innerHTML = `
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
         <input class="input" id="enrolUrl" readonly value="${esc(url)}"
                style="flex:1;min-width:260px;font-family:monospace;font-size:11px">
         <button class="btn btn-secondary btn-sm" id="enrolCopyBtn">${t('device.enrol.copy')}</button>
-        <button class="btn btn-secondary btn-sm" id="enrolRollBtn">${t('device.enrol.roll')}</button>
+        ${canEditWorkspace() ? `<button class="btn btn-secondary btn-sm" id="enrolRollBtn">${t('device.enrol.roll')}</button>` : ''}
       </div>
       <div style="font-size:11px;color:#fbbf24;margin-top:6px">${t('device.enrol.warning')}</div>`;
 
@@ -2236,7 +2361,7 @@ function setupEnrolKey(device) {
       try { document.execCommand('copy'); showToast(t('device.enrol.copied')); }
       catch { showToast(t('device.enrol.copy_failed'), 'error'); }
     });
-    host.querySelector('#enrolRollBtn').addEventListener('click', () => {
+    host.querySelector('#enrolRollBtn')?.addEventListener('click', () => {
       if (!confirm(t('device.enrol.confirm_roll'))) return;
       mint(true);
     });
@@ -2411,6 +2536,42 @@ function setupInteractiveTerminal(device) {
     // The server answers with dashboard:pty-exit (closed_by_user), which runs ended(); if the socket
     // is gone that never arrives, so tear down locally regardless.
     setTimeout(() => { if (ptyState === st) { teardownPty(false); setConnected(false); setStatus(''); } }, 1500);
+  });
+}
+
+/*
+ * Preview at… tab. Mounted the first time the tab is opened, not on page load: it costs a forecast
+ * and a timeline on the server, and most visits to a screen page never look at it.
+ */
+let forecastCleanup = null;
+function setupForecast(device) {
+  const tab = document.querySelector('.tab[data-tab="forecast"]');
+  const host = document.getElementById('forecastHost');
+  if (!tab || !host) return;
+  if (forecastCleanup) { forecastCleanup(); forecastCleanup = null; }
+  tab.addEventListener('click', () => {
+    if (!forecastCleanup && document.contains(host)) forecastCleanup = mountPreviewAtTime(host, device);
+  });
+  const details = document.getElementById('forecastGroup');
+  const sel = document.getElementById('forecastGroupSel');
+  details?.addEventListener('toggle', async () => {
+    if (!details.open || sel.options.length > 1) return;
+    try {
+      const groups = await api.getGroups();
+      for (const g of (Array.isArray(groups) ? groups : [])) {
+        const o = document.createElement('option');
+        o.value = g.id;
+        o.textContent = g.name;
+        sel.appendChild(o);
+      }
+    } catch { /* the picker simply stays empty */ }
+  });
+  document.getElementById('forecastGroupGo')?.addEventListener('click', () => {
+    if (!sel.value) return;
+    // Same moment as the picker above, so "this screen" and "its group" are compared like for like.
+    const when = host.querySelector('#patWhen');
+    const iso = when && when.dataset.atIso ? when.dataset.atIso : new Date().toISOString();
+    renderGroupAt(document.getElementById('forecastGroupOut'), sel.value, iso);
   });
 }
 
@@ -3356,9 +3517,9 @@ async function setupPlaylistActions(device) {
     // network errors, so a 403/404 must throw here or zones would silently be [].
     let zones = [];
     let zonesFetchFailed = false;
-    if (device.layout_id) {
+    if (activeLayoutIdOf(device)) {
       try {
-        const res = await fetch(`/api/layouts/${device.layout_id}`, { headers });
+        const res = await fetch(`/api/layouts/${activeLayoutIdOf(device)}`, { headers });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         zones = (await res.json()).zones || [];
       } catch (e) {
@@ -3372,7 +3533,7 @@ async function setupPlaylistActions(device) {
           ${zones.map(z => `<option value="${esc(z.id)}">${esc(z.name)} (${Math.round(z.width_percent)}% x ${Math.round(z.height_percent)}%)</option>`).join('')}
         </select>`
       : `<div style="font-size:12px;color:${zonesFetchFailed ? 'var(--danger)' : 'var(--text-muted)'};padding:6px 0;line-height:1.5">${
-        !device.layout_id ? t('device.assign.zone_no_layout') : zonesFetchFailed ? t('device.assign.zone_load_failed') : t('device.assign.zone_empty_layout')}</div>`;
+        !activeLayoutIdOf(device) ? t('device.assign.zone_no_layout') : zonesFetchFailed ? t('device.assign.zone_load_failed') : t('device.assign.zone_empty_layout')}</div>`;
     const extraFieldsHtml = `
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
         <div class="form-group" style="flex:1;min-width:200px;margin:0"><label>${t('device.assign.zone_label')}</label>${zoneHtml}</div>
@@ -3405,18 +3566,21 @@ async function setupPlaylistActions(device) {
       return { ...base, ...extras };
     };
 
+    // 3.0: the playlist the adds landed in (the first add creates the screen's own one).
+    let addedTo = device.playlist_id || null;
+    const remember = (r) => { if (r && r.playlist_id) addedTo = r.playlist_id; return r; };
     const picker = await openContentPicker({
       title: t('device.assign.modal_title'),
       targetPlaylistId: device.playlist_id || null,
       extraFieldsHtml,
       readExtras,
-      add: (item, extras) => api.addAssignment(device.id, payload(item, extras)),
+      add: (item, extras) => api.addAssignment(device.id, payload(item, extras)).then(remember),
       // In the order shown, one at a time through the display's own route, so each item gets
       // the same zone check and duration rule as a single add. What is refused is named.
       addBulk: async (ids, extras) => {
         const added = []; const skipped = [];
         for (const id of ids) {
-          try { added.push(await api.addAssignment(device.id, payload({ type: 'content', id }, extras))); }
+          try { added.push(remember(await api.addAssignment(device.id, payload({ type: 'content', id }, extras)))); }
           catch (e) { skipped.push({ id, error: e.message }); }
         }
         return { added, skipped };
@@ -3425,12 +3589,52 @@ async function setupPlaylistActions(device) {
         const input = modal.querySelector('#assignDuration');
         if (input && !durationTouched) input.value = item.duration > 0 ? item.duration : 10;
       },
-      onClose: (changed) => { if (changed) loadDevice(device.id, 'playlist'); },
+      onClose: async (changed) => {
+        if (!changed) return;
+        if (isSimpleMode() && addedTo) await publishForSimpleMode(addedTo);
+        loadDevice(device.id, 'playlist');
+      },
     });
     picker.modal.querySelector('#assignDuration')?.addEventListener('input', () => { durationTouched = true; });
   });
 
   attachRemoveHandlers(device);
+}
+
+/*
+ * 3.0, simple menu mode: "add to this screen" means "show it on this screen". The draft/publish
+ * split is a power-user safety net (stage several edits, publish once), and to someone who has not
+ * met it, it looks like the add did nothing — the screen stays as it was behind an amber banner.
+ *
+ * Publishing goes through the ordinary endpoint, so the release policy still decides: with review
+ * turned on for the workspace it refuses (approval_required), and the draft and its Submit banner
+ * are left exactly as the full mode would show them. Full mode is unchanged.
+ */
+async function publishForSimpleMode(playlistId) {
+  try {
+    if (await publishOrSubmit(playlistId) === 'review') { showToast(t('device.simple.needs_review'), 'info'); return; }
+    showToast(t('device.simple.sent_to_screen'), 'success');
+    api.trackEvent('first_publish', { from: 'device_page' });
+  } catch (err) {
+    showToast(err.message || t('device.simple.publish_failed'), 'error');
+  }
+}
+
+/*
+ * 3.0: the layout this screen actually draws — its own, a schedule's, or (new) the layout of the
+ * playlist it plays (docs/layouts-and-campaigns.md). Zone pickers offer THAT layout's zones; the
+ * device's own setting is only the fallback for a playlist without one.
+ */
+function activeLayoutIdOf(device) {
+  return (device && device.resolved_layout && device.resolved_layout.id) || (device && device.layout_id) || null;
+}
+
+/* A line under the layout picker when something other than this setting decides the layout. */
+function layoutSourceNote(device) {
+  const r = device && device.resolved_layout;
+  if (!r || r.source === 'device') return '';
+  const key = r.source === 'playlist' ? 'layoutpl.device_from_playlist' : r.source === 'schedule' ? 'layoutpl.device_from_schedule' : 'layoutpl.device_from_mandate';
+  return `<div id="layoutSourceNote" style="font-size:12px;color:var(--text-muted);margin-top:4px">${esc(t(key, { name: r.name || '' }))}</div>`;
 }
 
 function attachRemoveHandlers(device) {
@@ -3444,7 +3648,7 @@ function attachRemoveHandlers(device) {
   // visibility is NOT gated on whether the zone list arrived (gating on that silently hid
   // the selector when the server payload lacked active_layout_zones — e.g. a stale server
   // during a deploy skew). Only a genuinely fullscreen device (no layout_id) has no zones.
-  if (device.layout_id) {
+  if (activeLayoutIdOf(device)) {
     // Show the selectors immediately; they become usable once zones populate below.
     document.querySelectorAll('.zone-select').forEach(s => { s.style.display = ''; });
     // Clicking an item's orphan warning badge scrolls to + focuses its zone-select.
@@ -3489,7 +3693,7 @@ function attachRemoveHandlers(device) {
       // change) — fetch the layout so the dropdowns still populate. A missing field must
       // never make the selector silently vanish.
       const token = localStorage.getItem('token');
-      fetch(`/api/layouts/${device.layout_id}`, { headers: { Authorization: `Bearer ${token}` } })
+      fetch(`/api/layouts/${activeLayoutIdOf(device)}`, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(layout => populateZoneSelects(layout.zones || []))
         .catch(e => console.warn('Zone dropdowns: layout fetch fallback failed:', e.message));
@@ -3864,6 +4068,7 @@ function updateDiagPanel(d) {
 }
 
 export function cleanup() {
+  if (forecastCleanup) { forecastCleanup(); forecastCleanup = null; }
   if (diagPollTimer) { clearInterval(diagPollTimer); diagPollTimer = null; }
   if (statusHandler) off('device-status', statusHandler);
   if (screenshotHandler) off('screenshot-ready', screenshotHandler);
@@ -3878,6 +4083,9 @@ export function cleanup() {
   if (remoteActive && currentDevice) stopRemote(currentDevice.id);
   // #talk: leaving the view ends any intercom (and tells the device to stop capturing its mic).
   if (talkClient && currentDevice) stopTalkSession(currentDevice.id);
+  // 3.0 screen share: stop polling the card. A running share is NOT ended here — it belongs to the
+  // page (its bar follows you around the dashboard) and ends when you stop it or close the tab.
+  if (screenShareCardDispose) { try { screenShareCardDispose(); } catch (e) {} screenShareCardDispose = null; }
   // Same reasoning as stopRemote above: an operator who navigates away has stopped watching, so
   // the display should stop talking. Must run BEFORE currentDevice is cleared.
   if (debugStreamOn && currentDevice) sendCommand(currentDevice.id, 'set_debug', { enabled: false });

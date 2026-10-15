@@ -21,6 +21,10 @@ const REQUIRED_COLUMNS = [
   ['users', 'must_change_password', "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"],
   ['users', 'role', null],
   ['users', 'plan_id', "ALTER TABLE users ADD COLUMN plan_id TEXT DEFAULT 'free'"],
+  // 3.0: every session check compares the JWT's tv claim against this (middleware/auth.js).
+  ['users', 'token_version', 'ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0'],
+  // 3.0: SCIM deactivation. Sessions and API tokens refuse a row where it is set (middleware/auth.js).
+  ['users', 'disabled_at', 'ALTER TABLE users ADD COLUMN disabled_at INTEGER'],
   /*
    * ⚠️ Every column the playlist resolver views name (lib/playlist-resolver-sql.js). The views are
    * recreated at the END of boot and SQLite rejects a CREATE VIEW naming a missing column — so a
@@ -36,6 +40,8 @@ const REQUIRED_COLUMNS = [
   ['devices', 'scheduled_layout_id', 'ALTER TABLE devices ADD COLUMN scheduled_layout_id TEXT'],
   ['workspaces', 'organization_id', 'ALTER TABLE workspaces ADD COLUMN organization_id TEXT'],
   ['playlists', 'workspace_id', 'ALTER TABLE playlists ADD COLUMN workspace_id TEXT'],
+  // 3.0 playlist layouts: the resolver's layout tier reads the PUBLISHED one.
+  ['playlists', 'published_layout_id', 'ALTER TABLE playlists ADD COLUMN published_layout_id TEXT'],
   // Corporate (head office) playlists — lib/corporate/schema-sql.js is the one definition.
   ...require('./corporate/schema-sql').REQUIRED_CORPORATE_COLUMNS,
 ];

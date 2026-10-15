@@ -1,6 +1,8 @@
 const express = require('express');
 const playReport = require('../lib/play-report');   // raw + rollup, one series across the seam
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const { db } = require('../db/database');
 
 // Phase 2.2g: scope reports to the caller's current workspace.
@@ -17,10 +19,37 @@ function getWorkspaceDeviceSubquery(req) {
   return { sql: ' AND device_id IN (SELECT id FROM devices WHERE workspace_id = ?)', params: [req.workspaceId] };
 }
 
+/*
+ * ⚠️ PLAY HISTORY IS SCOPED ON THE SNAPSHOTTED pl.workspace_id, NOT THE DEVICE'S CURRENT ONE.
+ * Filtering on d.workspace_id handed a moved screen's whole history to its new workspace (and hid
+ * it from the old one) — the same leak lib/play-report's note describes for /summary. A NULL
+ * snapshot is only a play from before the device was in any workspace (the boot backfill gave every
+ * other legacy row its device's workspace), so those alone fall back to current membership: nobody
+ * owned them at play time, and that is exactly what the backfill would have attributed.
+ */
+function getPlayLogScope(req) {
+  if (!req.workspaceId) return { sql: ' AND 1=0', params: [] };
+  return {
+    sql: ' AND (pl.workspace_id = ? OR (pl.workspace_id IS NULL AND d.workspace_id = ?))',
+    params: [req.workspaceId, req.workspaceId],
+  };
+}
+
+/*
+ * ⚠️ One CSV cell: quotes doubled (a `"` in a content name used to break out of its cell), and a
+ * value starting with = + - @ TAB or CR is prefixed with ' so Excel/Sheets treat it as text rather
+ * than a formula. Content and device names are user-supplied; the export is opened by someone else.
+ */
+function csvCell(value) {
+  let s = value === null || value === undefined ? '' : String(value);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return '"' + s.replace(/"/g, '""') + '"';
+}
+
 // Query play logs
 router.get('/plays', (req, res) => {
   const { device_id, content_id, start, end, limit: lim } = req.query;
-  const scope = getWorkspaceDeviceFilter(req);
+  const scope = getPlayLogScope(req);
   let sql = `SELECT pl.*, d.name as device_name
     FROM play_logs pl
     JOIN devices d ON pl.device_id = d.id
@@ -208,7 +237,7 @@ router.get('/export', (req, res) => {
   if (!range) return;
   const { startEpoch, endEpoch } = range;
 
-  const scope = getWorkspaceDeviceFilter(req);
+  const scope = getPlayLogScope(req);
   let sql = `SELECT pl.*, d.name as device_name FROM play_logs pl JOIN devices d ON pl.device_id = d.id WHERE pl.started_at >= ? AND pl.started_at <= ?${scope.sql}`;
   const params = [startEpoch, endEpoch, ...scope.params];
   if (device_id) { sql += ' AND pl.device_id = ?'; params.push(device_id); }
@@ -220,7 +249,7 @@ router.get('/export', (req, res) => {
   const csv = header + rows.map(r => {
     const started = new Date(r.started_at * 1000).toISOString();
     const ended = r.ended_at ? new Date(r.ended_at * 1000).toISOString() : '';
-    return `"${r.device_name}","${r.content_name}","${started}","${ended}",${r.duration_sec || ''},${r.completed ? 'Yes' : 'No'}`;
+    return `${csvCell(r.device_name)},${csvCell(r.content_name)},"${started}","${ended}",${r.duration_sec || ''},${r.completed ? 'Yes' : 'No'}`;
   }).join('\n');
 
   res.setHeader('Content-Type', 'text/csv');
@@ -228,6 +257,9 @@ router.get('/export', (req, res) => {
   res.send(csv);
 });
 
+// ⚠️ Uptime still scopes by the device's CURRENT workspace: device_telemetry has no snapshotted
+// workspace_id (that needs a schema change), so a moved screen's heartbeats follow it. Low impact —
+// counts and timestamps only, no content — but not the same guarantee as the play-log routes above.
 // Device uptime report. Phase 2.2g: workspace-scoped. Previously this route
 // had no scope filter at all - any authenticated user could see telemetry
 // summaries for every device on the platform. The added WHERE clause closes
@@ -267,3 +299,4 @@ router.get('/uptime', (req, res) => {
 module.exports = router;
 // Exported for tests: the parsing rule is the bug, so it is tested directly.
 module.exports.parseRangeParam = parseRangeParam;
+module.exports.csvCell = csvCell;

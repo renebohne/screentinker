@@ -26,10 +26,9 @@ const os = require('node:os');
 const DRIVER = path.join(__dirname, '..', 'db', 'sqlite-driver.js');
 
 /*
- * ⚠️ NODE 24 IN PRACTICE. node:sqlite is unflagged only from Node 23.4; on 22.x it needs
- * --experimental-sqlite and on 20.x it does not exist. CI currently runs the suite on Node 20, so
- * the built-in-driver cases SKIP there rather than fail - a skip says "not checked here", which is
- * true, where a failure would say "broken", which is not.
+ * node:sqlite is unflagged from Node 22.13 and does not exist on 20.x. Where it is missing the
+ * built-in-driver cases SKIP rather than fail - a skip says "not checked here", which is true,
+ * where a failure would say "broken", which is not.
  *
  * The fallback is genuinely exercised by the separate Node 24 CI job that runs this whole suite with
  * ST_SQLITE_DRIVER=node. If that job is ever dropped, these tests go quiet everywhere and the player's

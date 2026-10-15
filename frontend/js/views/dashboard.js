@@ -1,4 +1,6 @@
 import { api } from '../api.js';
+import { isSimpleMode } from '../components/ui-mode.js';
+import { plansVisible } from '../components/plan-nudges.js';
 import { on, off, requestScreenshot, startGroupTalk, stopGroupTalk } from '../socket.js';
 import { BroadcastTalkClient } from '../lib/talk-client.js';
 import { showToast } from '../components/toast.js';
@@ -15,6 +17,8 @@ import { frameDeviceOutput } from '../lib/device-frame.js';
 import { selectedRemoteOrg } from '../components/workspace-switcher.js';
 import * as cui from '../components/corporate-ui.js';
 import { openDeviceMoveDialog } from '../components/device-move-dialog.js';
+import * as screenVerify from '../components/screen-verify.js';
+import { wireGroupShareButtons } from '../components/screen-share.js';   // 3.0 multi share
 
 const DESTRUCTIVE_COMMANDS = ['reboot', 'shutdown'];
 // Command types only — labels resolved through t('dashboard.cmd.<type>')
@@ -208,6 +212,15 @@ function applyCardFields(root) {
   for (const f of CARD_FIELDS) root.classList.toggle(`hide-card-${f}`, hidden.includes(f));
 }
 
+let mirrorCounts = new Map();   // original id -> number of mirrors in the loaded list
+
+function mirrorBadge(device) {
+  const n = mirrorCounts.get(device.id) || 0;
+  const label = device.mirror_of ? t('dashboard.mirror_badge') : (n ? tn('dashboard.mirrors_badge', n) : '');
+  if (!label) return '';
+  return ` <span class="device-mirror-badge" title="${esc(t('dashboard.mirror_badge_tip'))}" style="margin-left:6px;font-size:11px;color:var(--text-secondary);background:var(--bg-primary);padding:1px 6px;border-radius:8px;vertical-align:middle">${esc(label)}</span>`;
+}
+
 function renderDeviceCard(device) {
   const token = localStorage.getItem('token');
   // ⚠️ NOT named screenshotUrl: that is the imported helper, and a const of the same name shadows
@@ -258,14 +271,18 @@ function renderDeviceCard(device) {
         </div>
       </div>
       <div class="device-card-body">
-        <div class="device-card-name">${esc(device.name)}${device.orphan_count > 0 ? `
+        <div class="device-card-name">${esc(device.name)}${mirrorBadge(device)}${device.orphan_count > 0 ? `
           <span class="device-orphan-badge" title="${tn('dashboard.device_orphan_tip', device.orphan_count)}" style="margin-left:6px;display:inline-flex;align-items:center;gap:3px;font-size:11px;color:var(--danger);vertical-align:middle">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>${device.orphan_count}
           </span>` : ''}${device.ota_status === 'manual_update_required' ? `
           <span class="device-ota-badge" title="${esc(t('dashboard.device_ota_stuck', { version: device.ota_target_version || '?', n: device.ota_attempts || 0 }))}" style="margin-left:6px;display:inline-flex;align-items:center;gap:3px;font-size:11px;color:var(--warning);vertical-align:middle">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>update
-          </span>` : ''}</div>${Array.isArray(device.tags) && device.tags.length ? `
+          </span>` : ''}</div>
+        <div class="device-card-verify" data-sv-device="${esc(device.id)}"></div>${Array.isArray(device.tags) && device.tags.length ? `
         <div class="device-card-tags" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:2px">${device.tags.slice(0, 4).map((tg) => `<span style="font-size:10px;color:var(--text-secondary);background:var(--bg-primary);padding:1px 6px;border-radius:8px">#${esc(tg)}</span>`).join('')}${device.tags.length > 4 ? `<span style="font-size:10px;color:var(--text-muted)">+${device.tags.length - 4}</span>` : ''}</div>` : ''}
+        ${device.plan_paused ? (plansVisible()
+          ? `<a class="device-plan-paused" href="#/billing?from=paused_screen" onclick="event.stopPropagation()">⏸ ${esc(t(device.plan_paused.reason === 'trial_expired' ? 'dashboard.plan_paused.trial_expired' : 'dashboard.plan_paused.device_limit'))}</a>`
+          : `<span class="device-plan-paused">⏸ ${esc(t('dashboard.plan_paused.device_limit'))}</span>`) : ''}
         ${device.owner_name || device.owner_email ? `<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-1px">
             <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
@@ -439,6 +456,10 @@ function renderGroupSection(group, devices, playlists) {
                   style="padding:4px 8px;font-size:12px;white-space:nowrap" title="${esc(t('power.section_title'))}">
             ${t('power.group_button')}
           </button>
+          <!-- 3.0 multi share: revealed by wireGroupShareButtons when the feature is on and a member can show one. -->
+          <button type="button" class="btn btn-secondary btn-sm" data-group-share="${esc(group.id)}" data-group-name="${esc(group.name)}"
+                  data-share-capable="${devices.filter((d) => Array.isArray(d.capabilities) && d.capabilities.includes('remote.screen_share')).length}"
+                  style="display:none;padding:4px 8px;font-size:12px;white-space:nowrap">&#128421;&#65039; ${esc(t('screen_share.group.button'))}</button>
           <label class="group-sync-label" style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-secondary);cursor:pointer;white-space:nowrap" title="${esc(t('dashboard.group_sync.hint'))}">
             <input type="checkbox" class="group-sync-cb" data-group-id="${group.id}" ${group.sync_enabled ? 'checked' : ''}> ${t('dashboard.group_sync.label')}
           </label>
@@ -533,7 +554,7 @@ function renderSelectionBar(scope, groupId = null) {
  * and only while the decision is genuinely unmade — BOTH answers persist, so it never returns
  * after an update. Re-prompting is how telemetry earns its reputation and gets patched out.
  */
-async function renderStatsPrompt(container) {
+export async function renderStatsPrompt(container) {
   const user = JSON.parse(localStorage.getItem('user') || '{}');
   if (!isPlatformAdmin(user)) return;
 
@@ -546,16 +567,12 @@ async function renderStatsPrompt(container) {
   el.style.cssText = 'margin-bottom:16px;display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap';
   el.innerHTML = `
     <div style="flex:1;min-width:260px">
-      <strong>Help show how widely ScreenTinker is deployed?</strong>
-      <p style="color:var(--text-muted);font-size:13px;margin:6px 0 0">
-        Because most installs are private, we can't tell how many screens are out there. Sharing
-        sends a random ID, the version, and how many screens you run — nothing else, ever.
-        You can change this any time in Settings.
-      </p>
+      <strong>${esc(t('stats.prompt.title'))}</strong>
+      <p style="color:var(--text-muted);font-size:13px;margin:6px 0 0">${esc(t('stats.prompt.body'))}</p>
     </div>
     <div style="display:flex;gap:8px">
-      <button class="btn btn-primary btn-sm" id="statsYes">Share</button>
-      <button class="btn btn-secondary btn-sm" id="statsNo">No thanks</button>
+      <button class="btn btn-primary btn-sm" id="statsYes">${esc(t('stats.prompt.share'))}</button>
+      <button class="btn btn-secondary btn-sm" id="statsNo">${esc(t('stats.prompt.no'))}</button>
     </div>
   `;
   container.prepend(el);
@@ -563,7 +580,7 @@ async function renderStatsPrompt(container) {
   const answer = async (enabled) => {
     try { await api.adminSetTelemetry(enabled); } catch { /* leave it unasked; it can ask again later */ return; }
     el.remove();
-    if (enabled) showToast('Thank you — sharing install statistics', 'success');
+    if (enabled) showToast(t('stats.prompt.thanks'), 'success');
   };
   el.querySelector('#statsYes').addEventListener('click', () => answer(true));
   el.querySelector('#statsNo').addEventListener('click', () => answer(false));
@@ -576,14 +593,14 @@ export function render(container) {
         <h1>${t('dashboard.title')} <span class="help-tip" data-tip="${t('dashboard.help_tip')}">?</span></h1>
         <div class="subtitle">${t('dashboard.subtitle')}</div>
       </div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
         <!-- #talk broadcast: PA to every device in the workspace. Hidden until we confirm live video
              is available (see wireTalkScopeButtons). -->
         <button class="btn btn-secondary talk-scope-btn" data-scope-kind="workspace" style="display:none">🎙️ ${t('dashboard.talk_all')}</button>
         <!-- #312 follow-up: move EVERY device in the workspace to a new server address. Shown only to
              a workspace admin (server also enforces it); opens a warning + type-to-commit modal.
              Each panel verifies-then-commits and rolls back an unreachable address. -->
-        ${currentWorkspaceCanAdmin() ? `<button class="btn btn-secondary" id="wsSetServerUrlBtn" title="${t('dashboard.ws_set_server_url_tip')}">🔗 ${t('dashboard.ws_set_server_url')}</button>` : ''}
+        ${currentWorkspaceCanAdmin() ? `<button class="btn btn-secondary" id="wsSetServerUrlBtn" data-advanced-ui title="${t('dashboard.ws_set_server_url_tip')}">🔗 ${t('dashboard.ws_set_server_url')}</button>` : ''}
         <button class="btn btn-primary" id="addDeviceBtn">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
@@ -595,7 +612,9 @@ export function render(container) {
     <div id="whatsNew"></div>
     <div id="gettingStarted"></div>
       <div id="dashStats" class="dash-stats-row" style="display:flex;gap:12px;margin-bottom:16px"></div>
-    <div style="display:flex;gap:12px;margin-bottom:16px;align-items:center">
+    <!-- 3.0: .dash-toolbar wraps, and stacks at phone width (main.css); the power-user filters are
+         data-advanced-ui, hidden in the simple menu mode (components/ui-mode.js). -->
+    <div class="dash-toolbar">
       <input type="text" id="deviceSearch" class="input" placeholder="${t('dashboard.search')}" style="max-width:300px">
       <select id="deviceFilter" class="input" style="width:180px;background:var(--bg-input)">
         <option value="">${t('dashboard.all_status')}</option>
@@ -610,7 +629,7 @@ export function render(container) {
         <optgroup id="versionFilterGroup" label="${t('dashboard.filter.by_version')}" hidden></optgroup>
       </select>
       <select id="deviceTagFilter" class="input" style="width:160px;background:var(--bg-input)" hidden title="${esc(t('dashboard.filter.by_tag'))}"></select>
-      <details class="card-fields-menu" id="cardFieldsMenu">
+      <details class="card-fields-menu" id="cardFieldsMenu" data-advanced-ui>
         <summary class="btn btn-secondary btn-sm">${t('dashboard.card_fields')}</summary>
         <div class="card-fields-pop">
           ${['version', 'battery', 'wifi', 'storage'].map((f) => `
@@ -619,7 +638,7 @@ export function render(container) {
       </details>
       <!-- #106 reordering has existed since 2.1, and a customer still asked "is it possible to
            reorder the screens?". A feature nobody can see is a feature nobody has. -->
-      <span style="font-size:12px;color:var(--text-muted);margin-left:auto">${t('dashboard.drag_hint')}</span>
+      <span class="dash-drag-hint" data-advanced-ui>${t('dashboard.drag_hint')}</span>
     </div>
     <div id="groupedDevices"></div>
   `;
@@ -645,6 +664,9 @@ export function render(container) {
 
   const addBtn = container.querySelector('#addDeviceBtn');
   addBtn.addEventListener('click', () => {
+    // 3.0: Simple view adds a screen with the same step-by-step guide as the first one (open the
+    // player, connect, choose what it shows). Advanced view keeps this dialog and its options.
+    if (isSimpleMode()) { window.location.hash = '#/add-screen'; return; }
     document.getElementById('addDeviceModal').style.display = 'flex';
     resetAddDeviceDialog();   // #313: a previous create must not leave the dialog on its result panel
     document.getElementById('pairingCodeInput').value = '';
@@ -750,6 +772,7 @@ export function render(container) {
         showWebPlayerUrl(r.player_url);
         loadDashboard();
       } catch (err) {
+        if (err.planPromptShown) { document.getElementById('addDeviceModal').style.display = 'none'; return; }
         showToast(err.message, 'error');
       }
       return;
@@ -765,7 +788,11 @@ export function render(container) {
       document.getElementById('addDeviceModal').style.display = 'none';
       showToast(t('dashboard.toast.display_paired'), 'success');
       loadDashboard();
+      // 3.0: the first screen is the moment a trial becomes real; plan-nudges says what is next.
+      window.dispatchEvent(new CustomEvent('st:screen-paired'));
     } catch (err) {
+      // A plan limit is answered by the upgrade prompt (plan-nudges.js); the dialog gets out of its way.
+      if (err.planPromptShown) { document.getElementById('addDeviceModal').style.display = 'none'; return; }
       showToast(err.message, 'error');
     }
   };
@@ -972,6 +999,7 @@ export function render(container) {
 
   on('device-status', statusHandler);
   on('screenshot-ready', screenshotHandler);
+  on('verification-state', screenVerify.applyLiveState);
   on('device-added', deviceAddedHandler);
   on('device-removed', deviceRemovedHandler);
   on('playback-progress', playbackHandler);
@@ -1182,6 +1210,9 @@ async function loadDashboard() {
     const seen = new Map();
     for (const d of rawDevices) seen.set(d.id, d);
     const devices = Array.from(seen.values());
+    // 3.0 display-link mirrors: "+2 mirrors" on an original's card, "Mirror" on each mirror's.
+    mirrorCounts = new Map();
+    for (const d of devices) if (d.mirror_of) mirrorCounts.set(d.mirror_of, (mirrorCounts.get(d.mirror_of) || 0) + 1);
     await loadServedApkVersion();   // #467: before any card renders, so "behind" is decided once
     fillVersionFilter(devices);
     fillTagFilter(devices);
@@ -1194,7 +1225,9 @@ async function loadDashboard() {
     const wnHost = document.getElementById('whatsNew');
     if (wnHost) {
       wnHost.style.display = 'none';
-      if (whatsNew.shouldFetch()) {
+      // 3.0: "what's new" is news only to someone who used the last version. An account with no
+      // screens yet gets the getting-started checklist below instead, not a changelog.
+      if (devices.length > 0 && whatsNew.shouldFetch()) {
         try {
           const notes = await whatsNew.fetchNotes();
           if (notes) whatsNew.render(wnHost, notes);
@@ -1336,6 +1369,8 @@ async function loadDashboard() {
 
     main.innerHTML = html;
     frameCardScreenshots();
+    // Screen verification badges fill in after the cards; a failure there leaves the cards as they are.
+    screenVerify.decorateCards(main);
     mountWallCards(walls || [], devices);
     attachGroupHandlers(groupsWithDevices);
 
@@ -1375,6 +1410,7 @@ function attachGroupHandlers(groupsWithDevices) {
       });
     });
   });
+  wireGroupShareButtons(document);   // 3.0 multi share: "Share my screen to this group"
   document.querySelectorAll('.group-power-btn').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1829,6 +1865,7 @@ export function cleanup() {
 
   if (statusHandler) off('device-status', statusHandler);
   if (screenshotHandler) off('screenshot-ready', screenshotHandler);
+  off('verification-state', screenVerify.applyLiveState);
   if (playbackHandler) off('playback-progress', playbackHandler);
   if (wallChangedHandler) off('wall-changed', wallChangedHandler);
   if (connectedHandler) off('connected', connectedHandler);

@@ -101,10 +101,12 @@ function _resetKeyCache() { cachedPublicKey = null; }
 // out over the phone. 16 symbols = 80 bits: far past guessing within a 24h window under the
 // per-IP limiter, and still short enough to type.
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789';
+// randomInt, not `byte % 30`: 256 is not a multiple of 30, so the modulo made the first 16 symbols
+// ~1.2x likelier than the rest. randomInt rejection-samples, so every symbol is equally likely.
+// Same alphabet, same length, same XXXX-XXXX-XXXX-XXXX shape: normaliseRequestCode is unchanged.
 function newRequestCode() {
-  const bytes = crypto.randomBytes(16);
   let s = '';
-  for (let i = 0; i < 16; i++) s += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
+  for (let i = 0; i < 16; i++) s += CODE_ALPHABET[crypto.randomInt(CODE_ALPHABET.length)];
   return s.match(/.{4}/g).join('-');
 }
 
@@ -242,8 +244,29 @@ function listActiveGrants(now = Math.floor(Date.now() / 1000)) {
   ).all(now);
 }
 
-function revokeGrant(jti) { return db.prepare('DELETE FROM support_grants WHERE jti = ?').run(jti).changes; }
-function revokeAllGrants() { return db.prepare('DELETE FROM support_grants').run().changes; }
+/*
+ * ⚠️ Revoking also closes the session's open dashboard sockets. HTTP refuses on the next request
+ * (resolveSessionUser checks the row), but a socket authenticated once at its handshake, so a
+ * revoked support engineer kept live device events and, until the write re-check, fleet control.
+ * Lazy require: ws/dashboardSocket pulls in the socket stack, which this module must not load.
+ */
+function closeSupportSockets(jtis) {
+  try {
+    const { disconnectUserSockets } = require('../ws/dashboardSocket');
+    for (const jti of jtis) disconnectUserSockets(SUPPORT_ID_PREFIX + jti);
+  } catch (_) { /* best-effort: the write-tier re-check still refuses */ }
+}
+function revokeGrant(jti) {
+  const n = db.prepare('DELETE FROM support_grants WHERE jti = ?').run(jti).changes;
+  if (n) closeSupportSockets([jti]);
+  return n;
+}
+function revokeAllGrants() {
+  const jtis = db.prepare('SELECT jti FROM support_grants').all().map((r) => r.jti);
+  const n = db.prepare('DELETE FROM support_grants').run().changes;
+  closeSupportSockets(jtis);
+  return n;
+}
 
 /** Housekeeping only; every reader already refuses expired rows. */
 function pruneExpired(now = Math.floor(Date.now() / 1000), graceSec = 30 * 86400) {

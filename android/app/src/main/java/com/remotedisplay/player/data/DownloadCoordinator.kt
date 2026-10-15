@@ -38,8 +38,13 @@ class DownloadCoordinator(
     private val socketAlive: () -> Boolean,
     private val onAck: (contentId: String, status: String) -> Unit,
     private val executor: ExecutorService = Executors.newFixedThreadPool(MAX_CONCURRENT),
-    private val now: () -> Long = { SystemClock.elapsedRealtime() }
+    private val now: () -> Long = { SystemClock.elapsedRealtime() },
+    /** 3.0 site cache: the LAN box from the latest payload, or null (docs/site-cache.md). */
+    private val siteCache: () -> SiteCacheConfig? = { null }
 ) {
+    /* A content id the box failed for is not tried there again for a while: the origin has it. */
+    private val siteSkipUntil = ConcurrentHashMap<String, Long>()
+
     private val inFlight = Collections.synchronizedSet(HashSet<String>())
     private val attempts = ConcurrentHashMap<String, Int>()
     private val nextAttemptAt = ConcurrentHashMap<String, Long>()
@@ -78,6 +83,18 @@ class DownloadCoordinator(
      */
     private fun runDownload(contentId: String, filename: String, rev: Long) {
         try {
+            // 3.0 site cache first: verified against the origin's sha256, and any failure simply
+            // falls through to the origin path below, unchanged.
+            val site = try { siteCache() } catch (_: Throwable) { null }
+            val entry = site?.entryFor(contentId)
+            if (site != null && entry != null && now() >= (siteSkipUntil[contentId] ?: 0L)) {
+                if (cache.fetchFromSiteCache(site, entry, contentId, filename, rev) is ContentCache.Result.Done) {
+                    attempts.remove(contentId); nextAttemptAt.remove(contentId); siteSkipUntil.remove(contentId)
+                    if (socketAlive()) onAck(contentId, "ready")
+                    return
+                }
+                siteSkipUntil[contentId] = now() + SITE_SKIP_MS
+            }
             var link = 0
             while (link < MAX_RESUME_CHAIN) {
                 link++
@@ -168,5 +185,7 @@ class DownloadCoordinator(
          */
         const val MAX_RESUME_CHAIN = 12
         const val RESUME_HANDBACK_MS = 5_000L
+        /** After the site cache failed for an item, the origin serves it for this long. */
+        const val SITE_SKIP_MS = 10 * 60_000L
     }
 }

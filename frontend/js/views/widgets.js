@@ -50,6 +50,7 @@ import { pluginFieldsHtml, readPluginFields } from '../lib/plugin-fields.js';
 import { mountMenuEditor, readMenuConfig } from '../components/menu-board-editor.js';
 import { mountBiEditor, readBiConfig } from '../components/bi-dashboard-editor.js';
 import { mountSocialEditor, readSocialConfig } from '../components/social-wall-editor.js';
+import { mountFeedPicker, readFeedPicker } from '../components/news-feed-picker.js';
 import { mountRoomEditor, readRoomConfig } from '../components/room-display-editor.js';
 
 // A refused request must reject, not resolve.
@@ -713,8 +714,14 @@ export async function render(container) {
         break;
       case 'rss':
         html += `
-          <div class="form-group"><label>${t('widget.field.feed_url')}</label><input type="text" id="wFeedUrl" class="input" value="${escAttr(config.feed_url || '')}" placeholder="https://example.com/feed.xml"></div>
-          <div class="form-group"><label>${t('widget.field.scroll_speed_seconds')}</label><input type="number" id="wScrollSpeed" class="input" value="${escAttr(config.scroll_speed || 30)}"></div>
+          <!-- 3.0 news feeds: a site or a feed, read by the server (components/news-feed-picker.js). -->
+          <div class="form-group" id="wFeedPicker"></div>
+          <div class="form-group"><label>${t('news.field.layout')}</label><select id="wNewsLayout" class="input" style="background:var(--bg-input)">
+            <option value="ticker" ${config.layout !== 'headlines' ? 'selected' : ''}>${t('news.layout.ticker')}</option>
+            <option value="headlines" ${config.layout === 'headlines' ? 'selected' : ''}>${t('news.layout.headlines')}</option></select></div>
+          <div class="form-group" data-news-look="ticker"><label>${t('widget.field.scroll_speed_seconds')}</label><input type="number" id="wScrollSpeed" class="input" value="${escAttr(config.scroll_speed || 30)}"></div>
+          <div class="form-group" data-news-look="headlines"><label>${t('news.field.interval')}</label><input type="number" id="wNewsInterval" class="input" min="3" max="300" value="${escAttr(config.interval_sec || 10)}"></div>
+          <div class="form-group"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="wNewsImages" ${config.show_images === false ? '' : 'checked'}> ${t('news.field.show_images')}</label></div>
           <div class="form-group"><label>${t('widget.field.max_items')}</label><input type="number" id="wMaxItems" class="input" value="${escAttr(config.max_items || 10)}"></div>
           <div class="form-group"><label>${t('widget.field.font_size')}</label><input type="number" id="wFontSize" class="input" value="${escAttr(config.font_size || 24)}"></div>
           <div class="form-group"><label>${t('widget.field.color')}</label><input type="color" id="wColor" value="${escAttr(config.color || '#FFFFFF')}" style="width:60px;height:32px;border:none"></div>
@@ -945,6 +952,14 @@ export async function render(container) {
 
     if (type === 'menu-board') mountMenuEditor(document.getElementById('wMenuEditor'), config, { apiGet: (u) => API(u) });
     if (type === 'cloud-doc') initCloudDocForm();
+    if (type === 'rss') mountFeedPicker(document.getElementById('wFeedPicker'), { url: config.feed_url || '', mode: config.feed_mode });
+    // Show only the settings of the chosen look (scroll speed for the ticker, seconds per headline for headlines).
+    const newsLook = document.getElementById('wNewsLayout');
+    if (newsLook) {
+      const syncLook = () => document.querySelectorAll('[data-news-look]').forEach((el) => { el.style.display = el.dataset.newsLook === newsLook.value ? '' : 'none'; });
+      newsLook.addEventListener('change', syncLook);
+      syncLook();
+    }
     if (type === 'bi-dashboard') mountBiEditor(document.getElementById('wBiEditor'), config, { apiGet: (u) => API(u) });
     if (type === 'social') mountSocialEditor(document.getElementById('wSocialEditor'), config, { apiGet: (u) => API(u) });
     if (type === 'room-display') mountRoomEditor(document.getElementById('wRoomEditor'), config, {
@@ -1438,7 +1453,12 @@ export async function render(container) {
         layout: val('wLayout') || 'vertical',
         show_location: document.getElementById('wShowLocation') ? document.getElementById('wShowLocation').checked : true,
         locale: (val('wWeatherLocale') || '').trim() }); break;
-      case 'rss': Object.assign(config, { feed_url: val('wFeedUrl'), scroll_speed: parseInt(val('wScrollSpeed')) || 30, max_items: parseInt(val('wMaxItems')) || 10, font_size: parseInt(val('wFontSize')) || 24, color: val('wColor'), background: val('wBg') }); break;
+      case 'rss': Object.assign(config, readFeedPicker(document.getElementById('wFeedPicker')), {
+        layout: val('wNewsLayout') === 'headlines' ? 'headlines' : 'ticker',
+        scroll_speed: parseInt(val('wScrollSpeed')) || 30,
+        interval_sec: Math.min(300, Math.max(3, parseInt(val('wNewsInterval')) || 10)),
+        show_images: document.getElementById('wNewsImages') ? document.getElementById('wNewsImages').checked : true,
+        max_items: parseInt(val('wMaxItems')) || 10, font_size: parseInt(val('wFontSize')) || 24, color: val('wColor'), background: val('wBg') }); break;
       case 'text': Object.assign(config, { html: val('wHtml'), css: val('wCss'), background: val('wBg') }); break;
       case 'webpage': {
         // Start from what the form was filled from: keys it has no field for are kept, not dropped.

@@ -43,8 +43,20 @@ export function requestError(status, body) {
       if (needed.every((k) => vars[k])) msg = t(key, vars);
     }
   }
-  return Object.assign(new Error(msg), { status, code, body: b });
+  const err = Object.assign(new Error(msg), { status, code, body: b });
+  /*
+   * 3.0: a plan limit is a moment to explain, not just an error. The upgrade prompt
+   * (components/plan-nudges.js) listens for this and calls preventDefault() when it takes over —
+   * hosted only; on a self-hosted instance nothing listens and the caller's toast stands. Callers
+   * check err.planPromptShown before toasting, so the person never gets both.
+   */
+  if (status === 403 && PLAN_LIMIT_CODES.has(code) && typeof window !== 'undefined' && typeof window.dispatchEvent === 'function'
+      && typeof CustomEvent === 'function') {
+    err.planPromptShown = !window.dispatchEvent(new CustomEvent('st:plan-limit', { cancelable: true, detail: { code, body: b } }));
+  }
+  return err;
 }
+const PLAN_LIMIT_CODES = new Set(['DEVICE_LIMIT', 'STORAGE_LIMIT', 'FEATURE_LOCKED']);
 
 export function getAuthHeaders() {
   const token = localStorage.getItem('token');
@@ -317,6 +329,15 @@ export function meshCapability(which) {
   return u.mesh[which];
 }
 
+// 3.0: a password or 2FA change revokes every session server-side (token_version) and returns a
+// fresh token for this one. Store it, or the tab that made the change would be signed out next.
+function keepSession(r) {
+  if (r && typeof r.token === 'string' && r.token) {
+    try { localStorage.setItem('token', r.token); } catch { /* storage blocked: next request re-auths */ }
+  }
+  return r;
+}
+
 export const api = {
   /*
    * ⚠️ GENERIC VERBS. Everything else here is a named helper, which is the right shape for a
@@ -331,6 +352,35 @@ export const api = {
    */
   get: (path) => request(path),
   post: (path, body) => request(path, { method: 'POST', body: JSON.stringify(body ?? {}) }),
+
+  // Free stock photos and videos (server routes/stock-media.js). The provider keys stay on the
+  // server: the browser only ever sees results and the library items an import creates.
+  stockStatus: () => request('/stock/status'),
+  stockSearch: ({ provider = '', type = 'photo', q = '', page = 1, orientation = '' } = {}) => {
+    const p = new URLSearchParams({ type, q, page: String(page) });
+    if (provider) p.set('provider', provider);
+    if (orientation) p.set('orientation', orientation);
+    return request(`/stock/search?${p.toString()}`);
+  },
+  stockImport: ({ provider, type, id, folderId = null }) => request('/stock/import',
+    { method: 'POST', body: JSON.stringify({ provider, type, id, ...(folderId ? { folder_id: folderId } : {}) }) }),
+  adminGetStockKeys: () => request('/stock/settings'),
+  adminSetStockKey: (provider, key) => request('/stock/settings', { method: 'PUT', body: JSON.stringify({ provider, key }) }),
+  adminTestStockKey: (provider) => request('/stock/settings/test', { method: 'POST', body: JSON.stringify({ provider }) }),
+
+  // 3.0 switch to ScreenTinker (server routes/migrate.js). The other vendor's key goes up once, in
+  // the connect (or resume) body, and is never returned.
+  migrateVendors: () => request('/migrate/vendors'),
+  migrateJobs: () => request('/migrate/jobs'),
+  migrateJob: (id) => request(`/migrate/jobs/${encodeURIComponent(id)}`),
+  migrateConnect: (vendor, credentials) => request('/migrate/jobs', { method: 'POST', body: JSON.stringify({ vendor, credentials }) }),
+  migrateUpload: (formData) => api.postForm('/migrate/jobs/upload', formData),
+  migrateRun: (id, options, credentials = null) => request(`/migrate/jobs/${encodeURIComponent(id)}/run`,
+    { method: 'POST', body: JSON.stringify({ ...(options ? { options } : {}), ...(credentials ? { credentials } : {}) }) }),
+  migrateCancel: (id) => request(`/migrate/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
+  migratePlaceholders: () => request('/migrate/placeholders'),
+  migrateLinkPlaceholder: (id, deviceId) => request(`/migrate/placeholders/${encodeURIComponent(id)}/link`, { method: 'POST', body: JSON.stringify({ device_id: deviceId }) }),
+  migrateDeletePlaceholder: (id) => request(`/migrate/placeholders/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   // Triggers: the listener settings, and the secret. Separate calls because they are separate
   // decisions — rotating the credential that lets a LAN datagram change a screen must not be a
@@ -394,6 +444,11 @@ export const api = {
   reorderDevices: (order) => request('/devices/reorder', { method: 'POST', body: JSON.stringify({ order }) }),
   getDevice: (id) => request(`/devices/${id}`),
   getDeviceDiagnosticLogs: (id) => request(`/devices/${id}/diagnostic-logs`),
+  // "What will this screen show at…?" (docs/preview-at-time.md). `extra` carries an optional
+  // what-if weather ({ weather: 'rain', temp_c: 12 }).
+  simulateDevice: (id, at, extra = {}) => request(`/devices/${id}/simulate?${new URLSearchParams({ at, ...extra })}`),
+  deviceTimeline: (id, from, to, extra = {}) => request(`/devices/${id}/timeline?${new URLSearchParams({ from, ...(to ? { to } : {}), ...extra })}`),
+  simulateGroup: (id, at) => request(`/groups/${id}/simulate?${new URLSearchParams({ at })}`),
   getDeviceOwnerQR: () => request('/provision/device-owner-qr'),   // #161: device-owner provisioning
   updateDevice: (id, data) => request(`/devices/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteDevice: (id) => request(`/devices/${id}`, { method: 'DELETE' }),
@@ -467,6 +522,45 @@ export const api = {
   getContentItem: (id) => request(`/content/${id}`),
   deleteContent: (id) => request(`/content/${id}`, { method: 'DELETE' }),
   updateContent: (id, data) => request(`/content/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  /*
+   * 3.0 content freshness (routes/freshness.js). The page's one-click actions (replace, remove, set
+   * an expiry) are NOT here: they use updateContent and the library's own replace, so approval and
+   * publishing apply exactly as they do from the library.
+   */
+  /*
+   * 3.0 energy & carbon (routes/energy.js, docs/energy.md). Estimates, not metering. The CSV and
+   * appendix downloads go through downloadEnergyFile below (a bearer header cannot ride on a link).
+   */
+  getEnergyReport: (start, end) => request(`/energy/report?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`),
+  getEnergySuggestions: (start, end, days) => request(`/energy/suggestions?start=${start}&end=${end}${days ? `&days=${encodeURIComponent(days)}` : ''}`),
+  getEnergyGlance: () => request('/energy/glance'),
+  getEnergyDevices: () => request('/energy/devices'),
+  setEnergyDevice: (id, body) => request(`/energy/devices/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  setEnergyGroup: (id, body) => request(`/energy/groups/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  getEnergySettings: () => request('/energy/settings'),
+  updateEnergySettings: (body) => request('/energy/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  getEnergyOrg: (start, end) => request(`/energy/org?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`),
+  getFreshness: () => request('/freshness'),
+  getFreshnessChips: () => request('/freshness/chips'),
+  updateFreshnessSettings: (data) => request('/freshness/settings', { method: 'PUT', body: JSON.stringify(data) }),
+  snoozeFreshness: (type, id, days) => request('/freshness/snooze', { method: 'POST', body: JSON.stringify({ type, id, days }) }),
+  unsnoozeFreshness: (type, id) => request(`/freshness/snooze/${encodeURIComponent(type)}/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  getFreshnessDigest: () => request('/freshness/digest'),
+  setFreshnessDigest: (enabled) => request('/freshness/digest', { method: 'PUT', body: JSON.stringify({ enabled: !!enabled }) }),
+  // 3.0 accessibility checker (routes/accessibility.js)
+  getAccessibility: () => request('/accessibility'),
+  getAccessibilityBadges: () => request('/accessibility/badges'),
+  checkAccessibility: (type, id) => request(`/accessibility/check/${encodeURIComponent(type)}/${encodeURIComponent(id)}`),
+  checkSignAccessibility: (body) => request('/accessibility/check/sign', { method: 'POST', body: JSON.stringify(body ?? {}) }),
+  updateAccessibilitySettings: (data) => request('/accessibility/settings', { method: 'PUT', body: JSON.stringify(data) }),
+  updateAccessibilityScreen: (id, data) => request(`/accessibility/screens/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  getSttSettings: () => request('/accessibility/stt'),
+  saveSttSettings: (data) => request('/accessibility/stt', { method: 'PUT', body: JSON.stringify(data) }),
+  generateCaptions: (id, lang) => request(`/accessibility/captions/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify(lang ? { lang } : {}) }),
+  getCaptionsJob: (id) => request(`/accessibility/captions/${encodeURIComponent(id)}`),
+  getCaptionsText: (id) => request(`/accessibility/captions/${encodeURIComponent(id)}/vtt`),
+  saveCaptionsText: (id, vtt, lang) => request(`/accessibility/captions/${encodeURIComponent(id)}/vtt`, { method: 'PUT', body: JSON.stringify({ vtt, lang }) }),
   moveContent: (id, folderId) => request(`/content/${id}`, {
     method: 'PUT',
     body: JSON.stringify({ folder_id: folderId })
@@ -496,6 +590,10 @@ export const api = {
   },
   getLibrarySummary: () => request('/content/library-summary'),
   getContentUsage: (id) => request(`/content/${id}/usage`),
+  // 3.0 TV-safe video copies (server/lib/video-variants.js)
+  getContentTvCopies: (id) => request(`/content/${id}/tv-copies`),
+  retryContentTvCopies: (id) => request(`/content/${id}/tv-copies/retry`, { method: 'POST' }),
+  setContentPrerotated: (id, on) => request(`/content/${id}`, { method: 'PUT', body: JSON.stringify({ video_prerotated: on ? 1 : 0 }) }),
   batchTagContent: (ids, add, remove) => request('/content/batch/tags', {
     method: 'POST',
     body: JSON.stringify({ ids, ...(add && add.length ? { add } : {}), ...(remove && remove.length ? { remove } : {}) })
@@ -586,9 +684,12 @@ export const api = {
           try { return resolve(JSON.parse(xhr.responseText)); }
           catch (e) { return reject(new Error('Upload succeeded but the response could not be read')); }
         }
-        let msg = '';
-        try { msg = (JSON.parse(xhr.responseText) || {}).error || ''; } catch (e) { msg = ''; }
-        reject(new Error(msg || `Upload failed (${xhr.status})`));
+        let body = {};
+        try { body = JSON.parse(xhr.responseText) || {}; } catch (e) { body = {}; }
+        const msg = body.error || `Upload failed (${xhr.status})`;
+        // requestError keeps the server's words AND its code, so a storage-limit refusal reaches
+        // the upgrade prompt like any other plan limit (3.0).
+        reject(requestError(xhr.status, { ...body, error: msg }));
       };
       xhr.onerror = () => reject(new Error('Upload failed'));
       xhr.send(formData);
@@ -603,7 +704,8 @@ export const api = {
         // Say what already landed. Silently discarding that is how someone re-uploads 140 photos
         // they already have, or assumes none of them arrived.
         if (out.length) {
-          throw new Error(`${err.message} (${out.length} of ${files.length} file${files.length === 1 ? '' : 's'} were uploaded before this failed)`);
+          throw Object.assign(new Error(`${err.message} (${out.length} of ${files.length} file${files.length === 1 ? '' : 's'} were uploaded before this failed)`),
+            { status: err.status, code: err.code, planPromptShown: err.planPromptShown });
         }
         throw err;
       }
@@ -663,6 +765,9 @@ export const api = {
   getWidgets: () => request('/widgets'),
   getWidget: (id) => request('/widgets/' + id),
   createWidget: (data) => request('/widgets', { method: 'POST', body: JSON.stringify(data) }),
+  // 3.0 news feeds (routes/news-feeds.js): "Find feeds" on a pasted site, and a feed's items.
+  newsDiscover: (url) => request('/news-feeds/discover', { method: 'POST', body: JSON.stringify({ url }) }),
+  newsPreview: (url, mode = 'feed') => request('/news-feeds/preview', { method: 'POST', body: JSON.stringify({ url, mode }) }),
   getKioskPages: () => request('/kiosk'),
 
   // Device Groups
@@ -676,7 +781,9 @@ export const api = {
   deleteGroup: (id, opts = {}) => request(`/groups/${id}${ackQuery(opts)}`, { method: 'DELETE' }),
   getGroupDevices: (id) => request(`/groups/${id}/devices`),
   addDeviceToGroup: (groupId, device_id, opts = {}) => request(`/groups/${groupId}/devices`, { method: 'POST', body: JSON.stringify({ device_id, ...opts }) }),
-  removeDeviceFromGroup: (groupId, deviceId, opts = {}) => request(`/groups/${groupId}/devices/${deviceId}${ackQuery(opts)}`, { method: 'DELETE' }),
+  // Encoded: the dashboard's drag-and-drop reads deviceId from dataTransfer, which a drag from any
+  // other page can fill, and a raw `../` there would aim this DELETE at a different endpoint.
+  removeDeviceFromGroup: (groupId, deviceId, opts = {}) => request(`/groups/${encodeURIComponent(groupId)}/devices/${encodeURIComponent(deviceId)}${ackQuery(opts)}`, { method: 'DELETE' }),
   sendGroupCommand: (groupId, type, payload) => request(`/groups/${groupId}/command`, { method: 'POST', body: JSON.stringify({ type, payload }) }),
   // #312 follow-up: fan a command out to every device in a workspace (admin-gated server-side).
   // Used for the workspace-wide server-URL rewrite when a server is relocated.
@@ -727,6 +834,9 @@ export const api = {
   clearDevicePlaylist: (device_id) => request(`/devices/${device_id}/playlist`, { method: 'DELETE' }),
   publishPlaylist: (id) => request(`/playlists/${id}/publish`, { method: 'POST' }),
   discardPlaylistDraft: (id) => request(`/playlists/${id}/discard`, { method: 'POST' }),
+  // 3.0 playlist layouts: the layouts a playlist may choose, and where its zoned items would go.
+  getLayouts: () => request('/layouts'),
+  getPlaylistLayoutZoneMap: (id, layoutId) => request(`/playlists/${id}/layout-zone-map?layout_id=${encodeURIComponent(layoutId || '')}`),
 
   // Content approval (optional per workspace) and version history. See docs/approvals-and-history.md.
   getApprovalSettings: () => request('/approvals/settings'),
@@ -735,6 +845,14 @@ export const api = {
   getMySubmissions: (status = 'open') => request(`/approvals/mine?status=${encodeURIComponent(status)}`),
   getSubmission: (id) => request(`/approvals/${id}`),
   submitForReview: (resource_type, resource_id, note) => request('/approvals/submit', { method: 'POST', body: JSON.stringify({ resource_type, resource_id, note }) }),
+  // 3.0 Make a sign (routes/signs.js) and the workspace brand kit (routes/brand-kit.js).
+  getSignTemplates: () => request('/signs/templates'),
+  // Community templates a platform admin has installed from a catalog (views/templates.js).
+  getInstalledTemplates: () => request('/templates/installed'),
+  previewSigns: (body) => request('/signs/preview', { method: 'POST', body: JSON.stringify(body ?? {}) }),
+  createSign: (body) => request('/signs', { method: 'POST', body: JSON.stringify(body ?? {}) }),
+  getBrandKit: () => request('/brand-kit'),
+  saveBrandKit: (body) => request('/brand-kit', { method: 'PUT', body: JSON.stringify(body ?? {}) }),
   withdrawSubmission: (id) => request(`/approvals/${id}/withdraw`, { method: 'POST' }),
   approveSubmission: (id, comment, version) => request(`/approvals/${id}/approve`, { method: 'POST', body: JSON.stringify({ comment, version }) }),
   requestChanges: (id, comment, version) => request(`/approvals/${id}/request-changes`, { method: 'POST', body: JSON.stringify({ comment, version }) }),
@@ -765,16 +883,30 @@ export const api = {
   // a bearer token and a top-level navigation cannot carry one.
   ssoLinkStart: (slug) => request(`/auth/oidc/${encodeURIComponent(slug)}/link/start`),
   totpSetup: () => request('/auth/totp/setup', { method: 'POST' }),
-  totpEnable: (code) => request('/auth/totp/enable', { method: 'POST', body: JSON.stringify({ code }) }),
-  totpDisable: (code) => request('/auth/totp/disable', { method: 'POST', body: JSON.stringify({ code }) }),
+  // 3.0: these end every other session server-side and hand THIS one a fresh token (keepSession).
+  totpEnable: (code) => request('/auth/totp/enable', { method: 'POST', body: JSON.stringify({ code }) }).then(keepSession),
+  totpDisable: (code) => request('/auth/totp/disable', { method: 'POST', body: JSON.stringify({ code }) }).then(keepSession),
+  revokeOtherSessions: () => request('/auth/sessions/revoke-others', { method: 'POST' }).then(keepSession),
   totpRegenRecovery: (code) => request('/auth/totp/recovery-codes/regenerate', { method: 'POST', body: JSON.stringify({ code }) }),
+
+  // 3.0 passkeys (server/routes/passkeys.js). Adding one asks for the password again (plus the TOTP
+  // code when 2FA is on). Removing one ends every other session and hands this one a fresh token.
+  passkeysList: () => request('/auth/passkeys'),
+  passkeyRegisterOptions: (password, code) => request('/auth/passkeys/register/options', { method: 'POST', body: JSON.stringify({ password, code }) }),
+  passkeyRegisterVerify: (challenge_id, response, name) => request('/auth/passkeys/register/verify', { method: 'POST', body: JSON.stringify({ challenge_id, response, name }) }),
+  passkeyRename: (id, name) => request('/auth/passkeys/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify({ name }) }),
+  passkeyDelete: (id) => request('/auth/passkeys/' + encodeURIComponent(id), { method: 'DELETE' }).then(keepSession),
 
   // Email verification (signup). Resend is generic (never reveals whether the address exists).
   resendVerification: (email) => request('/auth/resend-verification', { method: 'POST', body: JSON.stringify({ email }) }),
 
   // Current user
   getMe: () => request('/auth/me'),
-  updateMe: (data) => request('/auth/me', { method: 'PUT', body: JSON.stringify(data) }),
+  adminConversionFunnel: (days = 30) => request(`/subscription/funnel?days=${encodeURIComponent(days)}`),
+  // 3.0 trial-to-paid funnel (server: lib/conversion-events.js). Fire-and-forget by design: a
+  // dropped event must never surface as an error, and the server ignores it when self-hosted.
+  trackEvent: (event, meta = {}) => request('/subscription/events', { method: 'POST', body: JSON.stringify({ event, meta }) }).catch(() => null),
+  updateMe: (data) => request('/auth/me', { method: 'PUT', body: JSON.stringify(data) }).then(keepSession),
   switchWorkspace: (workspaceId) => request('/auth/switch-workspace', { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) }),
   /*
    * ⚠️ THE ORG IS NOT SENT. The server resolves it from the caller's own membership — a body-supplied
@@ -818,6 +950,7 @@ export const api = {
   adminDeletePromotion: (id) => request(`/admin/promotions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   getPromotion: () => request('/subscription/promotion'),
   adminOverview: () => request('/admin/overview'),
+  adminHost: () => request('/admin/host'),
   adminAttention: (item) => request(`/admin/overview/attention/${encodeURIComponent(item)}`),
   adminStaleAccounts: (days) => request(`/admin/cleanup/stale-accounts?days=${encodeURIComponent(days)}`),
   adminPurgeStale: (body) => request('/admin/cleanup/stale-accounts', { method: 'POST', body: JSON.stringify(body) }),
@@ -826,6 +959,21 @@ export const api = {
   // #talk: per-org talk flag + optional per-org ICE (STUN/TURN) override. data = { talk_enabled, ice_servers }.
   adminSetOrgTalk: (id, data) => request(`/admin/orgs/${id}/talk`, { method: 'PUT', body: JSON.stringify(data) }),
   adminDeleteWorkspace: (id) => request(`/admin/workspaces/${id}`, { method: 'DELETE' }),
+  // 3.0 screen share (docs/screen-share.md). start returns a single-use ticket for the signalling socket.
+  getScreenShare: (deviceId) => request(`/screen-share/devices/${encodeURIComponent(deviceId)}`),
+  startScreenShare: (deviceId, data) => request(`/screen-share/devices/${encodeURIComponent(deviceId)}`, { method: 'POST', body: JSON.stringify(data || {}) }),
+  stopScreenShare: (deviceId) => request(`/screen-share/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' }),
+  setScreenShareGuest: (deviceId, enabled) => request(`/screen-share/devices/${encodeURIComponent(deviceId)}/guest`, { method: 'PUT', body: JSON.stringify({ enabled: !!enabled }) }),
+  // 3.0: several people presenting on one screen at once.
+  setScreenShareMulti: (deviceId, enabled) => request(`/screen-share/devices/${encodeURIComponent(deviceId)}/multi`, { method: 'PUT', body: JSON.stringify({ enabled: !!enabled }) }),
+  spotlightScreenShare: (deviceId, shareId) => request(`/screen-share/devices/${encodeURIComponent(deviceId)}/spotlight`, { method: 'PUT', body: JSON.stringify({ share_id: shareId || null }) }),
+  removeScreenSharePresenter: (deviceId, shareId) => request(`/screen-share/devices/${encodeURIComponent(deviceId)}/presenters/${encodeURIComponent(shareId)}`, { method: 'DELETE' }),
+  // 3.0 multi share: one share on several screens (device_ids and/or group_id); stop it everywhere.
+  startScreenShareMulti: (data) => request('/screen-share/shares', { method: 'POST', body: JSON.stringify(data || {}) }),
+  stopScreenShareAll: (shareId) => request(`/screen-share/shares/${encodeURIComponent(shareId)}`, { method: 'DELETE' }),
+  getScreenShareGroup: (groupId) => request(`/screen-share/groups/${encodeURIComponent(groupId)}`),
+  getScreenShareWorkspace: (wsId) => request(`/screen-share/workspace/${encodeURIComponent(wsId)}`),
+  setScreenShareWorkspace: (wsId, enabled) => request(`/screen-share/workspace/${encodeURIComponent(wsId)}`, { method: 'PUT', body: JSON.stringify({ enabled: !!enabled }) }),
   aiGetSettings: () => request('/ai/settings'),
   aiSaveSettings: (data) => request('/ai/settings', { method: 'PUT', body: JSON.stringify(data) }),
   aiGenerateDesign: (prompt) => request('/ai/generate-design', { method: 'POST', body: JSON.stringify({ prompt }) }),
@@ -853,6 +1001,23 @@ export const api = {
   aiHostedGenerate: (body) => request('/ai/hosted/generate', { method: 'POST', body: JSON.stringify(body) }),
   aiHostedCheckout: (pack_id) => request('/ai/hosted/checkout', { method: 'POST', body: JSON.stringify({ pack_id }) }),
   aiListModels: (base_url, api_key) => request('/ai/models', { method: 'POST', body: JSON.stringify({ base_url, api_key }) }),
+  /*
+   * 3.0 Private AI (server/routes/ai-private.js, docs/private-ai.md): a local / private provider,
+   * one allowed LAN host, the org's "only private AI", the AI starter set and auto-translate.
+   */
+  privateAiStatus: () => request('/ai/private/status'),
+  privateAiTest: (base_url, api_key) => request('/ai/private/test', { method: 'POST', body: JSON.stringify({ base_url, api_key }) }),
+  privateAiSave: (body) => request('/ai/private/settings', { method: 'PUT', body: JSON.stringify(body ?? {}) }),
+  privateAiAllowHost: (host) => request('/ai/private/allow-host', { method: 'POST', body: JSON.stringify({ host }) }),
+  privateAiPolicy: (only_private) => request('/ai/private/policy', { method: 'PUT', body: JSON.stringify({ only_private: !!only_private }) }),
+  aiStarterSet: (description) => request('/ai/private/starter', { method: 'POST', body: JSON.stringify({ description }) }),
+  aiTranslations: (deckId) => request(`/ai/private/translations${deckId ? `?deck_id=${encodeURIComponent(deckId)}` : ''}`),
+  aiTranslate: (deck_id, langs) => request('/ai/private/translate', { method: 'POST', body: JSON.stringify({ deck_id, langs }) }),
+  aiTranslationSave: (id, strings) => request(`/ai/private/translations/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ strings }) }),
+  aiTranslationApprove: (id) => request(`/ai/private/translations/${encodeURIComponent(id)}/approve`, { method: 'POST' }),
+  aiTranslationDelete: (id) => request(`/ai/private/translations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  aiScreenLanguages: () => request('/ai/private/screens'),
+  aiSetScreenLanguage: (deviceId, mode, langs) => request(`/ai/private/screens/${encodeURIComponent(deviceId)}`, { method: 'PUT', body: JSON.stringify({ mode, langs }) }),
 
   // Instance-level default branding (#15, platform admin).
   /*
@@ -876,6 +1041,10 @@ export const api = {
   // #146: toggle the /api/status debug block exposure (platform-admin only).
   adminGetStatusDebug: () => request('/admin/status-debug'),
   adminSetStatusDebug: (enabled) => request('/admin/status-debug', { method: 'PUT', body: JSON.stringify({ enabled }) }),
+  adminGetVideoVariants: () => request('/admin/video-variants'),
+  adminSetVideoVariants: (settings) => request('/admin/video-variants', { method: 'PUT', body: JSON.stringify(settings) }),
+  adminGetScreenShare: () => request('/admin/screen-share'),
+  adminSetScreenShare: (maxPresenters) => request('/admin/screen-share', { method: 'PUT', body: JSON.stringify({ max_presenters: maxPresenters }) }),
   // Opt-in install statistics. GET returns { state, payload, last_report } — payload is the exact
   // body that would be sent, so the UI can show it rather than describe it.
   adminGetTelemetry: () => request('/admin/telemetry'),
@@ -972,6 +1141,13 @@ export async function downloadSlotReportCsv(problemsOnly) {
   return r.blob();
 }
 
+
+/** 3.0 energy: an authenticated download (CSV / appendix text) from /api/energy/<path>, as a blob. */
+export async function downloadEnergyFile(pathAndQuery) {
+  const r = await fetch(`${API_BASE}/energy/${pathAndQuery}`, { headers: getAuthHeaders() });
+  if (!r.ok) throw requestError(r.status, await r.json().catch(() => ({})));
+  return r.blob();
+}
 
 // Raw, authenticated fetches for history previews: a widget revision rendered as HTML (for an
 // srcdoc iframe) and a content revision's retained bytes (for an object URL). Both need the

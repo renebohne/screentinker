@@ -32,6 +32,17 @@ function displayPrefix(token) {
   return token.slice(0, TOKEN_PREFIX.length + 8); // e.g. 'st_a1b2c3d4'
 }
 
+// Separate from the row read above so a database without the 3.0 column still authenticates.
+function ownerDisabled(userId) {
+  try {
+    const r = db.prepare('SELECT disabled_at FROM users WHERE id = ?').get(userId);
+    return !!(r && r.disabled_at);
+  } catch (e) {
+    if (/no such column: disabled_at/i.test(e.message)) return false;
+    throw e;
+  }
+}
+
 // Throttle last_used_at writes to at most once/min per token (no write per request).
 const lastUsedThrottle = new Map();
 function touchLastUsed(tokenId) {
@@ -55,6 +66,9 @@ function apiTokenAuth(req, res, next) {
     'SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password FROM users WHERE id = ?'
   ).get(row.user_id);
   if (!user) return res.status(401).json({ error: 'Token owner not found' });
+  // 3.0: an owner deactivated by their organization's identity provider (SCIM) has no API either —
+  // a token is the one credential that would otherwise outlive the sessions deactivation ends.
+  if (ownerDisabled(row.user_id)) return res.status(401).json({ error: 'Invalid or revoked API token' });
   if (user.must_change_password) {
     return res.status(403).json({ error: 'Token owner must change their password before using the API' });
   }
@@ -127,6 +141,13 @@ function requireScope(need) {
 function agencyGate(req, res, next) {
   if (!req.viaToken || req.tokenScope !== 'agency') {
     return res.status(403).json({ error: 'agency token required' });
+  }
+  // ⚠️ RE-CHECK THE OWNER'S ROLE ON EVERY USE. Minting refuses a viewer (routes/tokens.js), but the
+  // agency handlers never consult req.workspaceRole, so an owner later DEMOTED to viewer kept an
+  // upload/publish credential. resolveTenancy has just resolved the owner's CURRENT role in the
+  // bound workspace (role forced to 'user', so actingAs here means org_owner/org_admin only).
+  if (!req.actingAs && req.workspaceRole === 'workspace_viewer') {
+    return res.status(403).json({ error: "agency token's owner is now read-only in this workspace" });
   }
   next();
 }

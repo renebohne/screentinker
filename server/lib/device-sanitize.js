@@ -11,6 +11,9 @@ function stripDeviceSecrets(d) {
   // View-only share link: only its own admin route reveals it (routes/devices.js GET /:id/view).
   delete d.view_token_hash;
   delete d.view_token_enc;
+  // 3.0 mirrors: the per-install fingerprint that owns a mirror row. It is half of what the
+  // fingerprint reclaim path accepts as "this is that install", so it never leaves the server.
+  delete d.mirror_fingerprint;
   return d;
 }
 

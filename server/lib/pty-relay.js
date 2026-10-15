@@ -51,6 +51,11 @@ const MAX_PER_USER = 4;
 const MAX_FRAME_B64 = 64 * 1024;          // one base64 frame, either direction
 const IDLE_MS = 30 * 60 * 1000;
 const SWEEP_MS = 60 * 1000;
+// ⚠️ How long an open session's authorisation is trusted before input re-asks the gate. Open alone
+// was checked, so a user demoted, removed or whose support grant was revoked kept typing into a
+// root-capable shell until they closed the tab. Throttled, not per keystroke: the gate is a few
+// indexed queries, and a paste arrives as many frames.
+const REAUTH_MS = 5 * 1000;
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
@@ -158,6 +163,13 @@ function createPtyRelay(deps) {
   function input(socket, data) {
     const o = owned(socket, data);
     if (!o || !isFrame(data.data)) return false;
+    if (now() - (o.s.authAt || o.s.openedAt) >= REAUTH_MS) {
+      if (!deps.authorize(socket, o.s.device_id)) {
+        end(o.sid, { reason: 'forbidden', notifyDevice: true, notifyDashboard: true });
+        return false;
+      }
+      o.s.authAt = now();
+    }
     o.s.lastActivity = now();
     toDevice(o.s.device_id, 'device:pty-input', { session_id: o.sid, data: data.data });
     return true;
@@ -290,5 +302,5 @@ function relay() { return bind(null); }
 
 module.exports = {
   createPtyRelay, bind, relay, setAuthorizer,
-  MAX_PER_DEVICE, MAX_PER_USER, MAX_FRAME_B64, IDLE_MS,
+  MAX_PER_DEVICE, MAX_PER_USER, MAX_FRAME_B64, IDLE_MS, REAUTH_MS,
 };

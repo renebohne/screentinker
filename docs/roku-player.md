@@ -2,7 +2,7 @@
 
 A ScreenTinker player for Roku devices and Roku TVs. **Status: in development. Not tested on a Roku
 yet** — every check so far runs in the BrightScript Simulation Engine (`brs-node`, SceneGraph
-extension) and the BrighterScript compiler. Nothing here is published to the Roku Channel Store.
+extension) and the BrighterScript compiler. The app is published in the Roku Channel Store: <https://my.roku.com/account/add/Screentinker>.
 
 ## Why it is shaped like this
 

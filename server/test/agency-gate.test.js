@@ -30,3 +30,10 @@ test('#73 agencyGate (mount seam): only agency tokens pass; non-agency + JWT rej
   assert.equal(gate({ tokenScope: 'full' }).status, 403, 'full token -> 403');
   assert.equal(gate({ viaToken: false }).status, 403, 'JWT (not a token) -> 403');
 });
+
+test('agencyGate re-checks the owner\'s CURRENT role: a demoted (viewer) owner\'s agency token is refused', () => {
+  assert.equal(gate({ workspaceRole: 'workspace_viewer' }).status, 403, 'owner demoted to viewer -> 403');
+  assert.equal(gate({ workspaceRole: 'workspace_viewer' }).nexted, false);
+  assert.equal(gate({ workspaceRole: 'workspace_editor' }).nexted, true, 'editor still passes');
+  assert.equal(gate({ workspaceRole: null, actingAs: true }).nexted, true, 'org owner/admin (acting-as) still passes');
+});

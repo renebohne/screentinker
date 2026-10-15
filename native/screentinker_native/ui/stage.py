@@ -56,6 +56,11 @@ class Stage(QObject):
     kioskHomeChanged = Signal()
     kioskSeqChanged = Signal()
     audienceIndicatorChanged = Signal()
+    # 3.0 screen share: the meeting-room code badge (ShareCode.qml); hidden while a share is on screen.
+    shareCodeChanged = Signal()
+    shareCodeUrlChanged = Signal()
+    shareCodeQrChanged = Signal()
+    shareActiveChanged = Signal()
 
     def __init__(self, engine_cb):
         super().__init__()
@@ -106,6 +111,10 @@ class Stage(QObject):
     # Audience counting is on (system/audience.py): a small camera icon in the corner, unless the org
     # turned the indicator off.
     audienceIndicator = Property(bool, fget=_g("audienceIndicator", False), notify=audienceIndicatorChanged)
+    shareCode = Property(str, fget=_g("shareCode", ""), notify=shareCodeChanged)
+    shareCodeUrl = Property(str, fget=_g("shareCodeUrl", ""), notify=shareCodeUrlChanged)
+    shareCodeQr = Property(str, fget=_g("shareCodeQr", ""), notify=shareCodeQrChanged)
+    shareActive = Property(bool, fget=_g("shareActive", False), notify=shareActiveChanged)
     del _g
 
     def set(self, name, value):

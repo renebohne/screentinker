@@ -24,6 +24,8 @@
 
 const express = require('express');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const { db } = require('../db/database');
 const config = require('../config');
 const secretbox = require('../lib/secretbox');
@@ -95,6 +97,26 @@ const CRED_FIELDS = {
 };
 
 /**
+ * Does this update point the profile at a different address than `existing`? The typed endpoint and
+ * public endpoint (both already normalised in `out`), and for Azure the endpoint a NEW connection
+ * string carries, compared with the stored one's. Unreadable stored credentials count as changed.
+ */
+function storageAddressChanged(existing, out, body) {
+  const norm = (v) => (v ? String(v).replace(/\/+$/, '') : null);
+  if (norm(existing.endpoint) !== norm(out.endpoint)) return true;
+  if (norm(existing.public_endpoint) !== norm(out.public_endpoint)) return true;
+  const cs = body.credentials && typeof body.credentials === 'object' ? body.credentials.connectionString : null;
+  if (existing.provider === 'azure' && cs) {
+    const { AzureBackend } = require('../lib/storage/azure');
+    const prevCreds = existing.credentials;   // decrypted by lib/storage rowToProfile
+    if (!prevCreds) return true;
+    const urlOf = (creds) => { try { return new AzureBackend({ ...out, credentials: creds }).endpointUrl(); } catch (_) { return null; } };
+    if (urlOf(prevCreds) !== urlOf({ connectionString: String(cs) })) return true;
+  }
+  return false;
+}
+
+/**
  * Turn a request body into column values. `existing` for an update: absent fields keep their value,
  * absent credentials keep the stored blob. Throws {status, message} on a bad value.
  */
@@ -130,14 +152,26 @@ async function validate(req, body, existing = null) {
    * that is the platform's own network, so only a platform admin may grant it; on a self-hosted
    * one the org admin IS the operator. Metadata and link-local stay refused either way.
    */
-  if (out.allow_private && !(existing && existing.allow_private) && !req.isPlatformAdmin && !config.selfHosted) {
-    throw Object.assign(new Error('Only a platform administrator can allow a private-network storage endpoint.'), { status: 403 });
-  }
-
   for (const k of ['endpoint', 'public_endpoint', 'public_base_url']) {
     if (!out[k]) continue;
     try { parseEndpoint(out[k]); } catch (e) { throw bad(`${k} must be an http(s) URL with no credentials, query or fragment`); }
     out[k] = out[k].replace(/\/+$/, '');
+  }
+
+  /*
+   * ⚠️ THE GRANT WAS FOR AN ADDRESS. A platform admin's allow_private used to survive any later
+   * edit, so an org admin could repoint the endpoint (or the Azure connection string's) at any
+   * LAN/loopback host and the check below passed on the inherited flag. Same rule as
+   * lib/bi/connections.js: a new address loses the flag unless whoever sets it may grant it.
+   */
+  const canAllowPrivate = !!(req.isPlatformAdmin || config.selfHosted);
+  let inheritedPrivate = !!(existing && existing.allow_private);
+  if (inheritedPrivate && !canAllowPrivate && storageAddressChanged(existing, out, body)) {
+    inheritedPrivate = false;
+    if (!('allow_private' in body)) out.allow_private = 0;
+  }
+  if (out.allow_private && !inheritedPrivate && !canAllowPrivate) {
+    throw Object.assign(new Error('Only a platform administrator can allow a private-network storage endpoint.'), { status: 403 });
   }
   if (out.endpoint) {
     try { await checkEndpoint(out.endpoint, { allowPrivate: !!out.allow_private }); }

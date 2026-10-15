@@ -3,7 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
-const { generateToken, generateMfaPendingToken, verifyMfaPendingToken, requireAuth, requireAdmin, requireSuperAdmin, isPlatformRole, isPlatformStaff, PLATFORM_ROLES } = require('../middleware/auth');
+const { generateToken, bumpTokenVersion, generateMfaPendingToken, verifyMfaPendingToken, requireAuth, requireAdmin, requireSuperAdmin, isPlatformRole, isPlatformStaff, PLATFORM_ROLES } = require('../middleware/auth');
 const { resolveTenancy } = require('../lib/tenancy');
 const { logActivity, getClientIp } = require('../services/activity');
 const totp = require('../lib/totp');
@@ -21,6 +21,7 @@ const jwt = require('jsonwebtoken');
 const oidc = require('../lib/oidc');
 const oidcProviders = require('../lib/oidc-providers');
 const saml = require('../lib/saml');
+const passkeys = require('../lib/passkeys');
 
 // Phase 2.1: find or create the user's default org+workspace. Returns the
 // workspace_id to embed in the JWT. Idempotent: if the user already has
@@ -168,8 +169,7 @@ router.post('/register', (req, res) => {
   const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
   const role = userCount === 0 ? 'platform_admin' : 'user';
   const isFirstUser = userCount === 0;
-  const plan = (isFirstUser && config.selfHosted) ? 'enterprise' : 'pro'; // Start on Pro trial
-  const trialStarted = isFirstUser && config.selfHosted ? null : Math.floor(Date.now() / 1000);
+  const { plan, trialStarted } = signupPlan(isFirstUser); // hosted: Pro trial; self-hosted: see signupPlan
 
   // Email verification: require it for a normal local signup only when we can actually send
   // the mail. The bootstrap (first) user is never gated — a fresh install must not lock out
@@ -183,6 +183,7 @@ router.post('/register', (req, res) => {
     INSERT INTO users (id, email, name, password_hash, auth_provider, role, plan_id, trial_started, trial_plan, email_verified)
     VALUES (?, ?, ?, ?, 'local', ?, ?, ?, ?, ?)
   `).run(id, email.toLowerCase(), name || email.split('@')[0], passwordHash, role, plan, trialStarted, trialStarted ? 'pro' : null, emailVerified);
+  require('../lib/conversion-events').record(db, { userId: id, event: 'signup', meta: { method: 'password' } });
 
   const user = db.prepare('SELECT id, email, name, role, auth_provider, avatar_url, plan_id, stripe_customer_id, stripe_subscription_id, subscription_status, subscription_ends, email_verified FROM users WHERE id = ?').get(id);
   // #12: org-on-create. Per-request createOrg overrides the deployment default
@@ -217,6 +218,76 @@ router.post('/register', (req, res) => {
   const token = generateToken(user, workspaceId);
   res.status(201).json({ token, user, current_workspace_id: workspaceId });
 });
+
+/*
+ * 3.0: the account facts the app shell decides on, folded into GET /me.
+ *
+ * - self_hosted: conversion UI never shows when true (nor when hide_billing).
+ * - subscription_status: the past-due banner (app.js) read user.subscription_status, which /me never
+ *   returned, so the banner vanished on the first /me refresh. Now it is here.
+ * - trial / plan: the same numbers /api/subscription/me reports, from the same getUserPlan.
+ * - ui_mode / onboarded_at: per-account, server-side (a new browser keeps both).
+ * Any failure degrades to the 2.x shape rather than failing /me.
+ */
+function accountSummary(userId) {
+  const out = { self_hosted: config.selfHosted, ui_mode: 'advanced', onboarded_at: null,
+    sponsor_prompt: false };
+  try {
+    const row = db.prepare('SELECT ui_mode, onboarded_at, subscription_status, created_at FROM users WHERE id = ?').get(userId);
+    if (!row) return out; // support / recovery identities: full menu, no guide, no billing facts
+    out.ui_mode = row.ui_mode === 'simple' ? 'simple' : 'advanced';
+    out.onboarded_at = row.onboarded_at || null;
+    out.sponsor_prompt = sponsorEligible(row.created_at);
+    out.subscription_status = row.subscription_status || null;
+    const plan = require('../middleware/subscription').getUserPlan(userId);
+    if (plan) {
+      out.plan_name = plan.plan_display_name || plan.plan_name || null;
+      out.plan_limits = { max_devices: plan.max_devices, max_storage_mb: plan.max_storage_mb };
+      // Lets the UI mark a paid feature before someone fills in a form the server will refuse.
+      out.plan_features = { remote_url: !!plan.remote_url, remote_control: !!plan.remote_control };
+      out.trial = {
+        active: !!plan.trial_active,
+        days_left: plan.trial_days_left || 0,
+        end: plan.trial_end ? new Date(plan.trial_end * 1000).toISOString() : null,
+        plan: plan.trial_plan || null,
+        expired_at: plan.trial_expired_at ? new Date(plan.trial_expired_at * 1000).toISOString() : null,
+      };
+    }
+  } catch (e) {
+    console.warn('[auth/me] account summary unavailable:', e.message);
+  }
+  return out;
+}
+
+/*
+ * Self-hosted only: may the dashboard ask the operator to sponsor the project (frontend
+ * plan-nudges.js; it also limits the ask to platform admins who finished setup, and to the dismissals)?
+ * - Off entirely with ST_HIDE_SPONSOR=true.
+ * - An install that has been UPGRADED from an earlier version is established: yes, straight away.
+ * - A fresh install: only once the account is SPONSOR_FRESH_INSTALL_DAYS old, so nobody is asked for
+ *   money on the day they try it.
+ */
+const SPONSOR_FRESH_INSTALL_DAYS = 3;
+function sponsorEligible(createdAt) {
+  if (!config.selfHosted || config.hideSponsor) return false;
+  try {
+    if (db.prepare("SELECT 1 FROM app_settings WHERE key = 'last_upgraded_at'").get()) return true;
+  } catch { /* no app_settings: treat as a fresh install */ }
+  return !!createdAt && (Date.now() / 1000 - createdAt) >= SPONSOR_FRESH_INSTALL_DAYS * 86400;
+}
+
+/*
+ * The plan a new account starts on. Hosted: a 14-day Pro trial (services/trialExpiry.js ends it).
+ * Self-hosted: the first account is enterprise, and since 3.0 so is every later one unless the
+ * operator asks for the 2.x trial with SELF_HOSTED_SIGNUP_PLAN=trial — a trial clock that drops a
+ * colleague on the operator's own server to two screens was a nag with nobody to pay.
+ */
+function signupPlan(isFirstUser) {
+  if (config.selfHosted && (isFirstUser || config.selfHostedSignupPlan === 'enterprise')) {
+    return { plan: 'enterprise', trialStarted: null };
+  }
+  return { plan: 'pro', trialStarted: Math.floor(Date.now() / 1000) };
+}
 
 // Login
 /** A user whose every workspace membership is on a COPIED workspace exists here only as a copy. */
@@ -383,6 +454,13 @@ router.post('/login', (req, res) => {
   // reset placed there would never fire for those accounts.
   loginLockout.reset(user.id);
 
+  // 3.0: deactivated by the organization's identity provider (SCIM). Said only AFTER the password
+  // is proven, so it tells nobody without the password that the account exists.
+  if (user.disabled_at) {
+    logFailedLogin(email, getClientIp(req), 'Account deactivated by its organization');
+    return res.status(403).json({ error: 'This account has been deactivated by your organization.', code: 'account_disabled' });
+  }
+
   // Email verification gate. Unverified LOCAL accounts are asked to confirm on login — this
   // covers both new signups AND existing users who predate the feature (grandfathered locals are
   // email_verified=0). Gated ONLY where we can actually send the mail (isConfigured), so an
@@ -402,7 +480,9 @@ router.post('/login', (req, res) => {
   // the ONLY place TOTP gates (interactive password login). The SSO routes and the
   // API-token path never reach here, so both bypass TOTP by construction.
   if (user.totp_enabled) {
-    return res.json({ mfa_required: true, mfa_token: generateMfaPendingToken(user) });
+    // 3.0: `passkey` tells the second step it may offer "Use a passkey instead" (routes/passkeys.js).
+    // Only someone who just proved the password learns it.
+    return res.json({ mfa_required: true, mfa_token: generateMfaPendingToken(user), passkey: passkeys.countForUser(user.id) > 0 });
   }
   issueSession(req, res, user);
 });
@@ -585,6 +665,8 @@ router.post('/reset-password', (req, res) => {
   // Someone who locked themselves out guessing must not stay locked out after proving
   // control of the mailbox and choosing a new password.
   loginLockout.reset(userId);
+  // 3.0: whoever held a session before the reset (the reason people reset) is signed out.
+  bumpTokenVersion(userId);
   const u = db.prepare('SELECT email, auth_provider FROM users WHERE id = ?').get(userId);
   /*
    * Return a stranded federated row to a local account. Without this the reset would "succeed" and
@@ -676,7 +758,9 @@ router.post('/totp/enable', requireAuth, (req, res) => {
   if (!step) return res.status(400).json({ error: 'Invalid code' });
   db.prepare("UPDATE users SET totp_enabled = 1, totp_last_step = ?, updated_at = strftime('%s','now') WHERE id = ?")
     .run(step, req.user.id);
-  res.json({ enabled: true, recovery_codes: resetRecoveryCodes(req.user.id) }); // shown ONCE
+  // 3.0: sessions that never passed the second factor end now; this one carries on with a new token.
+  bumpTokenVersion(req.user.id);
+  res.json({ enabled: true, recovery_codes: resetRecoveryCodes(req.user.id), token: generateToken(req.user, req.jwtWorkspaceId || null) }); // shown ONCE
 });
 
 // Disable: re-auth with a current code (or a recovery code) so a hijacked session
@@ -691,7 +775,8 @@ router.post('/totp/disable', requireAuth, (req, res) => {
     db.prepare("UPDATE users SET totp_enabled = 0, totp_secret_enc = NULL, totp_last_step = 0, updated_at = strftime('%s','now') WHERE id = ?").run(req.user.id);
     db.prepare('DELETE FROM totp_recovery_codes WHERE user_id = ?').run(req.user.id);
   })();
-  res.json({ enabled: false });
+  bumpTokenVersion(req.user.id); // 3.0: see /totp/enable
+  res.json({ enabled: false, token: generateToken(req.user, req.jwtWorkspaceId || null) });
 });
 
 // Regenerate recovery codes: re-auth (current code) + ATOMIC replace (tightening #3).
@@ -737,6 +822,11 @@ router.post('/totp/verify', (req, res) => {
     recovery_codes_remaining: recoveryCodesRemaining(user.id),
   });
 });
+
+// ==================== Passkeys (3.0) ====================
+// WebAuthn sign-in, second factor and management: routes/passkeys.js. Handed the same finisher a
+// password login uses, so a passkey sign-in is logged, stamped and tokened identically.
+router.use('/passkeys', require('./passkeys')({ issueSession, logFailedLogin, ensureVerificationEmail }));
 
 // ==================== Google OAuth ====================
 
@@ -839,6 +929,9 @@ router.get('/me', requireAuth, resolveTenancy, (req, res) => {
     // reflects live state after reload. Fail-open to verified if somehow absent.
     email_verified: db.prepare('SELECT email_verified FROM users WHERE id = ?').get(req.user.id)?.email_verified ?? 1,
     hide_billing: config.hideBilling, // #116: client hides the Subscription nav + guards #/billing
+    // 3.0: everything the app shell needs to pick a menu, a first-run route and a trial banner,
+    // without a second request. See accountSummary().
+    ...accountSummary(req.user.id),
     // #329: same idea as hide_billing above — a capability the client cannot infer without asking.
     // `enroll` decides whether the Servers nav appears (the honest "is this node part of a mesh in
     // any way?"); `hub` gates the aggregate reads (/mesh/orgs, /alerts, /uptime, /devices), which
@@ -888,7 +981,15 @@ router.post('/switch-workspace', requireAuth, (req, res) => {
 
 // Update current user
 router.put('/me', requireAuth, (req, res) => {
-  const { name, password, current_password, email_alerts } = req.body;
+  const { name, password, current_password, email_alerts, ui_mode, onboarded } = req.body;
+  // 3.0 preferences. Validated narrowly: anything else is ignored, not stored.
+  if (ui_mode === 'simple' || ui_mode === 'advanced') {
+    db.prepare("UPDATE users SET ui_mode = ?, updated_at = strftime('%s','now') WHERE id = ?").run(ui_mode, req.user.id);
+  }
+  if (onboarded === true) {
+    db.prepare("UPDATE users SET onboarded_at = COALESCE(onboarded_at, strftime('%s','now')) WHERE id = ?").run(req.user.id);
+  }
+  let freshToken = null;
   if (name) {
     db.prepare('UPDATE users SET name = ?, updated_at = strftime(\'%s\',\'now\') WHERE id = ?')
       .run(name, req.user.id);
@@ -914,9 +1015,23 @@ router.put('/me', requireAuth, (req, res) => {
     // the first-login change-password gate.
     db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = strftime(\'%s\',\'now\') WHERE id = ?')
       .run(hash, req.user.id);
+    // 3.0: a new password ends every OTHER session; this one gets a fresh token (the client stores
+    // `token` when present) so changing your password does not sign you out of the tab you did it in.
+    bumpTokenVersion(req.user.id);
+    freshToken = generateToken(req.user, req.jwtWorkspaceId || null);
   }
+  // ui_mode / onboarded_at are read back through GET /me (accountSummary), not here, so this keeps
+  // the 2.x column list and works on any users table that has them.
   const user = db.prepare('SELECT id, email, name, role, auth_provider, avatar_url, plan_id, email_alerts, must_change_password FROM users WHERE id = ?').get(req.user.id);
-  res.json(user);
+  res.json(freshToken ? { ...user, token: freshToken } : user);
+});
+
+// 3.0: "Sign out everywhere else". Ends every session but this one, which gets a fresh token.
+router.post('/sessions/revoke-others', requireAuth, (req, res) => {
+  if (String(req.user.id).includes(':')) return res.status(400).json({ error: 'Not available for this session' });
+  bumpTokenVersion(req.user.id);
+  logActivity(req.user.id, 'auth:sessions_revoked', null, null, getClientIp(req));
+  res.json({ ok: true, token: generateToken(req.user, req.jwtWorkspaceId || null) });
 });
 
 // List users - platform admins see all, admins see team members only
@@ -986,6 +1101,8 @@ router.put('/users/:id/role', requireAuth, requireSuperAdmin, (req, res) => {
   // (would lock themselves out of platform admin actions).
   if (req.params.id === req.user.id && !isPlatformRole(role)) return res.status(400).json({ error: 'Cannot demote yourself' });
   db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, req.params.id);
+  // 3.0: a demoted platform admin's open dashboard sockets sit in platform-wide rooms; drop them.
+  try { require('../ws/dashboardSocket').disconnectUserSockets(req.params.id); } catch (_) { /* socket layer not up */ }
   res.json({ success: true });
 });
 
@@ -1029,6 +1146,8 @@ router.put('/users/:id/password', requireAuth, requireAdmin, (req, res) => {
   const hash = bcrypt.hashSync(password, 10);
   db.prepare("UPDATE users SET password_hash = ?, updated_at = strftime('%s','now') WHERE id = ?")
     .run(hash, req.params.id);
+  bumpTokenVersion(req.params.id); // 3.0: the target's existing sessions end with the old password
+  try { require('../ws/dashboardSocket').disconnectUserSockets(req.params.id); } catch (_) { /* socket layer not up */ }
 
   // Explicit audit entry — the generic activity logger captures the route
   // and target id, but a labeled detail string makes the audit log readable.
@@ -1056,6 +1175,15 @@ router.get('/config', (req, res) => {
     localEnabled: true,
     needsSetup: userCount === 0,
     registration_enabled: !config.disableRegistration || userCount === 0,
+    // 3.0: whether new accounts here start on a trial (hosted only), so the login page does not
+    // advertise one on a self-hosted server that gives every account the full plan.
+    trial_offered: !config.selfHosted,
+    // 3.0: whether "Sign in with a passkey" can work here, and at which address (lib/passkeys.js).
+    // The page compares `origin` with its own: on any other address the browser would refuse.
+    passkeys: (() => {
+      const rp = passkeys.rpConfig(req);
+      return { enabled: rp.enabled, origin: rp.enabled ? rp.origin : null };
+    })(),
   });
 });
 
@@ -1096,12 +1224,23 @@ router.post('/accept-invite/:inviteId', requireAuth, (req, res) => {
   const existing = db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
     .get(ws.id, req.user.id);
 
+  /*
+   * 3.0 organization import (lib/trust/import.js): a member of the imported organization carries the
+   * organization role they had (org_role), and one who had no workspace of their own (org_only)
+   * gets only that. Never a promotion: an existing organization membership is left as it is, the
+   * same rule as the workspace membership above. Nothing else about the account changes.
+   */
+  const orgRole = ['org_owner', 'org_admin', 'org_member'].includes(invite.org_role) ? invite.org_role : null;
   const txn = db.transaction(() => {
-    if (!existing) {
+    if (!existing && !(orgRole && invite.org_only)) {
       db.prepare(`
         INSERT INTO workspace_members (workspace_id, user_id, role, invited_by)
         VALUES (?, ?, ?, ?)
       `).run(ws.id, req.user.id, invite.role, invite.invited_by);
+    }
+    if (orgRole) {
+      db.prepare('INSERT OR IGNORE INTO organization_members (organization_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)')
+        .run(ws.organization_id, req.user.id, orgRole, invite.invited_by);
     }
     db.prepare('DELETE FROM workspace_invites WHERE id = ?').run(invite.id);
   });
@@ -1197,7 +1336,7 @@ function readCookie(req, name) {
  */
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch((err) => {
-    console.error(`[auth] unhandled error in ${req.method} ${req.path}:`, err && err.message);
+    console.error('[auth] unhandled error in %s %s:', req.method, req.path, err && err.message);
     // Wrapped: if responding THROWS, the rejection has no handler and kills the process — the
     // guard against process death causing process death.
     try {
@@ -1228,6 +1367,8 @@ const redirectUriFor = (req, slug) => `${publicOrigin(req)}/api/auth/oidc/${slug
 // Send the browser back to the SPA. Errors travel as a code the login page can translate; the
 // token travels in the FRAGMENT, which browsers do not send to servers and proxies do not log.
 function backToApp(res, params) {
+  // The reason a sign-in was turned away, for the operator (an error code only, never a token).
+  if (params && params.sso_error) console.warn(`[sso] sign-in refused: ${params.sso_error}`);
   const qs = new URLSearchParams(params).toString();
   res.redirect(`/app#/login?${qs}`);
 }
@@ -1238,6 +1379,65 @@ function backToSettings(res, params) {
   const qs = new URLSearchParams(params).toString();
   res.redirect(`/app#/settings?${qs}`);
 }
+
+/*
+ * 3.0: single sign-on for the ScreenTinker Manager app (android-admin/).
+ *
+ * Google and most identity providers refuse to sign in inside an app's WebView, so the app runs the
+ * whole round trip in the phone's browser (a Custom Tab) and must get the session back across that
+ * boundary. The browser's cookie jar is not the app's, so the claim cookie below cannot do it.
+ *
+ * The app starts with ?app_challenge=<BASE64URL(SHA-256(verifier))> (the PKCE shape); it rides in
+ * the signed transaction. At the end, instead of the cookie, the browser is sent to
+ * screentinker-manager://sso?code=<random> — a single-use, 2-minute code that names a row here and
+ * carries nothing itself. The app swaps it at POST /sso/app-exchange together with the VERIFIER,
+ * which never left the app: another app that intercepts the redirect holds a code it cannot use.
+ */
+const APP_REDIRECT = 'screentinker-manager://sso';
+const APP_CODE_TTL_S = 120;
+const APP_CHALLENGE_RE = /^[A-Za-z0-9_-]{43}$/;
+
+function appChallengeOf(req) {
+  const c = String((req.query && req.query.app_challenge) || '');
+  return APP_CHALLENGE_RE.test(c) ? c : null;
+}
+
+function backToManagerApp(res, params) {
+  res.redirect(`${APP_REDIRECT}?${new URLSearchParams(params).toString()}`);
+}
+
+function issueAppCode({ token, workspaceId, challenge }) {
+  const code = crypto.randomBytes(32).toString('base64url');
+  const hash = crypto.createHash('sha256').update(code).digest('hex');
+  db.prepare("DELETE FROM app_sso_codes WHERE expires_at < strftime('%s','now')").run();
+  db.prepare('INSERT INTO app_sso_codes (code_hash, token, workspace_id, challenge, expires_at) VALUES (?, ?, ?, ?, ?)')
+    .run(hash, token, workspaceId || null, challenge, Math.floor(Date.now() / 1000) + APP_CODE_TTL_S);
+  return code;
+}
+
+router.post('/sso/app-exchange', (req, res) => {
+  const { code, verifier } = req.body || {};
+  if (typeof code !== 'string' || typeof verifier !== 'string' || code.length > 100 || verifier.length < 43 || verifier.length > 128) {
+    return res.status(400).json({ error: 'code and verifier are required' });
+  }
+  const expired = () => res.status(401).json({ error: 'That sign-in has expired. Try again.' });
+  const hash = crypto.createHash('sha256').update(code).digest('hex');
+  // Single use: the row is gone whatever happens next, so a code can never be tried twice.
+  const row = db.transaction(() => {
+    const r = db.prepare('SELECT * FROM app_sso_codes WHERE code_hash = ?').get(hash);
+    if (r) db.prepare('DELETE FROM app_sso_codes WHERE code_hash = ?').run(hash);
+    return r;
+  })();
+  if (!row || row.expires_at < Math.floor(Date.now() / 1000)) return expired();
+  const got = Buffer.from(crypto.createHash('sha256').update(verifier).digest('base64url'));
+  const want = Buffer.from(String(row.challenge));
+  if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) return expired();
+  let session;
+  try { session = jwt.verify(row.token, config.jwtSecret, { algorithms: ['HS256'] }); } catch { return expired(); }
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(session.id);
+  if (!user) return expired();
+  res.json({ token: row.token, user: publicUser(user), current_workspace_id: row.workspace_id || null });
+});
 
 // Which providers this instance offers. Public: it is what draws the login buttons.
 router.get('/providers', (req, res) => {
@@ -1371,11 +1571,69 @@ async function beginOidc(req, res, provider, extra = {}, onError = backToApp, as
   }
 }
 
+/*
+ * 3.0: content requests (lib/content-requests.js) on an SSO-gated form. A requester has NO account
+ * and gets none: the organization's identity provider vouches for who they are, and the result is a
+ * short-lived ticket for one form, nothing else. The round trip is the sign-in one (same PKCE, state,
+ * nonce, SAML request binding and assertion checks); `rq` in the signed transaction is what sends the
+ * callback to finishRequesterSso instead of completeFederatedLogin, so no session, no user row and no
+ * org membership can come out of it.
+ */
+function requesterBack(res, code, params) {
+  const qs = new URLSearchParams(params).toString();
+  res.redirect(code ? `/r/${encodeURIComponent(code)}#${qs}` : `/r/status#${qs}`);
+}
+function requesterBackById(res, formId, params) {
+  let code = null;
+  try { code = (db.prepare('SELECT code FROM request_forms WHERE id = ?').get(String(formId)) || {}).code || null; } catch (_) { /* gone */ }
+  requesterBack(res, code, params);
+}
+
+async function beginRequesterSso(req, res, provider, form) {
+  const onError = (r, params) => requesterBack(r, form.code, params);
+  if (provider.kind !== 'saml') return beginOidc(req, res, provider, { rq: form.id }, onError);
+  try {
+    const requestId = saml.newRequestId();
+    const url = await saml.samlFor(provider, publicOrigin(req), { generateUniqueId: () => requestId })
+      .getAuthorizeUrlAsync('', undefined, {});
+    const tx = jwt.sign({ typ: 'saml-tx', slug: provider.slug, rid: requestId, rq: form.id }, config.jwtSecret, { expiresIn: OIDC_TX_TTL_S, algorithm: 'HS256' });
+    const secure = req.protocol === 'https';
+    res.cookie(SAML_TX_COOKIE, tx, { httpOnly: true, secure, sameSite: secure ? 'none' : 'lax', maxAge: OIDC_TX_TTL_S * 1000, path: SAML_TX_PATH });
+    res.redirect(url);
+  } catch (err) {
+    console.error(`[saml] ${provider.slug} requester start failed:`, err.message);
+    onError(res, { sso_error: 'provider_unavailable' });
+  }
+}
+
+/*
+ * The assertion has passed every check a sign-in gets. What is left is whether THIS person may use
+ * THIS form: the provider must be the form's organization's, and the address one it may speak for
+ * (emailAllowedForProvider — the same confinement a sign-in has) and verified.
+ */
+function finishRequesterSso(req, res, { provider, claims, formId }) {
+  const email = String(claims.email || '').toLowerCase().trim();
+  const out = require('../lib/content-requests').ssoTicket({
+    formId, provider, email, name: claims.name,
+    emailAllowed: !!email && emailAllowedForProvider(provider, email),
+    emailVerified: oidcProviders.emailIsVerified(claims, provider),
+  });
+  if (out.error) {
+    console.warn(`[sso] requester for form ${formId} refused: ${out.error}`);
+    return requesterBack(res, out.code, { sso_error: out.error });
+  }
+  // The ticket rides in the FRAGMENT: browsers do not send it to servers and proxies do not log it.
+  return requesterBack(res, out.code, { ticket: out.ticket, name: out.name, email: out.email });
+}
+
 router.get('/oidc/:slug/start', asyncRoute(async (req, res) => {
   const provider = oidcProviders.get(req.params.slug);
   if (!provider) return backToApp(res, { sso_error: 'unknown_provider' });
-  if (provider.kind === 'saml') return res.redirect(`/api/auth/saml/${encodeURIComponent(provider.slug)}/start`);
-  await beginOidc(req, res, provider);
+  const app = appChallengeOf(req);
+  if (provider.kind === 'saml') {
+    return res.redirect(`/api/auth/saml/${encodeURIComponent(provider.slug)}/start${app ? `?app_challenge=${app}` : ''}`);
+  }
+  await beginOidc(req, res, provider, app ? { app } : {});
 }));
 
 /*
@@ -1404,8 +1662,9 @@ router.get('/saml/:slug/start', asyncRoute(async (req, res) => {
     const requestId = saml.newRequestId();
     const url = await saml.samlFor(provider, publicOrigin(req), { generateUniqueId: () => requestId })
       .getAuthorizeUrlAsync('', undefined, {});
+    const app = appChallengeOf(req);
     const tx = jwt.sign(
-      { typ: 'saml-tx', slug: provider.slug, rid: requestId },
+      { typ: 'saml-tx', slug: provider.slug, rid: requestId, ...(app ? { app } : {}) },
       config.jwtSecret,
       { expiresIn: OIDC_TX_TTL_S, algorithm: 'HS256' },   // a typ no other verifier accepts
     );
@@ -1475,7 +1734,8 @@ router.post('/saml/:slug/acs', express.urlencoded({ extended: false, limit: '512
   const claims = saml.profileToClaims(profile);
   if (!claims.sub) return backToApp(res, { sso_error: 'verification_failed' });
   try {
-    return await completeFederatedLogin(req, res, { provider, claims, tag: 'saml' });
+    if (tx.rq) return finishRequesterSso(req, res, { provider, claims, formId: tx.rq });
+    return await completeFederatedLogin(req, res, { provider, claims, tag: 'saml', app: tx.app || null });
   } catch (err) {
     console.error(`[saml] ${provider.slug} sign-in failed:`, err.message);
     return backToApp(res, { sso_error: 'server_error' });
@@ -1565,6 +1825,9 @@ router.get('/oidc/:slug/callback', asyncRoute(async (req, res) => {
     return backToApp(res, { sso_error: 'expired' });
   }
 
+  // A content-request round trip (beginRequesterSso) reports its failures on the form, not the login page.
+  const backFail = tx.rq ? (r, params) => requesterBackById(r, tx.rq, params) : backToApp;
+
   // CSRF: the state we minted, in the cookie only we could set, must match the one coming back.
   // Compared in constant time so a wrong state cannot be discovered a character at a time.
   const got = String(req.query.state || '');
@@ -1581,10 +1844,10 @@ router.get('/oidc/:slug/callback', asyncRoute(async (req, res) => {
   const gotBuf = Buffer.from(got, 'utf8');
   const wantBuf = Buffer.from(want, 'utf8');
   if (gotBuf.length !== wantBuf.length || !crypto.timingSafeEqual(gotBuf, wantBuf)) {
-    return backToApp(res, { sso_error: 'bad_state' });
+    return backFail(res, { sso_error: 'bad_state' });
   }
-  if (tx.slug !== provider.slug) return backToApp(res, { sso_error: 'bad_state' });
-  if (!req.query.code) return backToApp(res, { sso_error: 'no_code' });
+  if (tx.slug !== provider.slug) return backFail(res, { sso_error: 'bad_state' });
+  if (!req.query.code) return backFail(res, { sso_error: 'no_code' });
 
   let claims;
   try {
@@ -1603,10 +1866,11 @@ router.get('/oidc/:slug/callback', asyncRoute(async (req, res) => {
     });
   } catch (err) {
     console.error(`[oidc] ${provider.slug} verification failed:`, err.message);
-    return backToApp(res, { sso_error: 'verification_failed' });
+    return backFail(res, { sso_error: 'verification_failed' });
   }
 
-  return completeFederatedLogin(req, res, { provider, claims, link: tx.link || null });
+  if (tx.rq) return finishRequesterSso(req, res, { provider, claims, formId: tx.rq });
+  return completeFederatedLogin(req, res, { provider, claims, link: tx.link || null, app: tx.app || null });
 }));
 
 /*
@@ -1616,10 +1880,23 @@ router.get('/oidc/:slug/callback', asyncRoute(async (req, res) => {
  * cookie hand-off. `claims` is { sub, email, name, picture?, email_verified? }; `link` is the
  * account a "link" flow started from (OIDC only).
  */
-async function completeFederatedLogin(req, res, { provider, claims, link = null, tag = 'oidc' }) {
+/** 3.0: is this person provisioned into the organization by SCIM and currently deactivated there? */
+function scimDeactivated(orgId, userId) {
+  try {
+    return !!db.prepare('SELECT 1 FROM scim_users WHERE organization_id = ? AND user_id = ? AND active = 0').get(orgId, userId);
+  } catch (e) {
+    if (/no such table/i.test(e.message)) return false;
+    throw e;
+  }
+}
+
+async function completeFederatedLogin(req, res, { provider, claims, link = null, tag = 'oidc', app = null }) {
   const email = String(claims.email || '').toLowerCase().trim();
   const linking = !!link;
-  const fail = linking ? backToSettings : backToApp;
+  // The Manager app (app = its challenge) hears about a failure too, rather than a browser tab
+  // showing the web login page.
+  const forApp = !linking && !!app && APP_CHALLENGE_RE.test(app);
+  const fail = linking ? backToSettings : (forApp ? backToManagerApp : backToApp);
   if (!email) return fail(res, { sso_error: 'no_email' });
 
   /*
@@ -1708,6 +1985,14 @@ async function completeFederatedLogin(req, res, { provider, claims, link = null,
     const result = upsertFederatedUser({ claims, email, provider, req });
     if (result.error) return backToApp(res, { sso_error: result.error });
     const { user, isNew } = result;
+    // 3.0: deactivated through SCIM. The identity provider normally refuses first; this is what
+    // holds when it does not (a different provider, a stale IdP session, provisioning lag).
+    if (user.disabled_at) return fail(res, { sso_error: 'account_disabled' });
+    // …and an organization's own SSO must not re-admit someone its provisioning deactivated: the
+    // join below would otherwise hand them a fresh membership the moment they signed in.
+    if (provider.organizationId && scimDeactivated(provider.organizationId, user.id)) {
+      return fail(res, { sso_error: 'account_disabled' });
+    }
 
     /*
      * A provider that belongs to an ORGANIZATION vouches for its own people, so anyone who signs in
@@ -1775,6 +2060,10 @@ async function completeFederatedLogin(req, res, { provider, claims, link = null,
      * and the session token lives for days, so a copy of it sitting in a Set-Cookie header is worth
      * stealing long after the login. This wrapper is good for 120 seconds and for nothing else.
      */
+    if (forApp) {
+      // The Manager app: a single-use code for the app to swap (see APP_REDIRECT above).
+      return backToManagerApp(res, { code: issueAppCode({ token, workspaceId, challenge: app }) });
+    }
     const claimToken = jwt.sign(
       { typ: 'sso-claim', tok: token, wsp: workspaceId || null },
       config.jwtSecret,
@@ -1790,7 +2079,7 @@ async function completeFederatedLogin(req, res, { provider, claims, link = null,
     backToApp(res, { sso: '1' });
   } catch (err) {
     console.error(`[${tag}] ${provider.slug} sign-in failed:`, err.message);
-    backToApp(res, { sso_error: 'server_error' });
+    fail(res, { sso_error: 'server_error' });
   }
 }
 
@@ -1860,13 +2149,13 @@ function upsertFederatedUser({ claims, email, provider, req }) {
     const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
     const isFirst = userCount === 0;
     const role = isFirst ? 'platform_admin' : 'user';
-    const plan = (isFirst && config.selfHosted) ? 'enterprise' : 'pro';
-    const trialStarted = isFirst && config.selfHosted ? null : Math.floor(Date.now() / 1000);
+    const { plan, trialStarted } = signupPlan(isFirst);
     db.prepare(`
       INSERT INTO users (id, email, name, auth_provider, provider_id, avatar_url, role, plan_id, trial_started, trial_plan, email_verified)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
     `).run(id, email, claims.name || '', provider.slug, String(claims.sub), claims.picture || '',
       role, plan, trialStarted, trialStarted ? 'pro' : null);
+    require('../lib/conversion-events').record(db, { userId: id, event: 'signup', meta: { method: 'sso' } });
     return { user: db.prepare('SELECT * FROM users WHERE id = ?').get(id), isNew: true };
   }
 
@@ -2041,3 +2330,7 @@ module.exports = router;
 module.exports.emailAllowedForProvider = emailAllowedForProvider;
 module.exports.upsertFederatedUser = upsertFederatedUser;
 module.exports.isOrphanedFederated = isOrphanedFederated;
+module.exports.scimDeactivated = scimDeactivated;
+// 3.0 content requests: the SSO gate of a request form (routes/request-public.js) and its finish, for tests.
+module.exports.beginRequesterSso = beginRequesterSso;
+module.exports.finishRequesterSso = finishRequesterSso;

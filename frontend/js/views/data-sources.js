@@ -29,7 +29,11 @@ const TYPES = [
   { type: 'table', accent: '#ec4899', tag: 'no_setup', icon: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M3 14h18M9 9v11"/><path d="M15 16.5l1.5-1.5 2 2"/>' },
   { type: 'csv', accent: '#14b8a6', icon: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M8 13h8M8 17h5"/>' },
   { type: 'rss', accent: '#f97316', icon: '<path d="M5 11a8 8 0 0 1 8 8M5 5a14 14 0 0 1 14 14"/><circle cx="6" cy="18" r="1.5"/>' },
+  // Point of sale (docs/pos-menus.md). Generic till / shop-bag icons: never a provider's logo.
+  { type: 'square', accent: '#0f766e', icon: '<rect x="3" y="11" width="18" height="10" rx="2"/><path d="M6 11V5h12v6M9 8h6M7 15h2M11 15h2M15 15h2M7 18h10"/>' },
+  { type: 'shopify', accent: '#65a30d', icon: '<path d="M5 8h14l-1 12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1z"/><path d="M9 10V6a3 3 0 0 1 6 0v4"/>' },
 ];
+const POS_TYPES = new Set(['square', 'shopify']);
 const PLUGIN_ICON = '<path d="M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0zM12 16v5"/>';
 const typeMeta = (type) => TYPES.find((x) => x.type === type) || { type, accent: '#64748b', icon: PLUGIN_ICON };
 const typeLabel = (type) => {
@@ -41,7 +45,7 @@ const iconSvg = (type, size = 22) => `<svg width="${size}" height="${size}" view
 const iconTile = (type, cls = '') => `<span class="ds-icon ${cls}" style="--ds-accent:${typeMeta(type).accent}">${iconSvg(type)}</span>`;
 
 // Types whose data is rows and columns (lib/data-sources/tabular.js on the server).
-const TABULAR = new Set(['sheets', 'csv', 'table', 'rest']);
+const TABULAR = new Set(['sheets', 'csv', 'table', 'rest', 'square', 'shopify']);
 
 export async function render(container) {
   container.innerHTML = `
@@ -194,6 +198,8 @@ function sourceSummary(ds) {
     case 'sheets': return c.sheet ? `Google Sheets · ${c.sheet}` : 'Google Sheets';
     case 'table': return t('data_sources.summary_table', { r: (c.rows || []).length, c: (c.columns || []).length });
     case 'rest': return `${(c.method || 'GET').toUpperCase()} ${host(c.url)}${c.json_path ? ` · ${c.json_path}` : ''}`;
+    case 'square': return `Square${c.environment === 'sandbox' ? ' (Sandbox)' : ''} · ${c.location_name || c.location_id || t('pos.all_locations')}`;
+    case 'shopify': return `Shopify · ${c.store_domain || ''}${c.collections ? ` · ${c.collections}` : ''}`;
     default: return c.url ? String(c.url).replace(/^(https?|webcal):\/\//, '') : t('data_sources.inline_data');
   }
 }
@@ -256,7 +262,7 @@ function mountVariables(host, slug, data, type, hasKey) {
   host.innerHTML = `
     ${keys.length > 12 ? `<input type="search" class="input ds-var-search" placeholder="${esc(t('data_sources.search_vars', { n: keys.length }))}" aria-label="${esc(t('data_sources.search_vars', { n: keys.length }))}">` : ''}
     <p class="ds-hint">${esc(t('data_sources.copy_as', { tag: tagFor(slug, 'KEY') }))}</p>
-    ${TABULAR.has(type) && !hasKey && 'row_count' in data ? `<p class="ds-hint">${esc(t('data_sources.tip_lookup'))}</p>` : ''}
+    ${TABULAR.has(type) && !POS_TYPES.has(type) && !hasKey && 'row_count' in data ? `<p class="ds-hint">${esc(t('data_sources.tip_lookup'))}</p>` : ''}
     <div class="ds-var-list" role="list"></div>
     <p class="ds-muted ds-var-more" hidden></p>`;
   const list = host.querySelector('.ds-var-list');
@@ -387,8 +393,76 @@ function formHtml(type, cfg, isEdit) {
         <span class="ds-muted" id="f_gridsize"></span>
       </div>
       ${field(esc(t('data_sources.key_column')), `<select id="f_key" class="input"></select>`, esc(t('data_sources.key_column_hint')))}`;
+    case 'square': return `
+      <div class="ds-callout">
+        <b>${esc(t('pos.square_steps_title'))}</b>
+        <ol><li>${esc(t('pos.square_step1'))}</li><li>${esc(t('pos.square_step2'))}</li><li>${esc(t('pos.square_step3'))}</li></ol>
+        <span class="ds-field-hint">${esc(t('pos.square_token_note'))}</span>
+      </div>
+      <div class="ds-row2">
+        ${field(esc(t('pos.square_token')) + (isEdit ? '' : ' *'), `<input id="f_token" class="input" type="password" autocomplete="new-password" spellcheck="false" placeholder="${esc(isEdit ? t('data_sources.secret_saved') : 'EAAA…')}">`)}
+        ${field(esc(t('pos.environment')), `<select id="f_env" class="input">${opt('production', t('pos.env_production'), cfg.environment || 'production')}${opt('sandbox', t('pos.env_sandbox'), cfg.environment)}</select>`)}
+      </div>
+      ${field(esc(t('pos.location')), `<select id="f_location" class="input">${opt('', t('pos.all_locations'), cfg.location_id || '')}${cfg.location_id ? opt(cfg.location_id, cfg.location_name || cfg.location_id, cfg.location_id) : ''}</select>`, esc(t('pos.location_hint')))}
+      <p class="ds-field-hint ds-lock">${esc(t('pos.secret_note'))}</p>
+      ${posOptions(cfg)}`;
+    case 'shopify': {
+      const mode = cfg.connect_with === 'client_credentials' ? 'client_credentials' : 'token';
+      return `
+      <div class="ds-callout">
+        <b>${esc(t('pos.shopify_steps_title'))}</b>
+        <ol><li>${esc(t('pos.shopify_step1'))}</li><li>${esc(t('pos.shopify_step2'))}</li><li>${esc(t('pos.shopify_step3'))}</li></ol>
+      </div>
+      ${field(esc(t('pos.store_domain')) + ' *', `<input id="f_store" class="input" autocomplete="off" spellcheck="false" placeholder="my-cafe.myshopify.com" value="${v('store_domain')}">`, `<span id="f_store_status">${esc(t('pos.store_domain_hint'))}</span>`)}
+      <fieldset class="ds-fieldset">
+        <legend>${esc(t('pos.connect_with'))}</legend>
+        <div class="ds-seg" role="radiogroup" aria-label="${esc(t('pos.connect_with'))}">
+          ${['token', 'client_credentials'].map((m) => `<label><input type="radio" name="f_connect" value="${m}" ${mode === m ? 'checked' : ''}><span>${esc(t(`pos.connect_${m}`))}</span></label>`).join('')}
+        </div>
+        <div class="ds-auth" data-auth="token">${field(esc(t('pos.admin_token')), `<input id="f_token" class="input" type="password" autocomplete="new-password" spellcheck="false" placeholder="${esc(isEdit && mode === 'token' ? t('data_sources.secret_saved') : 'shpat_…')}">`, esc(t('pos.admin_token_hint')))}</div>
+        <div class="ds-auth ds-row2" data-auth="client_credentials">
+          ${field(esc(t('pos.client_id')), `<input id="f_client_id" class="input" autocomplete="off" spellcheck="false" value="${v('client_id')}">`)}
+          ${field(esc(t('pos.client_secret')), `<input id="f_client_secret" class="input" type="password" autocomplete="new-password" placeholder="${esc(isEdit && mode === 'client_credentials' ? t('data_sources.secret_saved') : '')}">`)}
+        </div>
+        <p class="ds-field-hint ds-lock">${esc(t('pos.shopify_scope_note'))}</p>
+      </fieldset>
+      <div class="ds-row2">
+        ${field(esc(t('pos.collections')), `<input id="f_collections" class="input" list="f_collections_list" autocomplete="off" spellcheck="false" placeholder="hot-drinks, pastries" value="${esc(listText(cfg.collections))}"><datalist id="f_collections_list"></datalist>`, esc(t('pos.collections_hint')))}
+        ${field(esc(t('pos.tag')), `<input id="f_tag" class="input" maxlength="80" placeholder="${esc(t('pos.tag_ph'))}" value="${v('tag')}">`, esc(t('pos.tag_hint')))}
+      </div>
+      ${posOptions(cfg)}`;
+    }
     default: return '';
   }
+}
+
+const listText = (v) => (Array.isArray(v) ? v.join(', ') : String(v || ''));
+
+/* The menu options both point-of-sale sources share (server lib/data-sources/pos-common.js). */
+function posOptions(cfg) {
+  const open = cfg.include_sections || cfg.exclude_sections || cfg.hide_sold_out || (cfg.variations && cfg.variations !== 'columns') || cfg.price_format === 'number' || cfg.locale;
+  return `
+    <details class="ds-adv" ${open ? 'open' : ''}>
+      <summary>${esc(t('pos.menu_options'))}</summary>
+      <div class="ds-adv-body">
+        <div class="ds-row2">
+          ${field(esc(t('pos.include_sections')), `<input id="f_include" class="input" placeholder="${esc(t('pos.include_ph'))}" value="${esc(listText(cfg.include_sections))}">`, esc(t('pos.include_hint')))}
+          ${field(esc(t('pos.exclude_sections')), `<input id="f_exclude" class="input" placeholder="${esc(t('pos.exclude_ph'))}" value="${esc(listText(cfg.exclude_sections))}">`)}
+        </div>
+        <div class="ds-row3">
+          ${field(esc(t('pos.variations')), `<select id="f_variations" class="input">${['columns', 'rows', 'first'].map((m) => opt(m, t(`pos.variations_${m}`), cfg.variations || 'columns')).join('')}</select>`)}
+          ${field(esc(t('pos.price_format')), `<select id="f_price_format" class="input">${opt('currency', t('pos.price_currency'), cfg.price_format || 'currency')}${opt('number', t('pos.price_number'), cfg.price_format)}</select>`)}
+          ${field(esc(t('pos.locale')), `<input id="f_locale" class="input" maxlength="20" spellcheck="false" placeholder="${esc(t('pos.locale_ph'))}" value="${esc(cfg.locale || '')}">`)}
+        </div>
+        <div class="ds-row3">
+          <label class="ds-check"><input type="checkbox" id="f_hide_sold_out" ${cfg.hide_sold_out ? 'checked' : ''}><span>${esc(t('pos.hide_sold_out'))}</span></label>
+          ${field(esc(t('data_sources.interval_label')), intervalSelect('f_interval', cfg.interval_min || 5, [5, 15, 60]))}
+          ${field(esc(t('data_sources.max_rows')), `<input id="f_maxrows" class="input" type="number" min="1" max="100" placeholder="100" value="${esc(cfg.max_rows || '')}">`)}
+        </div>
+        <p class="ds-field-hint">${esc(t('pos.variations_hint'))}</p>
+        <p class="ds-field-hint">${esc(t('pos.sync_note'))}</p>
+      </div>
+    </details>`;
 }
 
 /* Options every table-shaped source shares: header row, key column (lookup), refresh. */
@@ -449,7 +523,15 @@ function weatherFormHtml(cfg) {
     <p class="ds-field-hint">${esc(t('data_sources.weather_attribution'))}</p>`;
 }
 
-function openEditModal(ds, presetType) {
+/*
+ * The connect dialog on its own, for a shortcut elsewhere (the menu board editor's "Menu from
+ * Square / Shopify"): opens straight on the type's form; onSaved(created) gets { id, slug, … }.
+ */
+export function openConnectModal(type, opts = {}) {
+  openEditModal(null, type, opts);
+}
+
+function openEditModal(ds, presetType, opts = {}) {
   const isEdit = !!ds;
   const cfg = (ds && ds.config) || {};
   let type = ds ? ds.type : presetType || null;
@@ -507,7 +589,7 @@ function openEditModal(ds, presetType) {
   function showForm(nextType) {
     type = nextType;
     lastColumns = [];
-    $('#dsBack').hidden = isEdit;
+    $('#dsBack').hidden = isEdit || !!opts.onSaved;   // a shortcut opened this type on purpose
     $('#dsHeadIcon').innerHTML = iconTile(type, 'ds-icon-sm');
     $('#dsModalTitle').textContent = isEdit ? t('data_sources.edit_named', { name: ds.name }) : typeLabel(type);
     $('#dsModalSub').textContent = TYPES.some((x) => x.type === type) ? t(`data_sources.pitch.${type}`) : (plugin() && plugin().description) || '';
@@ -572,6 +654,23 @@ function openEditModal(ds, presetType) {
       url.oninput = paint; paint();
     }
     if (type === 'table') mountGridEditor(typeCfg);
+    if (type === 'shopify') {
+      const paintConnect = () => {
+        const m = (overlay.querySelector('input[name="f_connect"]:checked') || {}).value || 'token';
+        overlay.querySelectorAll('.ds-auth').forEach((el) => { el.hidden = el.dataset.auth !== m; });
+      };
+      overlay.querySelectorAll('input[name="f_connect"]').forEach((r) => { r.onchange = paintConnect; });
+      paintConnect();
+      const store = $('#f_store');
+      const status = $('#f_store_status');
+      const paint = () => {
+        const d = shopDomain(store.value);
+        if (!store.value.trim()) { status.className = ''; status.textContent = t('pos.store_domain_hint'); }
+        else if (!d) { status.className = 'ds-err-text'; status.textContent = t('pos.store_domain_bad'); }
+        else { status.className = 'ds-ok-text'; status.textContent = d; }
+      };
+      store.oninput = paint; paint();
+    }
   }
 
   // ─── manual table editor ─────────────────────────────────────────────────────
@@ -689,6 +788,25 @@ function openEditModal(ds, presetType) {
       while (rows.length && rows[rows.length - 1].every((v) => !v.trim())) rows.pop();
       return { columns: grid.columns.map((n) => n.trim()), rows, key_column: grid.key };
     }
+    if (POS_TYPES.has(type)) {
+      const o = {
+        include_sections: val('#f_include'), exclude_sections: val('#f_exclude'), hide_sold_out: $('#f_hide_sold_out').checked,
+        variations: val('#f_variations') || 'columns', price_format: val('#f_price_format') || 'currency', locale: val('#f_locale'),
+        interval_min: num('#f_interval', 5),
+      };
+      if (val('#f_maxrows')) o.max_rows = num('#f_maxrows', 100);
+      // A blank secret on an edit means "keep the saved one" (the server merges it back).
+      if (type === 'square') {
+        const loc = $('#f_location');
+        const locName = loc && loc.selectedIndex > 0 ? loc.options[loc.selectedIndex].textContent : '';
+        return { ...o, environment: val('#f_env') || 'production', access_token: $('#f_token').value.trim(), location_id: val('#f_location'), location_name: locName };
+      }
+      const mode = (overlay.querySelector('input[name="f_connect"]:checked') || {}).value || 'token';
+      const c = { ...o, store_domain: shopDomain(val('#f_store')) || val('#f_store'), connect_with: mode, collections: val('#f_collections'), tag: val('#f_tag') };
+      if (mode === 'token') c.access_token = $('#f_token').value.trim();
+      else { c.client_id = val('#f_client_id'); c.client_secret = $('#f_client_secret').value.trim(); }
+      return c;
+    }
     if (type === 'rest') {
       const auth = (overlay.querySelector('input[name="f_auth"]:checked') || {}).value || 'none';
       const c = { url: val('#f_url'), method: val('#f_method') || 'GET', json_path: val('#f_path'), response_format: val('#f_format') || 'auto', shape: val('#f_shape') || 'auto', auth_type: auth, ...tableOpts() };
@@ -706,6 +824,12 @@ function openEditModal(ds, presetType) {
     if (plugin()) return (plugin().fields || []).some((f) => f.required && (c[f.name] == null || c[f.name] === '')) ? t('data_sources.fill_required2') : null;
     if (type === 'table') return c.columns.some((n) => n) ? null : t('data_sources.table_need_col');
     if (type === 'sheets' && !parseSheetLink(c.url)) return t('data_sources.sheets_url_bad');
+    if (type === 'square') return c.access_token || isEdit ? null : t('pos.token_required');
+    if (type === 'shopify') {
+      if (!shopDomain(c.store_domain)) return t('pos.store_domain_bad');
+      if (c.connect_with === 'client_credentials') return c.client_id && (c.client_secret || isEdit) ? null : t('pos.client_required');
+      return c.access_token || isEdit ? null : t('pos.token_required');
+    }
     return c.url ? null : t('data_sources.url_required');
   }
 
@@ -737,7 +861,12 @@ function openEditModal(ds, presetType) {
     if (type === 'ical') head = t('data_sources.test_success', { n: data.event_count || 0 });
     else if (type === 'weather') head = t('data_sources.weather_test_success', { location: data.location || '' });
     else if (type === 'rss') head = t('data_sources.test_ok_feed', { title: data.feed_title || '', n: data.item_count || 0 });
+    else if (POS_TYPES.has(type) && data.row_count != null) {
+      const currency = res.meta && res.meta.currency ? res.meta.currency : '';
+      head = t('pos.test_ok', { n: data.row_count, currency });
+    }
     else if (data.row_count != null) head = t('data_sources.test_ok_rows', { rows: data.row_count, cols: data.column_count, n });
+    applyPosMeta(res.meta);
     const tbl = res.table && Array.isArray(res.table.columns) && res.table.columns.length ? res.table : null;
     lastColumns = tbl ? tbl.columns : [];
     const keyList = $('#f_key_list');
@@ -747,9 +876,9 @@ function openEditModal(ds, presetType) {
       ${tbl ? `
         <div class="ds-sample">
           <div class="ds-sample-title">${esc(t('data_sources.sample_title'))}
-            ${TABULAR.has(type) && type !== 'table' && !val('#f_key') ? `<span class="ds-muted"> · ${esc(t('data_sources.pick_key'))}</span>` : ''}</div>
+            ${TABULAR.has(type) && type !== 'table' && !POS_TYPES.has(type) && !val('#f_key') ? `<span class="ds-muted"> · ${esc(t('data_sources.pick_key'))}</span>` : ''}</div>
           <div class="ds-sample-scroll"><table class="ds-sample-table">
-            <thead><tr>${tbl.columns.map((col) => `<th>${TABULAR.has(type) && type !== 'table'
+            <thead><tr>${tbl.columns.map((col) => `<th>${TABULAR.has(type) && type !== 'table' && !POS_TYPES.has(type)
               ? `<button type="button" class="ds-colkey" data-key="${esc(col.name)}" title="${esc(t('data_sources.use_as_key'))}">${esc(col.name)}</button>`
               : esc(col.name)}<code>${esc(col.key)}</code></th>`).join('')}</tr></thead>
             <tbody>${(tbl.sample || []).map((r) => `<tr>${tbl.columns.map((col) => `<td>${esc(String(r[col.key] == null ? '' : r[col.key]).slice(0, 80))}</td>`).join('')}</tr>`).join('')}</tbody>
@@ -770,6 +899,18 @@ function openEditModal(ds, presetType) {
         testBtn.click();
       };
     });
+  }
+
+  // After a test: Square's locations into the picker, Shopify's collections into the suggestions.
+  function applyPosMeta(meta) {
+    if (!meta) return;
+    const loc = $('#f_location');
+    if (loc && Array.isArray(meta.locations)) {
+      const cur = loc.value || (meta.location && meta.location.id) || '';
+      loc.innerHTML = opt('', t('pos.all_locations'), cur) + meta.locations.map((l) => opt(l.id, l.name, cur)).join('');
+    }
+    const dl = $('#f_collections_list');
+    if (dl && Array.isArray(meta.collections)) dl.innerHTML = meta.collections.map((c) => `<option value="${esc(c.handle)}">${esc(c.title)}</option>`).join('');
   }
 
   // ─── save ────────────────────────────────────────────────────────────────────
@@ -793,8 +934,9 @@ function openEditModal(ds, presetType) {
         await api.updateDataSource(ds.id, payload);
         showToast(t('data_sources.saved_ok'), 'success');
       } else {
-        await api.createDataSource(payload);
+        const created = await api.createDataSource(payload);
         showToast(t('data_sources.created_ok'), 'success');
+        if (opts.onSaved) { close(); opts.onSaved(created); return; }
       }
       close();
       await loadDataSources();
@@ -809,6 +951,16 @@ function openEditModal(ds, presetType) {
   $('#dsBack').onclick = showGallery;
 
   if (type) showForm(type); else showGallery();
+}
+
+/* Mirrors server/lib/data-sources/shopify-resolver.js normalizeShopDomain, for the as-you-type hint. */
+function shopDomain(raw) {
+  let s = String(raw || '').trim().toLowerCase().replace(/^https?:\/\//, '');
+  const admin = /^admin\.shopify\.com\/store\/([a-z0-9][a-z0-9-]{0,62})(?:[/?#]|$)/.exec(s);
+  if (admin) return `${admin[1]}.myshopify.com`;
+  s = s.replace(/[/?#].*$/, '');
+  if (/^[a-z0-9][a-z0-9-]{0,62}$/.test(s)) s += '.myshopify.com';
+  return /^[a-z0-9][a-z0-9-]{0,62}\.myshopify\.com$/.test(s) ? s : null;
 }
 
 /* Mirrors server/lib/data-sources/sheets-resolver.js parseSheetUrl, for the as-you-type hint. */

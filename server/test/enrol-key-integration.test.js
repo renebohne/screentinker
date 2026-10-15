@@ -187,3 +187,65 @@ test('a rolled-away key falls back to pairing instead of locking the IP out', as
     'pairing from this IP was refused — a stranded display has locked out the whole site');
   assert.notEqual(fresh.device_id, dev.device_id, 'and it is a genuinely new display');
 });
+
+/*
+ * #630 — a key in the URL of a browser that ALSO kept an identity in its storage.
+ *
+ * The web player used to send the key only when it had no stored device_id, so a browser that keeps
+ * its storage never presented a new link at all: a UniFi Cast whose server had been rebuilt sent
+ * the dead id from its storage, was told "not found", re-paired, and showed a pairing code as a
+ * brand-new display while the display its link named stayed offline. The player now sends both,
+ * and the server decides. These pin each answer.
+ */
+function connectWith(payload) {
+  return new Promise((resolve) => {
+    const sock = ioClient(`${BASE}/device`, { transports: ['websocket'], reconnection: false, forceNew: true });
+    let done = false;
+    const finish = (r) => { if (done) return; done = true; try { sock.close(); } catch { /* */ } resolve(r); };
+    sock.on('connect', () => sock.emit('device:register', { device_info: { app_version: 'test' }, ...payload }));
+    sock.on('device:registered', (d) => finish({ registered: true, device_id: d.device_id, device_token: d.device_token }));
+    sock.on('device:unpaired', (d) => finish({ registered: false, unpaired: d && d.reason }));
+    sock.on('device:auth-error', (e) => finish({ registered: false, authError: e && e.error, reason: e && e.reason }));
+    setTimeout(() => finish({ registered: false, timedOut: true }), 5000);
+  });
+}
+
+test('#630: a stored identity the server never had + a valid key = the key\'s display, no new row', async () => {
+  const dev = await provision();
+  const key = require('../lib/enrol-key').setEnrolKey(db, dev.device_id);
+  const before = deviceCount();
+  const r = await connectWith({ device_id: crypto.randomUUID(), device_token: 'f'.repeat(64), enrol_key: key });
+  assert.equal(r.registered, true, `expected to register, got ${JSON.stringify(r)}`);
+  assert.equal(r.device_id, dev.device_id, 'the link names the display; the dead stored id must not win');
+  assert.equal(deviceCount(), before, 'and no display row may be created');
+});
+
+test('#630: a working identity + a key for ANOTHER display = the other display (the newer link wins)', async () => {
+  const a = await provision();
+  const b = await provision();
+  const keyB = require('../lib/enrol-key').setEnrolKey(db, b.device_id);
+  const r = await connectWith({ device_id: a.device_id, device_token: a.device_token, enrol_key: keyB });
+  assert.equal(r.device_id, b.device_id);
+  assert.ok(r.device_token, 'the player is handed the new display\'s token, so its storage follows');
+});
+
+test('#630: a working identity + a key nobody has = the stored identity, untouched', async () => {
+  const a = await provision();
+  const r = await connectWith({ device_id: a.device_id, device_token: a.device_token, enrol_key: require('../lib/enrol-key').generateEnrolKey() });
+  assert.equal(r.registered, true, `a stale link must not unpair a working screen: ${JSON.stringify(r)}`);
+  assert.equal(r.device_id, a.device_id);
+});
+
+test('#630: the display\'s own key heals a stale stored token instead of forcing a re-pair', async () => {
+  const a = await provision();
+  const key = require('../lib/enrol-key').setEnrolKey(db, a.device_id);
+  const r = await connectWith({ device_id: a.device_id, device_token: '0'.repeat(64), enrol_key: key });
+  assert.equal(r.registered, true, JSON.stringify(r));
+  assert.equal(r.device_id, a.device_id);
+});
+
+test('#630: a stored identity alone, with no key, is unaffected', async () => {
+  const a = await provision();
+  const r = await connectWith({ device_id: a.device_id, device_token: a.device_token });
+  assert.equal(r.device_id, a.device_id);
+});

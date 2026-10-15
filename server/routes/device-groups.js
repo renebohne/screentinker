@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+// Abuse backstop (lib/backstop-limiter.js): already counted app-wide; here so this router is never unguarded.
+router.use(require('../lib/backstop-limiter'));
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
 const { PLATFORM_ROLES, ELEVATED_ROLES } = require('../middleware/auth');
@@ -291,6 +293,17 @@ router.delete('/:id', requireGroupWrite, (req, res) => {
 });
 
 // Get devices in a group
+// "What will every screen in this group show at…?" (docs/preview-at-time.md). Read-only, bounded to
+// the first 200 members, and only members in the group's own workspace.
+router.get('/:id/simulate', requireGroupRead, (req, res) => {
+  const sim = require('../lib/device-simulate');
+  const at = sim.parseInstant(req.query.at);
+  if (at === null) return res.status(400).json({ error: 'at must be an ISO 8601 date-time within a year back and five years ahead' });
+  const weather = sim.parseWeather(req.query);
+  if (weather === false) return res.status(400).json({ error: 'weather must be one of clear, cloudy, fog, rain, snow, storm; temp_c a number of degrees' });
+  res.json({ group: { id: req.group.id, name: req.group.name }, ...sim.simulateGroup(db, req.group.id, at, { weather, workspaceId: req.group.workspace_id }) });
+});
+
 router.get('/:id/devices', requireGroupRead, (req, res) => {
   const devices = db.prepare(`
     SELECT d.* FROM devices d

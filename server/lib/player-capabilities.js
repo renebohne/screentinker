@@ -57,6 +57,13 @@ const CAPABILITIES = [
    * type, shortening the timeline, so the deviceSocket strip keeps it off any screen that does not
    * declare it. */
   'playback.hold',
+  /* 3.0 TV-safe video copies (lib/video-variants.js): this player plays a tall (portrait-shaped)
+   * video from a server-made copy — turned into a landscape frame for a portrait-mounted screen,
+   * scaled to fit 1920x1080 for a landscape one — because its own decoder cannot open a 1080x1920
+   * stream (Samsung Tizen TVs: black screen, or an AVPlay prepare error). Declaring it is also what
+   * makes the server spend CPU on those copies: a workspace with no screen declaring it never gets
+   * one. In NO baseline — an older player would not know what to do with the copy. */
+  'playback.video_variants',
   /* Zones on a VIDEO WALL: the wall's layout, in percent of the wall's player rect, each zone paced
    * by the shared clock (lib/wall-layout.js). A wall member without it still plays the wall's
    * playlist across the whole wall, so the dashboard names the panels that lack it. In NO baseline. */
@@ -111,6 +118,19 @@ const CAPABILITIES = [
    * A screen (signage) declares remote.talk but NOT this; a phone/tablet (or a browser tab with a
    * mic) declares both. Implies remote.talk. */
   'remote.mic',
+  /* 3.0: a person's screen, shared from their browser, shown fullscreen on this screen
+   * (lib/screen-share.js). The player RECEIVES a peer-to-peer WebRTC stream and renders it over its
+   * content, then puts the content back. Declared only by a player that runs that receiver — today
+   * the web player in a real browser (not inside the BrightSign / webOS / Vega / iOS shells, where it
+   * is unverified). In NO baseline: a player that never heard of it would leave a guest staring at
+   * a TV that ignores them, so the dashboard and the meeting-room code offer only screens that
+   * declare it. */
+  'remote.screen_share',
+  /* 3.0: the screen-share receiver can show up to four shares at once — side by side, stacked on a
+   * portrait screen, or a 2x2 grid — with one spotlighted and one presenter's sound at a time
+   * (device:screenshare-layout). Only a screen that declares it can let several people present at
+   * once; a screen without it shows one presenter at a time (lib/screen-share.js). In NO baseline. */
+  'remote.screen_share_tiles',
   /* #312 follow-up: the player can accept a server-URL rewrite from the dashboard AND verify the new
    * address is reachable before committing, rolling back if not. Declared only by a player that
    * implements that verify-then-commit path (so a fat-fingered URL cannot strand it), which is why
@@ -151,6 +171,25 @@ const CAPABILITIES = [
    * In NO baseline — brand new, and a fielded player simply ignores the unknown command.
    */
   'net.http_request',
+  /*
+   * 3.0 site cache (lib/site-cache, docs/site-cache.md): the player can fetch an asset from a cache
+   * box on its own LAN by sha256 — `GET <cache>/cache/<sha256>` with a bearer token — VERIFY the bytes
+   * against that digest, and fall back to this server on any failure. It CHANGES THE PAYLOAD (a
+   * top-level `site_cache` with the box's address, a token and per-item digests), so it is opt-in by
+   * declaration and in NO baseline: every player that does not declare it receives byte-for-byte what
+   * it received before. The web player claims it only with a service worker in control (that is where
+   * the fetch lives) and WebCrypto to verify with; the native Android player in its downloader.
+   */
+  'net.site_cache',
+  /*
+   * 3.0 campaigns (lib/campaign.js, docs/layouts-and-campaigns.md): the player can play a playlist
+   * whose items are WHOLE LAYOUTS — switching between layouts (each zone with its own content) and
+   * full-screen items, preloading the next step. It CHANGES THE PAYLOAD (a top-level `campaign`), so
+   * it is opt-in by declaration and in NO baseline: a player that does not declare it gets the
+   * documented fallback in `assignments` and byte-for-byte nothing else. Declared by the web player
+   * in a plain browser and by the native Android player.
+   */
+  'layout.campaign',
   /*
    * Audience counting (lib/audience.js): the player has a camera it can open and an on-device face
    * detector, and will report COUNTS ONLY. Declared by a player that could count if asked — not a

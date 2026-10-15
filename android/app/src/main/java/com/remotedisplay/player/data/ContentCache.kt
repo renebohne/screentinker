@@ -235,6 +235,70 @@ class ContentCache internal constructor(
         }
     }
 
+    /**
+     * 3.0 site cache: fetch [contentId] from the LAN cache box by its sha256 and keep it ONLY if the
+     * bytes hash to the digest the ORIGIN gave us (never one the box claims). One short attempt, no
+     * resume — a LAN either moves the file or the box is not worth waiting for — and every failure
+     * is [Result.Failed] so the caller goes to the origin exactly as before.
+     *
+     * Uses its own `.site.part`, never the origin download's `.part`: a half-finished origin resume
+     * must survive a failed LAN attempt untouched.
+     */
+    fun fetchFromSiteCache(site: SiteCacheConfig, entry: SiteCacheConfig.Entry, contentId: String, filename: String, rev: Long = 0L): Result {
+        val ext = filename.substringAfterLast('.', "mp4")
+        val finalFile = File(cacheDir, "$contentId.$ext")
+        val sitePart = File(cacheDir, "$contentId.$ext$PART_SUFFIX$SITE_SUFFIX")
+        sitePart.delete()
+        try {
+            val req = Request.Builder()
+                .url("${site.baseUrl}/cache/${entry.sha256}")
+                .header("Authorization", "Bearer ${site.token}")
+                .build()
+            siteClient.newCall(req).execute().use { response ->
+                if (response.code != 200) {
+                    Log.i("ContentCache", "Site cache answered ${response.code} for $filename — using the origin")
+                    return Result.Failed
+                }
+                val body = response.body ?: return Result.Failed
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                var n = 0L
+                body.byteStream().use { input ->
+                    FileOutputStream(sitePart).use { output ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val r = input.read(buf)
+                            if (r < 0) break
+                            n += r
+                            // More than promised is not this asset; stop rather than fill the disk.
+                            if (n > entry.size) throw java.io.IOException("longer than the manifest says")
+                            digest.update(buf, 0, r)
+                            output.write(buf, 0, r)
+                        }
+                        output.flush()
+                        try { output.fd.sync() } catch (_: Exception) {}
+                    }
+                }
+                val hex = digest.digest().joinToString("") { "%02x".format(it) }
+                if (n != entry.size || hex != entry.sha256) {
+                    Log.w("ContentCache", "Site cache bytes for $filename did not match their sha256 — discarded, using the origin")
+                    sitePart.delete()
+                    return Result.Failed
+                }
+                finalFile.delete()
+                if (!sitePart.renameTo(finalFile)) { sitePart.delete(); return Result.Failed }
+                try {
+                    if (rev > 0L) revFile(finalFile).writeText(rev.toString()) else revFile(finalFile).delete()
+                } catch (_: Exception) { /* still usable */ }
+                Log.i("ContentCache", "From site cache: $filename ($n bytes, sha256 verified)")
+                return Result.Done(finalFile)
+            }
+        } catch (e: Exception) {
+            Log.i("ContentCache", "Site cache unavailable for $filename (${e.message}) — using the origin")
+            sitePart.delete()
+            return Result.Failed
+        }
+    }
+
     /** Complete-or-nothing wrapper: returns the cached file only when the asset is whole. */
     fun downloadContent(serverUrl: String, contentId: String, filename: String, rev: Long = 0L): File? =
         (fetch(serverUrl, contentId, filename, rev) as? Result.Done)?.file
@@ -279,10 +343,24 @@ class ContentCache internal constructor(
         try { if (value.isNullOrBlank()) tagFile.delete() else tagFile.writeText(value) } catch (_: Exception) {}
     }
 
+    /*
+     * The LAN fetch gets SHORT timeouts of its own: a box that does not answer within seconds is
+     * down, and every second spent on it is a second the origin download has not started.
+     */
+    private val siteClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .connectTimeout(4, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .callTimeout(10, TimeUnit.MINUTES)
+            .followRedirects(false)
+            .build()
+    }
+
     companion object {
         private const val PART_SUFFIX = ".part"
         private const val TAG_SUFFIX = ".tag"
         private const val REV_SUFFIX = ".rev"
+        private const val SITE_SUFFIX = ".site"
 
         /**
          * "bytes <start>-<end>/<total>" -> (start, total). Null for anything else, including the
