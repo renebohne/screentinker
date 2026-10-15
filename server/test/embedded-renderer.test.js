@@ -32,12 +32,13 @@ db.exec(`
     timezone TEXT, reported_timezone TEXT, background_color TEXT DEFAULT '#000000',
     default_content_id TEXT, last_heartbeat INTEGER, ip_address TEXT,
     app_version TEXT, updated_at INTEGER, heartbeat_expected_by INTEGER,
-    power_source TEXT
+    power_source TEXT, orientation TEXT DEFAULT 'landscape'
   );
   CREATE TABLE device_telemetry (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     device_id TEXT, battery_level INTEGER, battery_charging INTEGER NOT NULL DEFAULT 0,  -- as schema.sql
     wifi_rssi INTEGER, local_ip TEXT, power_source TEXT,
+    temperature_c REAL, humidity REAL,
     reported_at INTEGER
   );
   CREATE TABLE playlists (

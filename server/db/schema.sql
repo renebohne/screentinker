@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS devices (
     screen_profile  TEXT,
     -- embedded-renderer: one-time secret for claim polling security
     claim_secret    TEXT,
+    orientation     TEXT DEFAULT 'landscape',
     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
@@ -94,6 +95,9 @@ CREATE TABLE IF NOT EXISTS device_telemetry (
     wifi_ssid       TEXT,
     wifi_rssi       INTEGER,
     uptime_seconds  INTEGER,
+    power_source    TEXT,
+    temperature_c   REAL,
+    humidity        REAL,
     reported_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 
@@ -817,3 +821,19 @@ CREATE TABLE IF NOT EXISTS plugin_allowlist (
     approved_at    INTEGER NOT NULL,
     note           TEXT
 );
+
+-- #3 / mcu#9: Diagnostic log buffers uploaded by embedded/fielded devices
+CREATE TABLE IF NOT EXISTS device_diagnostic_logs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id       TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    log_json        TEXT NOT NULL,
+    log_count       INTEGER NOT NULL DEFAULT 0,
+    battery         INTEGER,
+    wifi_rssi       INTEGER,
+    version         TEXT,
+    uploaded_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_diagnostic_logs_dev
+    ON device_diagnostic_logs(device_id, uploaded_at DESC);
+

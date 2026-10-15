@@ -1,6 +1,6 @@
 # Embedded Renderer for Digital Signage (E-Paper & MCU Displays)
 
-ScreenTinker includes a dedicated server-side embedded renderer designed for lightweight microcontrollers (MCUs) such as the **ESP32-S3**, **Raspberry Pi Pico W**, or **Seeed Studio reTerminal Sticky** (3.97" B/W E-Paper 800×480 with SSD1677).
+ScreenTinker includes a dedicated server-side embedded renderer designed for lightweight microcontrollers (MCUs) such as the **ESP32-S3**, **Raspberry Pi Pico W**, the **Seeed Studio reTerminal Sticky** (3.97" B/W E-Paper 800×480 with SSD1677), and the **Seeed Studio reTerminal E-Series** (`E1001` 7.5" Mono, `E1002` 7.3" 6-Color Spectra 6, `E1003` 10.3" 16-Level Grayscale, `E1004` 13.3" 6-Color Spectra 6).
 
 Instead of requiring the display hardware to run a full web browser or render HTML/CSS, the embedded system periodically makes an HTTP `GET` request to the ScreenTinker server and receives a **pre-rendered, pre-dithered binary image** formatted specifically for its display panel.
 
@@ -118,7 +118,7 @@ Or with custom dimensions:
 
 ## 3. API Endpoints
 
-### 2.1 `GET /api/embedded/render`
+### 3.1 `GET /api/embedded/render`
 
 Fetches the pre-rendered image for the current playlist item.
 
@@ -127,9 +127,17 @@ Fetches the pre-rendered image for the current playlist item.
 - **`device_id`** *(query, required)*: The UUID of the device.
 - **`If-None-Match`** *(header, optional)*: ETag received in previous request.
 - **`X-ST-Device-Battery`** *(header, optional)*: Battery level as an integer percentage (`0`–`100`). Automatically stored in `device_telemetry` and displayed on the device health card.
+- **`X-ST-Power-Source`** *(header, optional)*: Active power source (`usb` or `battery`). Stored in `device_telemetry.power_source` and displayed on the device card.
+- **`X-ST-Charging`** *(header, optional)*: Battery charging state (`1` / `true` or `0` / `false`).
 - **`X-ST-Device-RSSI`** *(header, optional)*: Wi-Fi signal strength in dBm (e.g. `-65`). Stored in `device_telemetry`.
-- **`X-ST-Firmware-Version`** *(header, optional)*: Firmware / client version string (e.g. `1.2.0`). Updates `devices.app_version`.
-- **`format`** *(query, optional)*: Override output format (`x-epd-packed`, `png`, `jpeg`, `bmp`, `raw`).
+- **`X-ST-Device-Temperature`** *(header, optional)*: Ambient temperature in degrees Celsius (e.g. `23.5` via SHT40). Stored in `device_telemetry.temperature_c`.
+- **`X-ST-Device-Humidity`** *(header, optional)*: Relative humidity percentage (`0`–`100`, e.g. `45.2` via SHT40). Stored in `device_telemetry.humidity`.
+- **`X-ST-Device-Orientation`** *(header, optional)*: Device mounting orientation (`landscape`, `portrait`, `landscape-flipped`, `portrait-flipped`).
+- **`X-ST-Device-Rotation`** *(header, optional)*: Device rotation angle in degrees (`0`, `90`, `180`, `270`).
+- **`X-ST-Firmware-Version`** *(header, optional)*: Firmware / client version string (e.g. `1.3.0`). Updates `devices.app_version`.
+- **`orientation`** *(query, optional)*: Override screen orientation (`landscape`, `portrait`, `landscape-flipped`, `portrait-flipped`). Swaps resolution axes and aligns row stride automatically.
+- **`rotation`** *(query, optional)*: Explicit rotation angle in degrees (`0`, `90`, `180`, `270`).
+- **`format`** *(query, optional)*: Override output format (`x-epd-packed`, `x-epd-spectra6`, `x-epd-gray16`, `png`, `jpeg`, `bmp`, `raw`).
 - **`dither`** *(query, optional)*: Override dithering algorithm (`floyd-steinberg`, `atkinson`, `none`).
 - **`mode`** *(query, optional)*: `layout` (forces multi-zone layout rendering), `single` (forces single-item rendering). When omitted, automatically renders in multi-zone layout mode if the device has an assigned multi-zone layout (`zones.length > 1`), or single-item mode otherwise.
 - **`item`** *(query, optional)*: Force a specific playlist item index (0-based integer) for step testing or previewing.
@@ -137,11 +145,20 @@ Fetches the pre-rendered image for the current playlist item.
 
 #### Responses
 - **`200 OK`**: Binary image body formatted per the device's `screen_profile`.
-  - Content-Type: `application/octet-stream` (for `x-epd-packed` or `raw`), `image/png`, `image/jpeg`, or `image/bmp`.
+  - Content-Type: `application/octet-stream` (for `x-epd-packed`, `x-epd-spectra6`, `x-epd-gray16`, or `raw`), `image/png`, `image/jpeg`, or `image/bmp`.
   - Response Headers:
     - `ETag`: `"sha256-hash..."`
-    - `X-ST-Expires-In`: Seconds until the current item ends, or seconds until morning 'on' window if display power schedule is off (sleep timer for MCU).
+    - `X-ST-Expires-In`: Seconds until the current item ends, or seconds until morning 'on' window if display power schedule is off (sleep timer for MCU). Clamped to at least `profile.minRefreshInterval`.
     - `X-ST-Power-State`: `'on'` or `'scheduled_off'` according to the device's weekly Display Power Schedule.
+    - `X-ST-Command`: Optional pending command for the device:
+      - `update <url> [sha256]`: Download and flash OTA firmware binary.
+      - `upload_logs`: Upload in-memory diagnostic ring buffer to `/api/embedded/logs`.
+      - `reboot`: Reboot the device microcontroller.
+    - `X-ST-Screen-Width`: Active pixel width of the rendered buffer (e.g. `800` or `480`).
+    - `X-ST-Screen-Height`: Active pixel height of the rendered buffer (e.g. `480` or `800`).
+    - `X-ST-Orientation`: Active orientation (`landscape`, `portrait`, `landscape-flipped`, `portrait-flipped`).
+    - `X-ST-Rotation`: Active rotation angle (`0`, `90`, `180`, `270`).
+    - `X-ST-Supports-Partial`: `'1'` if device supports fast partial refresh; `'0'` if full refresh is required.
     - `X-ST-Item-Index`: Current playlist item index (0-based) in single mode or `'0'` in layout mode.
     - `X-ST-Total-Items`: Total active items in playlist (in single-item mode).
     - `X-ST-Total-Zones`: Total zones in the layout (in multi-zone layout mode).
@@ -149,6 +166,7 @@ Fetches the pre-rendered image for the current playlist item.
     - `X-ST-Device-Id`: Device UUID.
     - `X-ST-Content-Id`: Content ID (or Layout ID in layout mode).
     - `X-ST-Layout-Id`: Layout UUID (in layout mode).
+
 - **`304 Not Modified`**: Sent when `If-None-Match` matches the current content digest. Body is empty.
 - **`400 Bad Request`**: Device lacks a configured `screen_profile`.
 - **`401 Unauthorized`**: Invalid or missing device token.
@@ -249,15 +267,111 @@ Polled by the MCU during setup to detect when the user claims the display in the
 Protected by `pairLockout` and constant-time `claim_secret` validation.
 
 #### Headers / Query
-- **`Authorization`** *(header, recommended)*: `Bearer <claim_secret>`
-- **`claim_secret`** *(query, fallback)*: The secret token issued at registration.
+- **`Authorization`** *(header, required)*: `Bearer <claim_secret>`
 - **`device_id`** *(query, required)*: The UUID returned by `/pair/register`.
 
 #### Response (`200 OK`)
 - **Unclaimed:** `{"paired": false, "status": "provisioning", "pairing_code": "545658"}`
 - **Claimed / Paired:** `{"paired": true, "status": "online", "device_id": "<UUID>", "device_token": "<SECRET_TOKEN>"}` *(burns `claim_secret` on delivery)*
 
+---
+
+### 3.7 Device Diagnostic Logs API
+
+Embedded devices capture internal boot and network events in a circular in-memory ring buffer (default 100 entries). When requested remotely or after persistent sync errors, devices upload this buffer to ScreenTinker for administrative troubleshooting.
+
+#### `POST /api/embedded/logs`
+Dispatched by the device upon receiving `X-ST-Command: upload_logs` or after repeated sync failures.
+Rate-limited (`deviceLogsLimiter`: max 60 requests / minute per IP; 256 KB JSON payload limit). Emits a tenant-scoped `embedded:logs` WebSocket event to live-update open dashboard tabs.
+
+- **Headers**:
+  - `Authorization: Bearer <device_token>`
+  - `X-ST-Device-Id: <UUID>`
+  - `X-ST-Firmware-Version: <version>`
+  - `X-ST-Device-Battery: <percent>`
+  - `X-ST-Device-RSSI: <rssi>`
+- **Body**: JSON payload containing the structured log ring:
+  ```json
+  {
+    "device_id": "06813352-374a-476b-bca9-986ebdb1ff2c",
+    "version": "1.3.0",
+    "battery": 82,
+    "wifi_rssi": -55,
+    "log_count": 14,
+    "logs": [
+      { "uptime_ms": 120, "level": "INFO", "tag": "Boot", "msg": "ScreenTinker MCU v1.3.0 booting..." },
+      { "uptime_ms": 342, "level": "INFO", "tag": "IMU", "msg": "LSM6DS3TR-C detected OK" },
+      { "uptime_ms": 410, "level": "INFO", "tag": "SHT40", "msg": "SHT40 ready: 24.2 C, 48.1 %RH" },
+      { "uptime_ms": 1820, "level": "INFO", "tag": "Sync", "msg": "HTTP 200 frame received (48000 B)" }
+    ]
+  }
+  ```
+- **Response**: `200 OK` with `{"status": "ok", "log_id": 42}`.
+
+#### `GET /api/embedded/logs` & `GET /api/devices/:id/diagnostic-logs`
+Used by the ScreenTinker web dashboard and REST clients to view recently uploaded diagnostics.
+- **`GET /api/embedded/logs?device_id=<UUID>&limit=5`**: Accepts device token, API token, or user session.
+- **`GET /api/devices/:id/diagnostic-logs?limit=10`**: Dashboard endpoint (rate-limited at 300 requests / minute per IP).
+- **Response**: `200 OK` with JSON array of diagnostic uploads (`logs` parsed as an array of entries).
+
+---
+
+### 3.8 Firmware Distribution & Over-The-Air (OTA) Updates
+
+ScreenTinker distributes compiled microcontroller binaries over HTTP to enable remote firmware updates without USB cables.
+Staged binaries and manifests live in `server/firmware/<preset>/` (`firmware.bin` + `version.json`). Both hyphenated preset keys (`seeed-reterminal-sticky`, `seeed-reterminal-e1001`–`e1004`) and underscored directory names (`seeed_reterminal_sticky`, `seeed_reterminal_e1001`–`e1004`) are accepted in `:preset`.
+
+#### `GET /api/embedded/firmware/:preset/version`
+Returns the latest staged firmware metadata for the specified hardware preset (`seeed_reterminal_sticky`, `seeed_reterminal_e1001`, `seeed_reterminal_e1002`, `seeed_reterminal_e1003`, `seeed_reterminal_e1004`).
+Rate-limited (`firmwareLimiter`: max 120 requests / 15 minutes per IP).
+
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "preset": "seeed_reterminal_sticky",
+    "version": "1.3.0",
+    "size": 1072592,
+    "sha256": "9d4c2056e9dfceb9f9db99889ebafab69cdc3e0051918465a283c87b6917dd0a",
+    "download_url": "/api/embedded/firmware/seeed_reterminal_sticky/latest.bin"
+  }
+  ```
+
+#### `GET /api/embedded/firmware/:preset/latest.bin`
+Streams the compiled binary image for flashing to the device's secondary flash partition.
+- **Response Headers**:
+  - `Content-Type: application/octet-stream`
+  - `Content-Disposition: attachment; filename="<preset>-firmware.bin"`
+  - `X-ST-Firmware-Version: <version>`
+  - `X-ST-Firmware-SHA256: <sha256>`
+
+#### Triggering an Update
+1. **Web Dashboard**: An administrator clicks **"Update Firmware"** on the device detail page.
+2. **Command Queue**: The server issues `X-ST-Command: update /api/embedded/firmware/<preset>/latest.bin <sha256>`.
+3. **Flashing & Rollback Protection**:
+   - The device streams the binary into its inactive partition while calculating SHA-256 in real time.
+   - Upon reboot, the new firmware enters `ESP_OTA_IMG_PENDING_VERIFY`.
+   - Once the new build successfully connects to Wi-Fi and fetches its first valid frame (`HTTP 200` / `304`), it marks the partition valid and cancels rollback. If it crashes or fails to connect (3 consecutive failures or >90 seconds elapsed), the hardware bootloader automatically reverts to the previous working partition.
+4. **Circuit Breaker (`ota-breaker.js`)**:
+   - If an unstable device fails to apply an update and repeatedly polls with an older version, the server halts update offers after 6 attempts (`NO_PROGRESS_LIMIT = 6`) to prevent boot-loop storms and save battery.
+
+---
+
+### 3.9 Dashboard Controls & Telemetry Cards
+
+When viewing an embedded / e-paper display in the ScreenTinker Web UI (**Displays → select device**):
+- **Info Tab**:
+  - **Environmental Telemetry**: Live ambient **Temperature (°C)** and **Humidity (% RH)** cards when reported by an onboard sensor (e.g. Sensirion SHT40).
+  - **Battery & Power**: Battery percentage, active power source (`USB` vs. `Battery`), and Wi-Fi RSSI signal strength.
+  - **Display Orientation**: Dropdown selector (`Landscape (0°)`, `Portrait (90°)`, `Landscape Flipped (180°)`, `Portrait Flipped (270°)`) that updates `devices.orientation` and `screen_profile` and immediately transposes the rendered canvas and row stride on the next poll.
+  - **Update Firmware**: Queues an OTA firmware update command (`update <url> <sha256>`) delivered on the device's next wake cycle.
+  - **Diagnostic Logs Card**: Displays the latest uploaded 100-entry ring buffer with **Request Diagnostic Logs** (`upload_logs`), **Refresh**, and **Copy** buttons, plus automatic live updates over WebSocket (`embedded:logs`).
+- **Controls Tab**:
+  - **Display Power Schedule**: Weekly on/off schedule coordinating `X-ST-Power-State` (`on` / `scheduled_off`) and multi-hour overnight `X-ST-Expires-In` deep sleep intervals.
+
+---
+
 ## 4. Screen Profiles & Output Formats
+
 
 A device's screen configuration is stored in the `devices.screen_profile` JSON column.
 
@@ -266,36 +380,49 @@ A device's screen configuration is stored in the `devices.screen_profile` JSON c
 |---|---|---|---|
 | `width` | `number` | Positive integer (e.g. `800`) | Logical pixel width |
 | `height` | `number` | Positive integer (e.g. `480`) | Logical pixel height |
-| `rotation` | `number` | `0`, `90`, `180`, `270` | Rotation applied after resize |
-| `colorDepth` | `string` | `1bit`, `4bit-gray`, `16bit-rgb565`, `24bit-rgb888` | Color quantization |
-| `dither` | `string` | `floyd-steinberg`, `atkinson`, `none` | Dithering algorithm for 1-bit |
-| `outputFormat` | `string` | `x-epd-packed`, `bmp`, `raw`, `png`, `jpeg` | Serialization format |
+| `orientation` | `string` | `landscape`, `portrait`, `landscape-flipped`, `portrait-flipped` | Screen orientation |
+| `rotation` | `number` | `0`, `90`, `180`, `270` | Mounting rotation in degrees |
+| `colorDepth` | `string` | `1bit`, `4bit-gray`, `gray16`, `spectra6`, `16bit-rgb565`, `24bit-rgb888` | Color quantization mode |
+| `dither` | `string` | `floyd-steinberg`, `atkinson`, `none` | Dithering algorithm |
+| `outputFormat` | `string` | `x-epd-packed`, `x-epd-spectra6`, `x-epd-gray16`, `bmp`, `raw`, `png`, `jpeg` | Serialization format |
+| `supportsPartialRefresh` | `boolean` | `true`, `false` | Whether display hardware supports partial refresh |
+| `minRefreshInterval` | `number` | Positive integer (seconds) | Minimum polling / refresh interval |
 
 ### Output Format Details
 
 - **`x-epd-packed`**: 1-bit MSB-first packed bitstream without row-padding. For an 800×480 screen, this produces exactly `(800 * 480) / 8 = 48,000 bytes`. This can be written directly to SSD1677, SSD1608, or UC8151 controller RAM over SPI.
+- **`x-epd-spectra6`**: 4bpp packed buffer (2 pixels per byte, MSN first) quantized to the 6-color Spectra palette (Black, White, Yellow, Red, Blue, Green) via Euclidean distance and Floyd-Steinberg error diffusion in RGB space.
+- **`x-epd-gray16`**: 4bpp packed buffer (2 pixels per byte, MSN first) quantized to 16 grayscale levels (0-15) with Floyd-Steinberg error diffusion.
 - **`bmp`**: Standard 1-bit Windows BMP (Bitmap DIB v3) with 2-color palette (Black / White).
 - **`png` & `jpeg`**: Rendered raster images with dithering applied (ideal for browser previewing and debugging).
 - **`16bit-rgb565`**: 2 bytes per pixel (Little-Endian R5G6B5) for SPI TFT displays (ILI9341, ST7789).
 
 ---
 
-## 4. Hardware Presets
+## 5. Hardware Presets
 
-| Preset Key | Width | Height | Depth | Notes |
-|---|---|---|---|---|
-| `seeed-reterminal-sticky` | 800 | 480 | `1bit` | Seeed Studio reTerminal Sticky (SSD1677) |
-| `waveshare-7.5in-v2` | 800 | 480 | `1bit` | Waveshare 7.5" e-Paper |
-| `waveshare-4.2in-v2` | 400 | 300 | `1bit` | Waveshare 4.2" e-Paper |
-| `waveshare-2.9in-v2` | 296 | 128 | `1bit` | Waveshare 2.9" e-Paper |
-| `waveshare-1.54in-v2` | 200 | 200 | `1bit` | Waveshare 1.54" e-Paper |
-| `waveshare-5.65in-acep` | 600 | 448 | `24bit-rgb888` | 7-color ACeP e-Paper |
-| `generic-320x240-rgb565` | 320 | 240 | `16bit-rgb565` | Standard 2.4"/2.8" SPI TFT |
-| `generic-128x64-1bit` | 128 | 64 | `1bit` | SSD1306 0.96" OLED |
+| Preset Key | Width | Height | Depth | Format | Partial Refresh | Notes |
+|---|---|---|---|---|---|---|
+| `seeed-reterminal-sticky` | 800 | 480 | `1bit` | `x-epd-packed` | Yes (350ms) | Seeed Studio reTerminal Sticky (SSD1677, touch) |
+| `seeed-reterminal-e1001` | 800 | 480 | `1bit` | `x-epd-packed` | Yes (350ms) | Seeed Studio reTerminal E1001 (7.5" Mono) |
+| `seeed-reterminal-e1002` | 800 | 480 | `spectra6` | `x-epd-spectra6` | No (min 30s) | Seeed Studio reTerminal E1002 (7.3" 6-Color Spectra 6) |
+| `seeed-reterminal-e1003` | 1872 | 1404 | `gray16` | `x-epd-gray16` | Yes (180ms) | Seeed Studio reTerminal E1003 (10.3" Gray16, touch) |
+| `seeed-reterminal-e1004` | 1200 | 1600 | `spectra6` | `x-epd-spectra6` | No (min 60s) | Seeed Studio reTerminal E1004 (13.3" 6-Color Spectra 6) |
+| `waveshare-7.5in-v2` | 800 | 480 | `1bit` | `x-epd-packed` | - | Waveshare 7.5" e-Paper |
+| `waveshare-4.2in-v2` | 400 | 300 | `1bit` | `x-epd-packed` | - | Waveshare 4.2" e-Paper |
+| `waveshare-2.9in-v2` | 296 | 128 | `1bit` | `x-epd-packed` | - | Waveshare 2.9" e-Paper |
+| `waveshare-1.54in-v2` | 200 | 200 | `1bit` | `x-epd-packed` | - | Waveshare 1.54" e-Paper |
+| `waveshare-5.65in-acep` | 600 | 448 | `24bit-rgb888` | `png` | - | 7-color ACeP e-Paper |
+| `generic-320x240-rgb565` | 320 | 240 | `16bit-rgb565` | `raw` | - | Standard 2.4"/2.8" SPI TFT |
+| `generic-128x64-1bit` | 128 | 64 | `1bit` | `raw` | - | SSD1306 0.96" OLED |
 
 ---
 
-## 5. Reference ESP32 Firmware Implementation (C++ / Arduino)
+## 6. Reference ESP32 Firmware Implementation (C++ / Arduino)
+
+For the complete production firmware supporting the **Seeed Studio reTerminal Sticky & E-Series (`E1001`–`E1004`)**—including Captive Portal Wi-Fi onboarding, 6-digit PIN pairing, PSRAM frame caching, IMU auto-rotation, SHT40 telemetry, dual-partition OTA rollback, and a native SDL2 desktop simulator—see the **[`screentinker_mcu`](https://github.com/renebohne/screentinker_mcu)** repository.
+
+Below is a minimal standalone reference sketch illustrating the core HTTP polling and ETag sleep loop:
 
 ```cpp
 #include <WiFi.h>

@@ -41,14 +41,18 @@ function defaultCacheDir() {
  * @param {object} profile         Validated screen_profile object
  * @returns {string}  64-char hex SHA-256
  */
+const CACHE_VERSION = 'v2'; // Invalidate cache entries predating rotation stride fix
+
 function cacheKey(deviceId, itemId, itemUpdatedAt, profile) {
   const payload = JSON.stringify([
+    CACHE_VERSION,
     deviceId,
     itemId,
     itemUpdatedAt,
     profile.width,
     profile.height,
     profile.rotation,
+    profile.orientation || null,
     profile.colorDepth,
     profile.dither,
     profile.outputFormat,

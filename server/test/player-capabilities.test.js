@@ -154,7 +154,7 @@ test('embedded display capabilities adapt to power source', () => {
   assert.ok(caps.supports(usbDev, 'offline.cache'));
   assert.equal(caps.supports(usbDev, 'playback.pip'), false);
   assert.ok(caps.supports(usbDev, 'system.reboot'));
-  assert.equal(caps.supports(usbDev, 'system.self_update'), false);
+  assert.ok(caps.supports(usbDev, 'system.self_update'), 'USB-powered embedded display supports OTA firmware updates');
   assert.equal(caps.supports(usbDev, 'audio.volume'), false);
 
   // A screen_profile is a setting, not an identity: an Android screen that somehow carries one

@@ -194,11 +194,36 @@ function popPendingCommands(deviceId) {
   return out;
 }
 
+function peekPendingCommands(deviceId) {
+  if (!deviceId) return [];
+  pruneDevice(deviceId);
+  const cmds = pendingCommands.get(deviceId);
+  if (!cmds || cmds.size === 0) return [];
+  const out = [];
+  for (const [type, entry] of cmds) {
+    out.push({ type, payload: entry.payload });
+  }
+  return out;
+}
+
+function popCommand(deviceId, type) {
+  if (!deviceId || !type) return null;
+  pruneDevice(deviceId);
+  const cmds = pendingCommands.get(deviceId);
+  if (!cmds || !cmds.has(type)) return null;
+  const entry = cmds.get(type);
+  cmds.delete(type);
+  if (cmds.size === 0) pendingCommands.delete(deviceId);
+  return { type, payload: entry.payload };
+}
+
 module.exports = {
   queueOrEmitPlaylistUpdate,
   queueCommand,
   flushQueue,
   popPendingCommands,
+  peekPendingCommands,
+  popCommand,
   ttlForDevice,
   getQueueDepth,
   startSweep,

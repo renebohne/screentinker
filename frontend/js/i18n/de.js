@@ -457,6 +457,8 @@ export default {
   'device.info.screen_resolution': 'Bildschirmauflösung',
   'device.info.ram': 'RAM',
   'device.info.cpu_usage': 'CPU-Auslastung',
+  'device.info.temperature': 'Temperatur',
+  'device.info.humidity': 'Luftfeuchtigkeit',
   'device.timeline.title': 'Verfügbarkeit (letzte 24 Stunden)',
   'device.timeline.h24_ago': 'vor 24h',
   'device.timeline.now': 'Jetzt',

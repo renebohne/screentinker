@@ -374,7 +374,7 @@ const jsonBody = express.json({ limit: '12mb' });
  */
 // /scim parses its own body too (routes/scim.js): application/scim+json, a 1 MB limit, after the
 // bearer token is checked, and a parse failure answered in SCIM's error envelope.
-app.use((req, res, next) => (req.path === '/api/templates/import' || req.path.startsWith('/api/hooks/in/') || req.path.startsWith('/scim/') || isMcpPath(req.path) ? next() : jsonBody(req, res, next)));
+app.use((req, res, next) => (/^\/api\/embedded\/logs\/?$/i.test(req.path) || req.path === '/api/templates/import' || req.path.startsWith('/api/hooks/in/') || req.path.startsWith('/scim/') || isMcpPath(req.path) ? next() : jsonBody(req, res, next)));
 // Express 5 / body-parser 2 leave req.body undefined when no body was parsed (v4 gave {}).
 app.use((req, res, next) => { if (req.body === undefined) req.body = {}; next(); });
 const { sanitizeBody } = require('./middleware/sanitize');

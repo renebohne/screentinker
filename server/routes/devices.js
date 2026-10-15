@@ -11,6 +11,7 @@ const { canAdminWorkspace } = require('../lib/permissions');
 const { logActivity, getClientIp } = require('../services/activity');
 const { resolveDevicePlaylist, resolvedLayoutId } = require('../lib/resolve-device-playlist');
 const { PLATFORM_ROLES, ELEVATED_ROLES, isPlatformStaff } = require('../middleware/auth');
+const { dashboardDeviceReadLimiter } = require('../lib/embedded-rate-limits');   // #3 diagnostic logs
 // Phase 2.2a: workspace-aware access. accessContext returns { workspaceRole, actingAs }
 // or null based on the caller's reach into a specific workspace.
 const { resourceAccess } = require('../lib/tenancy');
@@ -41,7 +42,7 @@ router.get('/', (req, res) => {
     SELECT d.*,
       t.battery_level, t.battery_charging, t.storage_free_mb, t.storage_total_mb,
       t.ram_free_mb, t.ram_total_mb, t.wifi_rssi, t.uptime_seconds, t.local_ip, t.local_ip6, t.attached_display, t.video_mode,
-      t.cpu_usage,
+      t.cpu_usage, t.temperature_c, t.humidity,
       s.filepath as screenshot_path, s.captured_at as screenshot_at,
       u.email as owner_email, u.name as owner_name
     FROM devices d
@@ -317,7 +318,7 @@ router.get('/geocode', async (req, res) => {
 });
 
 // Get single device with telemetry history
-router.get('/:id', (req, res) => {
+router.get('/:id', dashboardDeviceReadLimiter, (req, res) => {
   const device = db.prepare('SELECT d.*, u.email as owner_email, u.name as owner_name FROM devices d LEFT JOIN users u ON d.user_id = u.id WHERE d.id = ?').get(req.params.id);
   if (!device) return res.status(404).json({ error: 'Device not found' });
   // Phase 2.2a: workspace-aware read check. accessContext returns null when
@@ -505,6 +506,10 @@ router.get('/:id', (req, res) => {
   // or ~440 existing displays lose their controls the moment this ships.
   const capabilities = playerCapabilities.capabilitiesFor(device);
 
+  const diagnostic_logs = (device.client_type === 'embedded' || String(device.platform || '').toLowerCase().includes('embedded'))
+    ? db.prepare('SELECT * FROM device_diagnostic_logs WHERE device_id = ? ORDER BY uploaded_at DESC, id DESC LIMIT 10').all(req.params.id)
+    : [];
+
   // Parsed on READ, not on receipt. The raw block stays the stored truth, so adding a field later
   // is a server deploy rather than re-collecting from every panel in the field. Null for a device
   // that never reported one, or whose block is unreadable — the card simply does not render.
@@ -514,7 +519,7 @@ router.get('/:id', (req, res) => {
   let resolved_layout = null;
   try { resolved_layout = require('../lib/resolve-device-playlist').resolvedLayoutInfo(req.params.id); } catch (_) { resolved_layout = null; }
 
-  res.json({ ...stripDeviceSecrets(device), tags: parseTags(device.tags), group_ids: groupIdsByDevice([device.id])[device.id] || [], local_weather: require('../lib/local-conditions').readingFor(device), capabilities, edid, telemetry, screenshot, assignments, active_layout_zones, resolved_layout, playlist_status, playlist_has_published, uptimeData, statusLog, deviceEvents, ...mirrorFields(device) });
+  res.json({ ...stripDeviceSecrets(device), tags: parseTags(device.tags), group_ids: groupIdsByDevice([device.id])[device.id] || [], local_weather: require('../lib/local-conditions').readingFor(device), capabilities, edid, telemetry, diagnostic_logs, screenshot, assignments, active_layout_zones, resolved_layout, playlist_status, playlist_has_published, uptimeData, statusLog, deviceEvents, ...mirrorFields(device) });
 });
 
 /*
@@ -631,6 +636,25 @@ router.get('/:id/preview-payload', (req, res) => {
     if (payload.local_api) payload.local_api = { ...payload.local_api, secret: null };
   }
   res.json(payload);
+});
+
+// Diagnostic logs for embedded / fielded devices (#3 / mcu#9)
+router.get('/:id/diagnostic-logs', dashboardDeviceReadLimiter, (req, res) => {
+  const device = db.prepare('SELECT id, workspace_id FROM devices WHERE id = ?').get(req.params.id);
+  if (!device) return res.status(404).json({ error: 'Device not found' });
+  if (!device.workspace_id) return res.status(403).json({ error: 'Device not assigned to a workspace' });
+  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(device.workspace_id);
+  const ctx = ws && resourceAccess(req, ws);
+  if (!ctx) return res.status(403).json({ error: 'Access denied' });
+
+  const logs = db.prepare(`
+    SELECT * FROM device_diagnostic_logs
+    WHERE device_id = ?
+    ORDER BY uploaded_at DESC, id DESC
+    LIMIT 20
+  `).all(req.params.id);
+
+  res.json({ logs });
 });
 
 /*
@@ -1528,6 +1552,7 @@ router.delete('/:id', (req, res) => {
     require('../lib/corporate/cleanup').removeTargets(db, 'device', id);
     db.prepare('DELETE FROM screenshots WHERE device_id = ?').run(id);
     db.prepare('DELETE FROM device_telemetry WHERE device_id = ?').run(id);
+    db.prepare('DELETE FROM device_diagnostic_logs WHERE device_id = ?').run(id);
     db.prepare('DELETE FROM video_wall_devices WHERE device_id = ?').run(id);
     db.prepare('DELETE FROM devices WHERE id = ?').run(id);
 
