@@ -3,8 +3,12 @@
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const { parseProfile, getPreset, listPresets, PRESETS } = require('../lib/embedded-profiles.js');
-const { postprocess } = require('../lib/embedded-postprocess.js');
+const { postprocess, UnpackableWidthError } = require('../lib/embedded-postprocess.js');
 const { Jimp } = require('jimp');
+
+// These tests poll the same device in quick succession. The RATE axis of the OTA breaker would
+// trip on that flood; the NO-PROGRESS axis is what RF-6 asserts, so the rate axis is widened here.
+process.env.OTA_BREAKER_THRESHOLD = process.env.OTA_BREAKER_THRESHOLD || '1000';
 
 describe('reTerminal E-Series Hardware Profiles & Presets', () => {
   test('all 5 reTerminal models are defined in PRESETS', () => {
@@ -20,7 +24,7 @@ describe('reTerminal E-Series Hardware Profiles & Presets', () => {
     }
   });
 
-  test('e1001 profile: 800x480 mono/gray4 with partial refresh support', () => {
+  test('e1001 profile: 800x480 1-bit mono e-paper with partial refresh support', () => {
     const p = parseProfile('seeed-reterminal-e1001');
     assert.equal(p.width, 800);
     assert.equal(p.height, 480);
@@ -72,30 +76,144 @@ describe('reTerminal E-Series Hardware Profiles & Presets', () => {
 });
 
 describe('Spectra 6 & Gray16 Postprocessing Pipeline', () => {
+  test('Spectra 6 pure palette colors pack to exact nibbles without dither', async () => {
+    const colors = [
+      { r: 20, g: 20, b: 20, expNibble: 0 },       // Black
+      { r: 251, g: 251, b: 251, expNibble: 1 },   // White
+      { r: 245, g: 222, b: 0, expNibble: 2 },     // Yellow
+      { r: 215, g: 25, b: 32, expNibble: 3 },     // Red
+      { r: 0, g: 91, b: 172, expNibble: 5 },      // Blue (controller index 5)
+      { r: 0, g: 135, b: 61, expNibble: 6 },      // Green (controller index 6)
+    ];
+
+    for (const c of colors) {
+      const col = (((c.r << 24) | (c.g << 16) | (c.b << 8) | 0xFF) >>> 0);
+      const img = new Jimp({ width: 10, height: 10, color: col });
+      const pngBuf = await img.getBuffer('image/png');
+      const processed = await postprocess(pngBuf, {
+        width: 10,
+        height: 10,
+        colorDepth: 'spectra6',
+        outputFormat: 'x-epd-spectra6',
+        dither: 'none',
+      });
+      const expByte = (c.expNibble << 4) | c.expNibble;
+      assert.equal(processed.buffer[0], expByte, `Expected ${expByte.toString(16)} for color nibble ${c.expNibble}`);
+    }
+
+    // Adjacent Red (3) and Green (6) pixels pack to (3 << 4) | 6 == 0x36
+    const imgPair = new Jimp({ width: 2, height: 1, color: 0x000000FF });
+    imgPair.setPixelColor(0xD71920FF, 0, 0); // Red (215, 25, 32)
+    imgPair.setPixelColor(0x00873DFF, 1, 0); // Green (0, 135, 61)
+    const pairBuf = await imgPair.getBuffer('image/png');
+    const pairProcessed = await postprocess(pairBuf, {
+      width: 2,
+      height: 1,
+      colorDepth: 'spectra6',
+      outputFormat: 'x-epd-spectra6',
+      dither: 'none',
+    });
+    assert.equal(pairProcessed.buffer[0], 0x36, 'Red (3) + Green (6) should pack to 0x36');
+  });
+
+  test('Floyd-Steinberg diffusion carries error forward across adjacent pixels', async () => {
+    // Create a horizontal gradient from black to white (0 to 255)
+    const img = new Jimp({ width: 100, height: 10, color: 0x000000FF });
+    for (let x = 0; x < 100; x++) {
+      const v = Math.floor((x / 99) * 255);
+      const col = (((v << 24) | (v << 16) | (v << 8) | 0xFF) >>> 0);
+      for (let y = 0; y < 10; y++) {
+        img.setPixelColor(col, x, y);
+      }
+    }
+    const pngBuf = await img.getBuffer('image/png');
+
+    const dithered = await postprocess(pngBuf, {
+      width: 100,
+      height: 10,
+      colorDepth: '1bit',
+      outputFormat: 'x-epd-packed',
+      dither: 'floyd-steinberg',
+    });
+
+    const nonDithered = await postprocess(pngBuf, {
+      width: 100,
+      height: 10,
+      colorDepth: '1bit',
+      outputFormat: 'x-epd-packed',
+      dither: 'none',
+    });
+
+    // Dithered and non-dithered output must differ on a continuous gradient
+    assert.notDeepEqual(dithered.buffer, nonDithered.buffer);
+    assert.equal(dithered.buffer.length, Math.ceil(100 * 10 / 8));
+  });
+
+  test('format=png produces valid decodable PNG matching target dimensions', async () => {
+    const img = new Jimp({ width: 50, height: 50, color: 0xFF0000FF });
+    const srcBuf = await img.getBuffer('image/png');
+
+    const processed = await postprocess(srcBuf, {
+      width: 800,
+      height: 480,
+      colorDepth: '1bit',
+      outputFormat: 'png',
+      dither: 'none',
+    });
+
+    assert.equal(processed.contentType, 'image/png');
+    const decoded = await Jimp.read(processed.buffer);
+    assert.equal(decoded.bitmap.width, 800);
+    assert.equal(decoded.bitmap.height, 480);
+  });
+
+  test('odd widths rejected for 1-bit packing to prevent row straddling', async () => {
+    const img = new Jimp({ width: 297, height: 10, color: 0x000000FF });
+    const srcBuf = await img.getBuffer('image/png');
+
+    // parseProfile rejects odd width for 1-bit, spectra6, gray16
+    assert.equal(parseProfile({ width: 297, height: 10, colorDepth: '1bit' }), null);
+
+    // postprocess throws UnpackableWidthError for odd width
+    await assert.rejects(
+      () => postprocess(srcBuf, {
+        width: 297,
+        height: 10,
+        colorDepth: '1bit',
+        outputFormat: 'x-epd-packed',
+        dither: 'none',
+      }),
+      (err) => err instanceof UnpackableWidthError || err.code === 'UNPACKABLE_WIDTH'
+    );
+  });
+
   test('e1002 Spectra 6 produces exact 192,000 bytes packed payload (800x480 / 2)', async () => {
-    const img = new Jimp({ width: 100, height: 100, color: 0xFF0000FF }); // Red
+    const img = new Jimp({ width: 100, height: 100, color: 0xD71920FF }); // Red (215, 25, 32)
     const pngBuf = await img.getBuffer('image/png');
 
     const profile = parseProfile('seeed-reterminal-e1002');
+    profile.dither = 'none';
     const processed = await postprocess(pngBuf, profile);
 
     assert.equal(processed.contentType, 'application/octet-stream');
     assert.equal(processed.buffer.length, 192000); // 800 * 480 / 2 = 192000 bytes
 
-    // Check red color index: Red in Spectra 6 palette is 3 (or 4). Two red pixels packed into byte:
-    // Nibbles should match non-zero color
-    assert.ok(processed.buffer[0] !== 0x00 && processed.buffer[0] !== 0x11);
+    // Pure red without dither packs to nibbles 0x33
+    assert.equal(processed.buffer[0], 0x33);
   });
 
   test('e1004 Spectra 6 produces exact 960,000 bytes packed payload (1200x1600 / 2)', async () => {
-    const img = new Jimp({ width: 100, height: 100, color: 0x00FF00FF }); // Green
+    const img = new Jimp({ width: 100, height: 100, color: 0x00873DFF }); // Green (0, 135, 61)
     const pngBuf = await img.getBuffer('image/png');
 
     const profile = parseProfile('seeed-reterminal-e1004');
+    profile.dither = 'none';
     const processed = await postprocess(pngBuf, profile);
 
     assert.equal(processed.contentType, 'application/octet-stream');
     assert.equal(processed.buffer.length, 960000); // 1200 * 1600 / 2 = 960000 bytes
+    // Pure green without dither packs to nibbles 0x66 (controller index 6)
+    assert.equal(processed.buffer[0], 0x66);
   });
 
   test('e1003 Gray16 produces exact 1,314,144 bytes packed payload (1872x1404 / 2)', async () => {
@@ -107,12 +225,11 @@ describe('Spectra 6 & Gray16 Postprocessing Pipeline', () => {
 
     assert.equal(processed.contentType, 'application/octet-stream');
     assert.equal(processed.buffer.length, 1314144); // 1872 * 1404 / 2 = 1314144 bytes
-    // 50% gray should quantize to ~7 or 8 (0x77 or 0x88)
     const midNibble = (processed.buffer[0] >> 4) & 0x0F;
     assert.ok(midNibble >= 6 && midNibble <= 9, `Expected mid-gray nibble, got ${midNibble}`);
   });
 
-  test('portrait 90-degree postprocess preserves 480x800 dimensions and 60-byte stride (no skew/noise)', async () => {
+  test('portrait 90-degree and 270-degree produce 180-degree inverted buffers', async () => {
     // Create a 480x800 image with a white horizontal line at y=10
     const img = new Jimp({ width: 480, height: 800, color: 0x000000FF });
     for (let x = 0; x < 480; x++) {
@@ -120,7 +237,8 @@ describe('Spectra 6 & Gray16 Postprocessing Pipeline', () => {
     }
     const pngBuf = await img.getBuffer('image/png');
 
-    const profile = {
+    // 90°
+    const p90 = await postprocess(pngBuf, {
       width: 480,
       height: 800,
       rotation: 90,
@@ -128,21 +246,34 @@ describe('Spectra 6 & Gray16 Postprocessing Pipeline', () => {
       colorDepth: '1bit',
       dither: 'none',
       outputFormat: 'x-epd-packed',
-    };
-    const processed = await postprocess(pngBuf, profile);
-    assert.equal(processed.width, 480);
-    assert.equal(processed.height, 800);
-    assert.equal(processed.buffer.length, 48000); // 480 * 800 / 8
+    });
+    assert.equal(p90.width, 480);
+    assert.equal(p90.height, 800);
+    assert.equal(p90.buffer.length, 48000); // 480 * 800 / 8
 
     // Row 10 in 1-bit packed format starts at 10 * (480 / 8) = 600 bytes
-    const row10Start = 10 * 60;
     for (let b = 0; b < 60; b++) {
-      assert.equal(processed.buffer[row10Start + b], 0xFF, `Byte ${b} in row 10 should be 0xFF`);
+      assert.equal(p90.buffer[600 + b], 0xFF, `90 deg: Byte ${b} in row 10 should be 0xFF`);
+      assert.equal(p90.buffer[660 + b], 0x00, `90 deg: Byte ${b} in row 11 should be 0x00`);
     }
-    // Row 11 should be black (0x00)
-    const row11Start = 11 * 60;
+
+    // 270°: Rotated 180° by server postprocess! Row 10 moves to Row 789 (789 * 60 = 47340)
+    const p270 = await postprocess(pngBuf, {
+      width: 480,
+      height: 800,
+      rotation: 270,
+      orientation: 'portrait-flipped',
+      colorDepth: '1bit',
+      dither: 'none',
+      outputFormat: 'x-epd-packed',
+    });
+    assert.equal(p270.width, 480);
+    assert.equal(p270.height, 800);
+    assert.equal(p270.buffer.length, 48000);
+
     for (let b = 0; b < 60; b++) {
-      assert.equal(processed.buffer[row11Start + b], 0x00, `Byte ${b} in row 11 should be 0x00`);
+      assert.equal(p270.buffer[47340 + b], 0xFF, `270 deg: Byte ${b} in row 789 should be 0xFF`);
+      assert.equal(p270.buffer[600 + b], 0x00, `270 deg: Byte ${b} in row 10 should be 0x00`);
     }
   });
 });
@@ -151,13 +282,17 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
   const http = require('node:http');
   const express = require('express');
   const path = require('node:path');
+  const os = require('node:os');
+  const fs = require('node:fs');
   const { Database } = require('../db/sqlite-driver');
 
-  let db, app, server, baseUrl, embeddedRouter;
+  let db, app, server, baseUrl, embeddedRouter, testFwDir;
 
   test('setup test server and database', async () => {
     process.env.JWT_SECRET = 'test-secret-embedded-e-series';
     process.env.EMBEDDED_CACHE_DIR = path.join(__dirname, '..', 'data', 'test-embedded-cache-e-series');
+    testFwDir = fs.mkdtempSync(path.join(os.tmpdir(), 'st-fw-test-'));
+    process.env.ST_FIRMWARE_DIR = testFwDir;
 
     db = new Database(':memory:');
     db.exec(`
@@ -173,7 +308,7 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
         timezone TEXT, reported_timezone TEXT, background_color TEXT DEFAULT '#000000',
         default_content_id TEXT, last_heartbeat INTEGER, ip_address TEXT,
         app_version TEXT, updated_at INTEGER, heartbeat_expected_by INTEGER,
-        power_source TEXT
+        power_source TEXT, orientation TEXT DEFAULT 'landscape'
       );
       CREATE TABLE device_telemetry (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -260,7 +395,7 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
     embeddedRouter = require('../routes/embedded');
 
     app = express();
-    app.use(express.json());
+    app.use((req, res, next) => (/^\/api\/embedded\/logs\/?$/i.test(req.path) ? next() : express.json({ limit: '12mb' })(req, res, next)));
     app.use('/api/embedded', embeddedRouter);
     server = http.createServer(app);
     await new Promise((resolve) => server.listen(0, resolve));
@@ -513,7 +648,7 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
     const path = require('node:path');
     const crypto = require('node:crypto');
 
-    const fwDir = path.join(__dirname, '../data/firmware/seeed_reterminal_sticky');
+    const fwDir = path.join(testFwDir, 'seeed_reterminal_sticky');
     fs.mkdirSync(fwDir, { recursive: true });
 
     const dummyFw = Buffer.alloc(1024, 0xAA);
@@ -547,37 +682,487 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
     assert.equal(errRes.status, 404);
 
     // Clean up
-    fs.rmSync(path.join(__dirname, '../data/firmware'), { recursive: true, force: true });
+    fs.rmSync(fwDir, { recursive: true, force: true });
+  });
+
+  test('RF-1: Orientation persistence via headers across subsequent polls', async () => {
+    // 1. Ensure initial orientation in DB is landscape
+    db.prepare("UPDATE devices SET orientation = 'landscape' WHERE id = 'dev-e1001'").run();
+    const devBefore = db.prepare('SELECT orientation FROM devices WHERE id = ?').get('dev-e1001');
+    assert.equal(devBefore.orientation, 'landscape');
+
+    // 2. Poll with X-ST-Device-Orientation: portrait
+    const res1 = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: {
+        'Authorization': 'Bearer tok-e1001',
+        'X-ST-Device-Orientation': 'portrait',
+      },
+    });
+    assert.equal(res1.status, 200);
+    assert.equal(res1.headers.get('x-st-orientation'), 'portrait');
+    assert.equal(res1.headers.get('x-st-rotation'), '90');
+    assert.equal(res1.headers.get('x-st-screen-width'), '480');
+    assert.equal(res1.headers.get('x-st-screen-height'), '800');
+
+    // Verify DB updated
+    const devAfter1 = db.prepare('SELECT orientation FROM devices WHERE id = ?').get('dev-e1001');
+    assert.equal(devAfter1.orientation, 'portrait');
+
+    // 3. Subsequent poll without orientation header retains portrait
+    const res2 = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(res2.status, 200);
+    assert.equal(res2.headers.get('x-st-orientation'), 'portrait');
+    assert.equal(res2.headers.get('x-st-rotation'), '90');
+    assert.equal(res2.headers.get('x-st-screen-width'), '480');
+    assert.equal(res2.headers.get('x-st-screen-height'), '800');
+
+    // Reset back to landscape
+    db.prepare("UPDATE devices SET orientation = 'landscape' WHERE id = 'dev-e1001'").run();
+  });
+
+  test('RF-3: Sibling command delivery in FIFO order without starvation', async () => {
+    const commandQueue = require('../lib/command-queue');
+    // Clear queue for dev-e1001 first
+    commandQueue.popPendingCommands('dev-e1001');
+
+    // Queue upload_logs followed by update
+    commandQueue.queueCommand('dev-e1001', 'upload_logs', {});
+    const RF3_SHA = 'a'.repeat(64);
+    commandQueue.queueCommand('dev-e1001', 'update', { url: 'http://example.com/fw.bin', sha256: RF3_SHA, version: '1.4.0' });
+
+    // Poll 1: delivers upload_logs
+    const res1 = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(res1.status, 200);
+    assert.equal(res1.headers.get('x-st-command'), 'upload_logs');
+
+    // Poll 2: delivers update (upload_logs was popped on Poll 1)
+    const res2 = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(res2.status, 200);
+    assert.equal(res2.headers.get('x-st-command'), `update http://example.com/fw.bin ${RF3_SHA}`);
+
+    // Poll 3: queue is now empty
+    const res3 = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(res3.status, 200);
+    assert.equal(res3.headers.get('x-st-command'), null);
+  });
+
+  test('RF-4: a 304 that carries X-ST-Command delivers it once, then it is gone', async () => {
+    const commandQueue = require('../lib/command-queue');
+    commandQueue.popPendingCommands('dev-e1001');
+
+    // First render to get the current ETag
+    const firstRes = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(firstRes.status, 200);
+    const etag = firstRes.headers.get('etag');
+    assert.ok(etag, 'ETag must be present');
+
+    // Queue upload_logs, then poll with the matching ETag -> 304 that carries the command
+    commandQueue.queueCommand('dev-e1001', 'upload_logs', {});
+    const poll304 = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001', 'If-None-Match': etag },
+    });
+    assert.equal(poll304.status, 304);
+    assert.equal(poll304.headers.get('x-st-command'), 'upload_logs');
+
+    // The next 304 must NOT replay it (this is the re-run-on-every-poll bug)
+    const poll304Again = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001', 'If-None-Match': etag },
+    });
+    assert.equal(poll304Again.status, 304);
+    assert.equal(poll304Again.headers.get('x-st-command'), null);
+
+    // Nor the next 200
+    const poll200 = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(poll200.status, 200);
+    assert.equal(poll200.headers.get('x-st-command'), null);
+
+    // A second queued type is still delivered on the following poll, via a 304
+    commandQueue.queueCommand('dev-e1001', 'reboot', {});
+    const poll304Reboot = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001', 'If-None-Match': etag },
+    });
+    assert.equal(poll304Reboot.status, 304);
+    assert.equal(poll304Reboot.headers.get('x-st-command'), 'reboot');
+
+    const pollNext = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001', 'If-None-Match': etag },
+    });
+    assert.equal(pollNext.status, 304);
+    assert.equal(pollNext.headers.get('x-st-command'), null);
+  });
+
+  test('RF-5: Firmware directory isolation, SHA caching, and normalized preset', async () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const crypto = require('node:crypto');
+    const commandQueue = require('../lib/command-queue');
+    commandQueue.popPendingCommands('dev-e1001');
+
+    const fwDir = path.join(testFwDir, 'seeed_reterminal_e1001');
+    fs.mkdirSync(fwDir, { recursive: true });
+
+    const dummyFw = Buffer.alloc(2048, 0x55);
+    const expectedSha = crypto.createHash('sha256').update(dummyFw).digest('hex');
+    fs.writeFileSync(path.join(fwDir, 'firmware.bin'), dummyFw);
+    fs.writeFileSync(path.join(fwDir, 'version.json'), JSON.stringify({ version: '1.4.0' }));
+
+    // 1. seeed_reterminal_e1004 has no firmware: must return 404 (no fallback to e1001 or parent)
+    const res404 = await fetch(`${baseUrl}/firmware/seeed_reterminal_e1004/latest.bin`);
+    assert.equal(res404.status, 404);
+
+    // 2. Default update command for dev-e1001 picks up the normalized preset and sha256
+    commandQueue.queueCommand('dev-e1001', 'update', {});
+    const resUpdate = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(resUpdate.status, 200);
+    assert.equal(
+      resUpdate.headers.get('x-st-command'),
+      `update /api/embedded/firmware/seeed_reterminal_e1001/latest.bin ${expectedSha}`
+    );
+
+    // Clean up
+    fs.rmSync(fwDir, { recursive: true, force: true });
+  });
+
+  test('RF-6: OTA circuit breaker suppresses update after 6 offers without progress, and progress re-enables it', async () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const commandQueue = require('../lib/command-queue');
+    const otaBreaker = require('../lib/ota-breaker');
+
+    const fwDir = path.join(testFwDir, 'seeed_reterminal_e1001');
+    fs.mkdirSync(fwDir, { recursive: true });
+    try {
+      fs.writeFileSync(path.join(fwDir, 'firmware.bin'), Buffer.alloc(100, 0x11));
+      fs.writeFileSync(path.join(fwDir, 'version.json'), JSON.stringify({ version: '1.4.0' }));
+
+      otaBreaker.reset();
+      commandQueue.popPendingCommands('dev-e1001');
+
+      const poll = (version) => fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+        headers: { 'Authorization': 'Bearer tok-e1001', 'X-ST-Firmware-Version': version },
+      });
+
+      // Device keeps reporting 1.3.0 while the target is 1.4.0. Offers 1..6 are delivered.
+      for (let offer = 1; offer <= 6; offer++) {
+        commandQueue.queueCommand('dev-e1001', 'update', {});
+        const res = await poll('1.3.0');
+        assert.equal(res.status, 200);
+        assert.ok(res.headers.get('x-st-command')?.startsWith('update '), `Offer ${offer} should deliver update command`);
+      }
+
+      // Offer 7: no progress after 6 -> suppressed. Still suppressed on the next poll.
+      for (let i = 0; i < 2; i++) {
+        commandQueue.queueCommand('dev-e1001', 'update', {});
+        const res = await poll('1.3.0');
+        assert.equal(res.status, 200);
+        assert.equal(res.headers.get('x-st-command'), null, 'Breaker held: update must not be emitted');
+      }
+
+      // A poll that reports the target version is progress: the hold clears.
+      await poll('1.4.0');
+      assert.equal(db.prepare('SELECT app_version FROM devices WHERE id = ?').get('dev-e1001').app_version, '1.4.0');
+
+      // Target moves on to 1.5.0; the device at 1.4.0 is offered again.
+      fs.writeFileSync(path.join(fwDir, 'version.json'), JSON.stringify({ version: '1.5.0' }));
+      commandQueue.queueCommand('dev-e1001', 'update', {});
+      const resAfter = await poll('1.4.0');
+      assert.equal(resAfter.status, 200);
+      assert.ok(resAfter.headers.get('x-st-command')?.startsWith('update '), 'after progress the next offer must be allowed');
+    } finally {
+      fs.rmSync(fwDir, { recursive: true, force: true });
+    }
+  });
+
+  test('RF-7: minRefreshInterval never holds a panel past its scheduled-off edge', async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    // The E1002 test deletes its PNG; this test renders the same playlist, so it needs one back.
+    const fsImg = require('node:fs');
+    const { contentDir: rf7ContentDir } = require('../config');
+    fsImg.mkdirSync(rf7ContentDir, { recursive: true });
+    await (new Jimp({ width: 100, height: 100, color: 0xFF0000FF })).write(path.join(rf7ContentDir, 'test-e1002.png'));
+    const hhmm = (ms) => { const d = new Date(ms); return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`; };
+
+    // A panel on E1004 (minRefreshInterval 60). Its off-edge is the next UTC minute, so it is a few
+    // seconds away: a minute-granular edge would tell it to wait the full 60 s floor.
+    let remainingSec;
+    while ((remainingSec = (60000 - (Date.now() % 60000)) / 1000) < 4) await sleep(100);
+    const nextMinuteMs = Date.now() - (Date.now() % 60000) + 60000;
+    const allDays = [0, 1, 2, 3, 4, 5, 6];
+    const windows = JSON.stringify([{ days: allDays, start: hhmm(nextMinuteMs), end: hhmm(nextMinuteMs + 10 * 60000) }]);
+
+    db.prepare(`
+      INSERT INTO devices (id, name, workspace_id, status, device_token, playlist_id, screen_profile)
+      VALUES ('dev-e1004', 'E1004 Dev', 'ws-test', 'online', 'tok-e1004', 'pl-e1002', 'seeed-reterminal-e1004')
+    `).run();
+    db.prepare(`
+      INSERT OR REPLACE INTO display_power_schedules (id, workspace_id, name, device_id, timezone, enabled, windows)
+      VALUES ('sch-e1004', 'ws-test', 'Power Sch', 'dev-e1004', 'UTC', 1, ?)
+    `).run(windows);
+    try {
+      const res = await fetch(`${baseUrl}/render?device_id=dev-e1004`, {
+        headers: { 'Authorization': 'Bearer tok-e1004' },
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-st-power-state'), 'on', 'panel is still on until the edge');
+      const expiresIn = Number(res.headers.get('x-st-expires-in'));
+      assert.ok(
+        expiresIn <= Math.floor(remainingSec),
+        `X-ST-Expires-In ${expiresIn} must not run past the off edge (${remainingSec.toFixed(1)}s away)`
+      );
+      assert.ok(expiresIn >= 1);
+    } finally {
+      db.prepare("DELETE FROM display_power_schedules WHERE device_id = 'dev-e1004'").run();
+      try { fsImg.unlinkSync(path.join(rf7ContentDir, 'test-e1002.png')); } catch (_) {}
+    }
+
+    // With no schedule the floor still applies
+    const floorRes = await fetch(`${baseUrl}/render?device_id=dev-e1004`, {
+      headers: { 'Authorization': 'Bearer tok-e1004' },
+    });
+    assert.equal(floorRes.status, 200);
+    assert.ok(Number(floorRes.headers.get('x-st-expires-in')) >= 60, 'minRefreshInterval floor applies with no off edge');
+  });
+
+  test('RF-8: Diagnostic Log API schema validation, limits, and storage', async () => {
+    const commandQueue = require('../lib/command-queue');
+    commandQueue.queueCommand('dev-e1001', 'upload_logs', {});
+
+    // 1. Invalid battery string "nope" should be rejected with 400
+    const resBadBatt = await fetch(`${baseUrl}/logs?device_id=dev-e1001`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer tok-e1001',
+      },
+      body: JSON.stringify({ battery: 'nope', logs: [{ msg: 'test' }] }),
+    });
+    assert.equal(resBadBatt.status, 400);
+
+    // 2. Out-of-bounds battery (150) should be rejected with 400
+    const resOverBatt = await fetch(`${baseUrl}/logs?device_id=dev-e1001`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer tok-e1001',
+      },
+      body: JSON.stringify({ battery: 150, logs: [{ msg: 'test' }] }),
+    });
+    assert.equal(resOverBatt.status, 400);
+
+    // 3. Out-of-bounds RSSI (10) should be rejected with 400
+    const resOverRssi = await fetch(`${baseUrl}/logs?device_id=dev-e1001`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer tok-e1001',
+      },
+      body: JSON.stringify({ wifi_rssi: 10, logs: [{ msg: 'test' }] }),
+    });
+    assert.equal(resOverRssi.status, 400);
+
+    // 4. Excess logs (> 100 items) should be rejected with 400
+    const hugeLogs = new Array(101).fill({ msg: 'log line' });
+    const resHuge = await fetch(`${baseUrl}/logs?device_id=dev-e1001`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer tok-e1001',
+      },
+      body: JSON.stringify({ logs: hugeLogs }),
+    });
+    assert.equal(resHuge.status, 400);
+
+    // 5. Body (> 256KB) refused with 413, including trailing slash (S8)
+    const bigString = 'x'.repeat(300 * 1024);
+    const resBig = await fetch(`${baseUrl}/logs?device_id=dev-e1001`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer tok-e1001',
+      },
+      body: JSON.stringify({ padding: bigString }),
+    });
+    assert.equal(resBig.status, 413);
+
+    const resBigSlash = await fetch(`${baseUrl}/logs/?device_id=dev-e1001`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer tok-e1001',
+      },
+      body: JSON.stringify({ padding: bigString }),
+    });
+    assert.equal(resBigSlash.status, 413);
+
+    // 6. Valid upload with Claim 6 body (wifi_rssi: -60, battery: 92, no rssi)
+    const resValid = await fetch(`${baseUrl}/logs?device_id=dev-e1001`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer tok-e1001',
+      },
+      body: JSON.stringify({
+        battery: 92,
+        wifi_rssi: -60,
+        logs: [{ msg: 'hello diagnostic log' }],
+      }),
+    });
+    assert.equal(resValid.status, 200);
+    const bodyValid = await resValid.json();
+    assert.equal(bodyValid.status, 'ok');
+    assert.ok(Number.isInteger(bodyValid.log_id));
+    assert.equal(bodyValid.id, bodyValid.log_id);
+    assert.equal(bodyValid.count, 1);
+
+    // 7. Read the row back from the database and verify wifi_rssi: -60 and battery: 92
+    const row = db.prepare('SELECT * FROM device_diagnostic_logs WHERE id = ?').get(bodyValid.log_id);
+    assert.ok(row, 'diagnostic log row should exist in database');
+    assert.equal(row.battery, 92);
+    assert.equal(row.wifi_rssi, -60);
+
+    // Verify GET /logs retrieves it
+    const resGet = await fetch(`${baseUrl}/logs?device_id=dev-e1001`, {
+      headers: { 'Authorization': 'Bearer tok-e1001' },
+    });
+    assert.equal(resGet.status, 200);
+    const bodyGet = await resGet.json();
+    assert.ok(bodyGet.logs.some(l => l.id === bodyValid.log_id && l.wifi_rssi === -60));
+
+    // Verify upload_logs was popped
+    const pending = commandQueue.peekPendingCommands('dev-e1001');
+    assert.ok(!pending.some(c => c.type === 'upload_logs'), 'upload_logs command should have been popped');
+  });
+
+  test('S7: format=png is rejected for spectra6 and gray16 panels', async () => {
+    db.prepare(`
+      INSERT OR IGNORE INTO devices (id, name, workspace_id, status, device_token, playlist_id, screen_profile)
+      VALUES ('dev-e1003', 'E1003 Dev', 'ws-test', 'online', 'tok-e1003', 'pl-e1001', 'seeed-reterminal-e1003')
+    `).run();
+
+    // dev-e1002 is spectra6
+    const resSpectra = await fetch(`${baseUrl}/render?device_id=dev-e1002&format=png`, {
+      headers: { 'Authorization': 'Bearer tok-e1002' },
+    });
+    assert.equal(resSpectra.status, 400);
+    const bodySpectra = await resSpectra.json();
+    assert.ok(bodySpectra.error.includes('not available for spectra6'));
+
+    // dev-e1003 is gray16
+    const resGray = await fetch(`${baseUrl}/render?device_id=dev-e1003&format=png`, {
+      headers: { 'Authorization': 'Bearer tok-e1003' },
+    });
+    assert.equal(resGray.status, 400);
+    const bodyGray = await resGray.json();
+    assert.ok(bodyGray.error.includes('not available for gray16'));
   });
 
   test('update command delivery via X-ST-Command header', async () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const crypto = require('node:crypto');
     const commandQueue = require('../lib/command-queue');
+    const otaBreaker = require('../lib/ota-breaker');
+    const fwDir = path.join(testFwDir, 'seeed_reterminal_e1001');
+    const sha = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    otaBreaker.reset();
+    commandQueue.popPendingCommands('dev-e1001');
+    // RF-6 left the device reporting 1.4.0. These offers are judged against an older device.
+    db.prepare("UPDATE devices SET app_version = '1.3.0' WHERE id = 'dev-e1001'").run();
+    try {
+      // 1. Custom URL with its own SHA-256 and version
+      commandQueue.queueCommand('dev-e1001', 'update', { url: 'http://custom.example.com/fw.bin', sha256: sha, version: '1.4.0' });
+      let res = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
+        headers: { 'Authorization': 'Bearer tok-e1001' },
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-st-command'), `update http://custom.example.com/fw.bin ${sha}`);
 
-    // 1. Custom URL and SHA-256
-    commandQueue.queueCommand('dev-e1001', 'update', {
-      url: 'http://custom.example.com/fw.bin',
-      sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      // 2. Custom URL with no hash is NOT offered (S2)
+      commandQueue.queueCommand('dev-e1001', 'update', { url: 'http://custom.example.com/fw.bin', version: '1.4.0' });
+      res = await fetch(`${baseUrl}/render?device_id=dev-e1001`, { headers: { 'Authorization': 'Bearer tok-e1001' } });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-st-command'), null, 'custom URL without its own sha256 must not be emitted');
+
+      // 3. Default preset URL with no file on disk is NOT offered (S2)
+      commandQueue.queueCommand('dev-e1001', 'update', {});
+      res = await fetch(`${baseUrl}/render?device_id=dev-e1001`, { headers: { 'Authorization': 'Bearer tok-e1001' } });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-st-command'), null, 'no firmware file on disk: no update');
+
+      // 4. Default preset URL with a file: the hash is the file's, and matches the served bytes
+      const dummyFw = Buffer.alloc(64, 0x22);
+      const fileSha = crypto.createHash('sha256').update(dummyFw).digest('hex');
+      fs.mkdirSync(fwDir, { recursive: true });
+      fs.writeFileSync(path.join(fwDir, 'firmware.bin'), dummyFw);
+      fs.writeFileSync(path.join(fwDir, 'version.json'), JSON.stringify({ version: '1.4.0' }));
+      commandQueue.queueCommand('dev-e1001', 'update', {});
+      res = await fetch(`${baseUrl}/render?device_id=dev-e1001`, { headers: { 'Authorization': 'Bearer tok-e1001' } });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-st-command'), `update /api/embedded/firmware/seeed_reterminal_e1001/latest.bin ${fileSha}`);
+      const served = Buffer.from(await (await fetch(`${baseUrl}/firmware/seeed_reterminal_e1001/latest.bin`)).arrayBuffer());
+      assert.equal(crypto.createHash('sha256').update(served).digest('hex'), fileSha, 'token must match the served bytes');
+
+      // 5. Default preset with no version.json is NOT offered (S2)
+      fs.rmSync(path.join(fwDir, 'version.json'));
+      otaBreaker.reset();
+      commandQueue.queueCommand('dev-e1001', 'update', {});
+      res = await fetch(`${baseUrl}/render?device_id=dev-e1001`, { headers: { 'Authorization': 'Bearer tok-e1001' } });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-st-command'), null, 'no version.json: no update');
+    } finally {
+      commandQueue.popPendingCommands('dev-e1001');
+      fs.rmSync(fwDir, { recursive: true, force: true });
+    }
+  });
+
+  test('S1: handleRenderLayout delivers X-ST-Command on 404 when device has no layout assigned', async () => {
+    const commandQueue = require('../lib/command-queue');
+    db.prepare(`
+      INSERT OR IGNORE INTO devices (id, name, workspace_id, status, device_token, playlist_id, screen_profile)
+      VALUES ('dev-no-layout', 'No Layout Dev', 'ws-test', 'online', 'tok-no-layout', NULL, 'seeed-reterminal-sticky')
+    `).run();
+    commandQueue.queueCommand('dev-no-layout', 'reboot', {});
+    const res = await fetch(`${baseUrl}/render?device_id=dev-no-layout&mode=layout`, {
+      headers: { 'Authorization': 'Bearer tok-no-layout' },
     });
+    assert.equal(res.status, 404);
+    assert.equal(res.headers.get('x-st-command'), 'reboot');
+    const remaining = commandQueue.peekPendingCommands('dev-no-layout');
+    assert.equal(remaining.length, 0, 'reboot command should be popped upon delivery');
+  });
 
-    let res = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
-      headers: { 'Authorization': 'Bearer tok-e1001' },
+  test('S2/S3: suppressed update command is popped and sibling reboot is delivered on same poll', async () => {
+    const commandQueue = require('../lib/command-queue');
+    db.prepare(`
+      INSERT OR IGNORE INTO devices (id, name, workspace_id, status, device_token, playlist_id, screen_profile)
+      VALUES ('dev-suppressed-cmd', 'Suppressed Cmd Dev', 'ws-test', 'online', 'tok-suppressed', 'pl-e1001', 'seeed-reterminal-sticky')
+    `).run();
+    commandQueue.popPendingCommands('dev-suppressed-cmd');
+    // Queue update with missing sha256 (will be suppressed) and reboot
+    commandQueue.queueCommand('dev-suppressed-cmd', 'update', { url: 'http://custom.example.com/no-sha.bin' });
+    commandQueue.queueCommand('dev-suppressed-cmd', 'reboot', {});
+
+    const res = await fetch(`${baseUrl}/render?device_id=dev-suppressed-cmd`, {
+      headers: { 'Authorization': 'Bearer tok-suppressed' },
     });
     assert.equal(res.status, 200);
-    assert.equal(
-      res.headers.get('x-st-command'),
-      'update http://custom.example.com/fw.bin 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
-    );
-
-    // 2. Default preset URL when no URL specified in payload
-    commandQueue.queueCommand('dev-e1001', 'update', {});
-    res = await fetch(`${baseUrl}/render?device_id=dev-e1001`, {
-      headers: { 'Authorization': 'Bearer tok-e1001' },
-    });
-    assert.equal(res.status, 200);
-    assert.equal(
-      res.headers.get('x-st-command'),
-      'update /api/embedded/firmware/seeed-reterminal-e1001/latest.bin'
-    );
+    assert.equal(res.headers.get('x-st-command'), 'reboot', 'reboot should be delivered because suppressed update was popped');
+    const remaining = commandQueue.peekPendingCommands('dev-suppressed-cmd');
+    assert.equal(remaining.length, 0, 'both commands should have been popped');
   });
 
   test('teardown server', async () => {
@@ -585,7 +1170,8 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
     const path = require('node:path');
     const { contentDir } = require('../config');
     try { fs.unlinkSync(path.join(contentDir, 'test-e1001.png')); } catch (_) {}
-    try { fs.rmSync(path.join(__dirname, '../data/firmware'), { recursive: true, force: true }); } catch (_) {}
+    try { fs.rmSync(testFwDir, { recursive: true, force: true }); } catch (_) {}
+    delete process.env.ST_FIRMWARE_DIR;
     if (server) await new Promise((resolve) => server.close(resolve));
   });
 });

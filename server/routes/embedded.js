@@ -55,27 +55,127 @@ const { effectiveDeviceTz } = require('../lib/device-timezone');
 const PowerWindow           = require('../lib/power-window');
 const { firmwareLimiter, deviceLogsLimiter } = require('../lib/embedded-rate-limits');
 const { powerScheduleForDevice } = require('../lib/device-power-schedule');
-const { popPendingCommands }     = require('../lib/command-queue');
+const { popPendingCommands, peekPendingCommands, popCommand } = require('../lib/command-queue');
+const otaBreaker            = require('../lib/ota-breaker');
 
-function getPendingCommand(deviceId, device) {
+const SHA256_HEX = /^[0-9a-f]{64}$/i;
+
+/*
+ * The preset a device's firmware is filed under, or '' when it cannot be told.
+ *
+ * ⚠️ NO DEFAULT. An unknown or empty profile is not Sticky. Defaulting here pointed a non-Sticky
+ * panel at Sticky firmware. Callers treat '' as "no update for this device".
+ */
+function normalizePresetName(profileOrPreset) {
+  if (!profileOrPreset) return '';
+  let str = profileOrPreset;
+  if (typeof str === 'object') {
+    str = str.preset || '';
+  } else if (typeof str === 'string' && str.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(str);
+      str = parsed.preset || '';
+    } catch (_) {}
+  }
+  return String(str || '').replace(/-/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
+}
+
+/*
+ * The `update <url> <sha256>` string for one queued update, or null when the device must not be
+ * told to update. The device verifies the image against the digest in this string and refuses to
+ * flash without one, so an offer is only made when every part of it is known:
+ *
+ *   - the URL,
+ *   - a 64-hex SHA-256 of the exact bytes that URL returns (a caller-supplied URL carries its own
+ *     hash; the local file's hash is never borrowed for it),
+ *   - a target version (version.json, or the payload's version), so the breaker can judge it.
+ */
+function buildUpdateOffer(deviceId, device, req, update) {
+  const payload = update.payload || {};
+  const customUrl = payload.url || payload.binary_url || update.url || '';
+  let url;
+  let sha;
+  let targetVersion = payload.version || null;
+
+  if (customUrl) {
+    url = String(customUrl);
+    sha = payload.sha256 || update.sha256 || '';
+  } else {
+    const preset = normalizePresetName(device?.screen_profile);
+    if (!preset) return null;
+    const fw = getFirmwareInfo(preset);
+    if (!fw || !fw.sha256) return null;               // no file on disk: nothing we can offer
+    url = `/api/embedded/firmware/${preset}/latest.bin`;
+    sha = fw.sha256;
+    targetVersion = targetVersion || fw.version;
+  }
+
+  if (!SHA256_HEX.test(String(sha))) return null;      // no verifiable digest: do not emit
+  if (!targetVersion) return null;                      // no version.json: breaker cannot judge it
+
+  // OTA breaker (RF-6 / S3). Consulted for every offer; not forgiven here. Forgiveness belongs to
+  // an authenticated device reconnect (deviceSocket), not to each poll.
+  const currentVersion = (req && req.headers ? (req.headers['x-st-firmware-version'] || req.headers['x-st-version']) : null)
+    || device?.app_version || '1.0.0';
+  const verdict = otaBreaker.decide(currentVersion, targetVersion, deviceId);
+  if (!verdict.update_available) {
+    console.log(`[ota] Device '${deviceId}' update held off by ota-breaker: reason=${verdict.reason}`);
+    return null;
+  }
+  return `update ${url} ${sha}`;
+}
+
+/*
+ * The command to deliver on this response, or null. Nothing is popped here: the caller pops it
+ * with deliverCommand() when the response carrying the X-ST-Command header is actually written.
+ */
+function resolvePendingCommand(deviceId, device, req) {
   if (!deviceId) return null;
-  const cmds = popPendingCommands(deviceId);
+  let cmds = peekPendingCommands(deviceId);
   if (!cmds || cmds.length === 0) return null;
+
   const uploadLogs = cmds.find(c => c.type === 'upload_logs');
-  if (uploadLogs) return 'upload_logs';
+  if (uploadLogs) {
+    return { type: 'upload_logs', commandStr: 'upload_logs' };
+  }
+
   const update = cmds.find(c => c.type === 'update');
   if (update) {
-    let url = (update.payload && (update.payload.url || update.payload.binary_url)) || update.url || '';
-    const sha = (update.payload && update.payload.sha256) || update.sha256 || '';
-    if (!url) {
-      const preset = (device && device.screen_profile) || 'seeed_reterminal_sticky';
-      url = `/api/embedded/firmware/${preset}/latest.bin`;
+    const commandStr = buildUpdateOffer(deviceId, device, req, update);
+    if (commandStr) {
+      return { type: 'update', commandStr };
     }
-    return sha ? `update ${url} ${sha}` : `update ${url}`;
+    // Suppressed update: pop it immediately so it does not sit in the queue and re-trigger otaBreaker.decide()
+    popCommand(deviceId, 'update');
+    cmds = cmds.filter(c => c.type !== 'update');
   }
+
   const reboot = cmds.find(c => c.type === 'reboot');
-  if (reboot) return 'reboot';
-  return cmds[0].type;
+  if (reboot) {
+    return { type: 'reboot', commandStr: 'reboot' };
+  }
+
+  while (cmds.length > 0) {
+    const candidate = cmds[0];
+    if (candidate && candidate.type && typeof candidate.type === 'string' && candidate.type.trim().length > 0) {
+      return { type: candidate.type, commandStr: candidate.type };
+    }
+    if (candidate && candidate.type) {
+      popCommand(deviceId, candidate.type);
+    }
+    cmds.shift();
+  }
+
+  return null;
+}
+
+function getPendingCommand(deviceId, device, req, options = {}) {
+  const resolved = resolvePendingCommand(deviceId, device, req);
+  if (!resolved) return null;
+  if (!options.peek) {
+    popCommand(deviceId, resolved.type);
+  }
+  return resolved.commandStr;
 }
 
 // ─── Auth helper ───────────────────────────────────────────────────────────────
@@ -146,6 +246,30 @@ function resolveDevice(req, res) {
  * the item; without this guard every poll wrote two device_telemetry rows and pruned twice.
  */
 const HEARTBEAT_DONE = Symbol('embeddedHeartbeat');
+
+/*
+ * Pop the queued command at the moment a response carrying its X-ST-Command header is written.
+ * Every status, including 304 and 404/501 that carry the header. A 304 that carries it has been
+ * delivered, so leaving it queued would re-run update / reboot / upload_logs on every unchanged poll.
+ */
+function deliverCommand(deviceId, opts) {
+  if (opts && opts.pendingCmdObj) popCommand(deviceId, opts.pendingCmdObj.type);
+}
+
+/*
+ * Whole seconds until the next scheduled-off edge, or Infinity when there is none.
+ *
+ * nextEdge.minutes_until counts whole minutes from the current minute, so using it directly rounds
+ * a panel 10 s from power-off up to a full minute. Take the sub-minute remainder from the clock.
+ * Floored so the answer never runs past the real edge.
+ */
+function secondsUntilOffEdge(power, nowMs = Date.now()) {
+  if (!power || !power.nextEdge || power.nextEdge.to !== 'scheduled_off') return Infinity;
+  const minutes = Number(power.nextEdge.minutes_until);
+  if (!Number.isFinite(minutes) || minutes < 1) return 1;
+  const intoMinute = (nowMs % 60000) / 1000;
+  return Math.max(1, Math.floor(minutes * 60 - intoMinute));
+}
 
 function touchDeviceHeartbeat(device, req) {
   if (req[HEARTBEAT_DONE] !== undefined) return req[HEARTBEAT_DONE];
@@ -219,6 +343,40 @@ function touchDeviceHeartbeat(device, req) {
   if (powerSource) {
     device.power_source = powerSource;
   }
+  if (appVersion) {
+    device.app_version = appVersion;
+    // Progress for the OTA breaker (S3): every render that reports a version is evidence, whether or
+    // not an update was queued. Without this, a device that updated and then stopped being offered
+    // an update never clears its no-progress hold.
+    otaBreaker.noteReportedVersion(device.id, appVersion);
+  }
+
+  // Extract optional orientation and rotation reported by device
+  const orientHeader = req.headers ? (req.headers['x-st-device-orientation'] || req.headers['x-st-orientation']) : undefined;
+  const rotHeader = req.headers ? (req.headers['x-st-device-rotation'] !== undefined ? req.headers['x-st-device-rotation'] : req.headers['x-st-rotation']) : undefined;
+  const queryOrient = req.query?.orientation;
+  const queryRot = req.query?.rotation !== undefined ? req.query?.rotation : req.query?.rotate;
+
+  let reportedOrient = null;
+  const rawOrient = (queryOrient || orientHeader || '').trim().toLowerCase();
+  const rawRot = queryRot !== undefined ? parseInt(queryRot, 10) : (rotHeader !== undefined ? parseInt(rotHeader, 10) : undefined);
+
+  if (VALID_ORIENTATIONS.has(rawOrient)) {
+    reportedOrient = rawOrient;
+  } else if (rawRot !== undefined) {
+    if (rawRot === 90) reportedOrient = 'portrait';
+    else if (rawRot === 180) reportedOrient = 'landscape-flipped';
+    else if (rawRot === 270) reportedOrient = 'portrait-flipped';
+    else if (rawRot === 0) reportedOrient = 'landscape';
+  }
+
+  // ⚠️ A dashboard preview is an operator looking, not the panel reporting where it is mounted. It
+  // must not overwrite devices.orientation (it would flip the stored mount for the real panel).
+  const isPreviewReq = req.query?.preview === '1';
+  const persistOrient = (reportedOrient && !isPreviewReq) ? reportedOrient : null;
+  if (persistOrient) {
+    device.orientation = persistOrient;
+  }
 
   try {
     db.prepare(`
@@ -228,9 +386,10 @@ function touchDeviceHeartbeat(device, req) {
           ip_address = CASE WHEN ? != '' THEN ? ELSE ip_address END,
           app_version = COALESCE(?, app_version),
           power_source = COALESCE(?, power_source),
+          orientation = COALESCE(?, orientation),
           updated_at = strftime('%s','now')
       WHERE id = ?
-    `).run(clientIp, clientIp, appVersion, powerSource, device.id);
+    `).run(clientIp, clientIp, appVersion, powerSource, persistOrient, device.id);
 
     // If telemetry headers were provided, record a row in device_telemetry.
     // ⚠️ local_ip stays NULL: it means the screen's LAN address (the dashboard prints it as "Local
@@ -803,16 +962,52 @@ router.get('/pair/status', (req, res) => {
   });
 });
 
+const VALID_ORIENTATIONS = new Set(['landscape', 'portrait', 'landscape-flipped', 'portrait-flipped']);
+
 function resolveOrientationRotation(req, device) {
-  let orientation = req.query.orientation || device.orientation;
-  const rotation = req.query.rotation !== undefined ? parseInt(req.query.rotation, 10) : (req.query.rotate !== undefined ? parseInt(req.query.rotate, 10) : undefined);
+  const queryOrient = req.query?.orientation ? String(req.query.orientation).trim().toLowerCase() : undefined;
+  const queryRotRaw = req.query?.rotation !== undefined ? req.query.rotation : req.query?.rotate;
+  const queryRot = queryRotRaw !== undefined ? parseInt(queryRotRaw, 10) : undefined;
+
+  const headerOrientRaw = req.headers ? (req.headers['x-st-device-orientation'] || req.headers['x-st-orientation']) : undefined;
+  const headerOrient = headerOrientRaw ? String(headerOrientRaw).trim().toLowerCase() : undefined;
+  const headerRotRaw = req.headers ? (req.headers['x-st-device-rotation'] !== undefined ? req.headers['x-st-device-rotation'] : req.headers['x-st-rotation']) : undefined;
+  const headerRot = headerRotRaw !== undefined ? parseInt(headerRotRaw, 10) : undefined;
+
+  let orientation = (VALID_ORIENTATIONS.has(queryOrient) ? queryOrient : undefined)
+    || (VALID_ORIENTATIONS.has(headerOrient) ? headerOrient : undefined)
+    || device?.orientation;
+
+  let rotation = (queryRot !== undefined && Number.isFinite(queryRot))
+    ? queryRot
+    : (headerRot !== undefined && Number.isFinite(headerRot) ? headerRot : undefined);
+
   if (!orientation && rotation !== undefined) {
     if (rotation === 90) orientation = 'portrait';
     else if (rotation === 180) orientation = 'landscape-flipped';
     else if (rotation === 270) orientation = 'portrait-flipped';
     else if (rotation === 0) orientation = 'landscape';
   }
+
   return { orientation, rotation };
+}
+
+/*
+ * ?format= for a preview. A nibble panel's bytes are its controller's own packing; a PNG/JPEG/BMP
+ * request cannot be honoured by handing back nibbles. Refuse it rather than label nibbles as an image.
+ */
+const IMAGE_FORMATS = new Set(['png', 'jpeg', 'jpg', 'bmp']);
+const PACKED_NIBBLE_DEPTHS = new Set(['spectra6', 'gray16']);
+function applyFormatOverride(req, profile) {
+  if (!req.query.format) return null;
+  const fmt = String(req.query.format).toLowerCase();
+  const known = fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed' || fmt === 'x-epd-spectra6' || fmt === 'x-epd-gray16';
+  if (!known) return null;
+  if (PACKED_NIBBLE_DEPTHS.has(profile.colorDepth) && IMAGE_FORMATS.has(fmt)) {
+    return `format=${fmt} is not available for ${profile.colorDepth} panels: the response is packed controller nibbles`;
+  }
+  profile.outputFormat = fmt;
+  return null;
 }
 
 // ─── GET /api/embedded/info ─────────────────────────────────────────────────────
@@ -881,12 +1076,8 @@ router.get('/render', resolveAuth, async (req, res) => {
   }
 
   // Allow optional query overrides (e.g. ?format=jpeg or ?format=png or ?dither=atkinson for previewing)
-  if (req.query.format) {
-    const fmt = String(req.query.format).toLowerCase();
-    if (fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed' || fmt === 'x-epd-spectra6' || fmt === 'x-epd-gray16') {
-      profile.outputFormat = fmt;
-    }
-  }
+  const formatErr = applyFormatOverride(req, profile);
+  if (formatErr) return res.status(400).json({ error: formatErr });
   if (req.query.dither) {
     const d = String(req.query.dither).toLowerCase();
     if (d === 'floyd-steinberg' || d === 'atkinson' || d === 'none') {
@@ -895,8 +1086,9 @@ router.get('/render', resolveAuth, async (req, res) => {
   }
 
   const isPreview = req.query.preview === '1';
-  const pendingCmd = !isPreview ? getPendingCommand(device.id, device) : null;
-  const renderOpts = { pendingCmd };
+  const pendingCmdObj = !isPreview ? resolvePendingCommand(device.id, device, req) : null;
+  const pendingCmd = pendingCmdObj ? pendingCmdObj.commandStr : null;
+  const renderOpts = { pendingCmd, pendingCmdObj };
 
   // Query mode overrides
   if (req.query.mode === 'single') {
@@ -938,12 +1130,8 @@ router.get('/render-layout', resolveAuth, async (req, res) => {
     });
   }
 
-  if (req.query.format) {
-    const fmt = String(req.query.format).toLowerCase();
-    if (fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed' || fmt === 'x-epd-spectra6' || fmt === 'x-epd-gray16') {
-      profile.outputFormat = fmt;
-    }
-  }
+  const formatErr = applyFormatOverride(req, profile);
+  if (formatErr) return res.status(400).json({ error: formatErr });
   if (req.query.dither) {
     const d = String(req.query.dither).toLowerCase();
     if (d === 'floyd-steinberg' || d === 'atkinson' || d === 'none') {
@@ -952,8 +1140,9 @@ router.get('/render-layout', resolveAuth, async (req, res) => {
   }
 
   const isPreview = req.query.preview === '1';
-  const pendingCmd = !isPreview ? getPendingCommand(device.id, device) : null;
-  return handleRenderLayout(req, res, device, profile, { pendingCmd, explicitMode: true });
+  const pendingCmdObj = !isPreview ? resolvePendingCommand(device.id, device, req) : null;
+  const pendingCmd = pendingCmdObj ? pendingCmdObj.commandStr : null;
+  return handleRenderLayout(req, res, device, profile, { pendingCmd, pendingCmdObj, explicitMode: true });
 });
 
 async function handleRenderStandard(req, res, device, profile, opts = {}) {
@@ -987,6 +1176,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     if (opts.pendingCmd) {
       offHeaders['X-ST-Command'] = opts.pendingCmd;
     }
+    deliverCommand(device.id, opts);
     res.set(offHeaders).status(304).end();
     return;
   }
@@ -998,6 +1188,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     const errHeaders = { 'X-ST-Device-Name': device.name || '' };
     if (opts.pendingCmd) errHeaders['X-ST-Command'] = opts.pendingCmd;
     res.set(errHeaders);
+    deliverCommand(device.id, opts);
     return res.status(404).json({ error: 'No playlist assigned or no active items for this device.', device_name: device.name || '' });
   }
 
@@ -1006,12 +1197,17 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
   let expiresIn = resolved.expiresIn;
   if (power.isOff && power.sleepSeconds) {
     expiresIn = power.sleepSeconds;
-  } else if (!power.isOff && power.nextEdge && power.nextEdge.to === 'scheduled_off') {
-    const secondsUntilOff = Math.max(1, power.nextEdge.minutes_until * 60);
-    expiresIn = Math.min(expiresIn, secondsUntilOff);
-  }
-  if (profile.minRefreshInterval && typeof profile.minRefreshInterval === 'number') {
-    expiresIn = Math.max(expiresIn, profile.minRefreshInterval);
+  } else if (!power.isOff) {
+    let secondsUntilOff = Infinity;
+    if (power.nextEdge && power.nextEdge.to === 'scheduled_off') {
+      secondsUntilOff = secondsUntilOffEdge(power);
+      expiresIn = Math.min(expiresIn, secondsUntilOff);
+    }
+    // S4: the floor is a minimum for a panel that stays on. It is capped by the seconds to the next
+    // off edge, so a panel minutes from power-off is never told to wait out the floor.
+    if (profile.minRefreshInterval && typeof profile.minRefreshInterval === 'number') {
+      expiresIn = Math.min(secondsUntilOff, Math.max(expiresIn, profile.minRefreshInterval));
+    }
   }
 
   console.log(`[embedded] Device '${device.name}' (${device.id}) requested frame [item=${itemIndex + 1}/${total}] from ${clientIp}`);
@@ -1053,6 +1249,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
   }
 
   if (!isPreview && isNotModified(key, req.headers['if-none-match'])) {
+    deliverCommand(device.id, opts);
     res.set(headers).status(304).end();
     return;
   }
@@ -1061,6 +1258,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
   if (!isPreview) {
     const cached = cacheGet(key);
     if (cached.hit) {
+      deliverCommand(device.id, opts);
       res.set({ ...headers, 'Content-Type': detectContentType(profile) });
       return res.status(200).send(cached.buffer);
     }
@@ -1091,6 +1289,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
 
   if (!renderResult || renderResult.unsupported) {
     if (opts.pendingCmd) res.set('X-ST-Command', opts.pendingCmd);
+    deliverCommand(device.id, opts);
     return res.status(501).json({
       error: 'Content type not yet supported by Phase 1 renderer.',
       detail: renderResult?.reason || 'No renderable items in playlist',
@@ -1119,10 +1318,20 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     'X-ST-Screen-Height': String(outHeight),
     'Content-Type': processed.contentType,
   });
+  deliverCommand(device.id, opts);
   res.status(200).send(processed.buffer);
 }
 
 async function handleRenderLayout(req, res, device, profile, opts = {}) {
+  const isPreview = req.query.preview === '1' || opts.preview === true;
+  const pendingCmdObj = opts.pendingCmdObj !== undefined
+    ? opts.pendingCmdObj
+    : (!isPreview ? resolvePendingCommand(device.id, device, req) : null);
+  const pendingCmd = opts.pendingCmd !== undefined
+    ? opts.pendingCmd
+    : (pendingCmdObj ? pendingCmdObj.commandStr : null);
+  const cmdOpts = { ...opts, pendingCmd, pendingCmdObj };
+
   const ac = opts.signal ? null : new AbortController();
   if (ac) {
     res.on('close', () => {
@@ -1137,20 +1346,24 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   const resolved = opts.preResolved || resolveLayoutItems(device.id, forceIndex, { advance: false });
   if (!resolved || resolved.zoneEntries.length === 0) {
     if (isExplicit) {
+      if (cmdOpts.pendingCmd) res.setHeader('X-ST-Command', cmdOpts.pendingCmd);
+      deliverCommand(device.id, cmdOpts);
       return res.status(404).json({ error: 'Device has no multi-zone layout assigned or no active items.' });
     }
-    return handleRenderStandard(req, res, device, profile, { ...opts, isFallback: true, signal });
+    return handleRenderStandard(req, res, device, profile, { ...cmdOpts, isFallback: true, signal });
   }
 
   const isImageOnly = isLayoutImageOnly(resolved.zoneEntries);
   if (!isImageOnly && !isBrowserAvailable()) {
     if (isExplicit) {
+      if (cmdOpts.pendingCmd) res.setHeader('X-ST-Command', cmdOpts.pendingCmd);
+      deliverCommand(device.id, cmdOpts);
       return res.status(501).json({
         error: 'Multi-zone layout rendering failed or not supported.',
         detail: 'Browser unavailable for multi-zone rendering with widgets or web pages',
       });
     }
-    return handleRenderStandard(req, res, device, profile, { ...opts, isFallback: true, signal });
+    return handleRenderStandard(req, res, device, profile, { ...cmdOpts, isFallback: true, signal });
   }
 
   // Persist pending cursor advances now that the layout is confirmed for rendering
@@ -1159,8 +1372,6 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
       ZONE_CURSOR_UPSERT.run(device.id, adv.zoneId, adv.index);
     }
   }
-
-  const isPreview = req.query.preview === '1';
 
   // ── Power Schedule check ──────────────────────────────────────────────────
   const power = (!isPreview && forceIndex === null)
@@ -1177,9 +1388,10 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
       'X-ST-Expires-In': String(power.sleepSeconds),
       'X-ST-Power-State': 'scheduled_off',
     };
-    if (opts.pendingCmd) {
-      offHeaders['X-ST-Command'] = opts.pendingCmd;
+    if (cmdOpts.pendingCmd) {
+      offHeaders['X-ST-Command'] = cmdOpts.pendingCmd;
     }
+    deliverCommand(device.id, cmdOpts);
     res.set(offHeaders).status(304).end();
     return;
   }
@@ -1189,12 +1401,17 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   let expiresIn = resolved.expiresIn;
   if (power.isOff && power.sleepSeconds) {
     expiresIn = power.sleepSeconds;
-  } else if (!power.isOff && power.nextEdge && power.nextEdge.to === 'scheduled_off') {
-    const secondsUntilOff = Math.max(1, power.nextEdge.minutes_until * 60);
-    expiresIn = Math.min(expiresIn, secondsUntilOff);
-  }
-  if (profile.minRefreshInterval && typeof profile.minRefreshInterval === 'number') {
-    expiresIn = Math.max(expiresIn, profile.minRefreshInterval);
+  } else if (!power.isOff) {
+    let secondsUntilOff = Infinity;
+    if (power.nextEdge && power.nextEdge.to === 'scheduled_off') {
+      secondsUntilOff = secondsUntilOffEdge(power);
+      expiresIn = Math.min(expiresIn, secondsUntilOff);
+    }
+    // S4: the floor is a minimum for a panel that stays on. It is capped by the seconds to the next
+    // off edge, so a panel minutes from power-off is never told to wait out the floor.
+    if (profile.minRefreshInterval && typeof profile.minRefreshInterval === 'number') {
+      expiresIn = Math.min(secondsUntilOff, Math.max(expiresIn, profile.minRefreshInterval));
+    }
   }
 
   console.log(`[embedded] Device '${device.name}' (${device.id}) requested multi-zone frame [layout=${layout.name || layout.id}] from ${clientIp}`);
@@ -1225,11 +1442,12 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   if (profile.supportsPartialRefresh !== undefined) {
     headers['X-ST-Supports-Partial'] = profile.supportsPartialRefresh ? '1' : '0';
   }
-  if (opts.pendingCmd) {
-    headers['X-ST-Command'] = opts.pendingCmd;
+  if (cmdOpts.pendingCmd) {
+    headers['X-ST-Command'] = cmdOpts.pendingCmd;
   }
 
   if (!isPreview && isNotModified(key, req.headers['if-none-match'])) {
+    deliverCommand(device.id, cmdOpts);
     res.set(headers).status(304).end();
     return;
   }
@@ -1238,6 +1456,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   if (!isPreview) {
     const cached = cacheGet(key);
     if (cached.hit) {
+      deliverCommand(device.id, cmdOpts);
       res.set({ ...headers, 'Content-Type': detectContentType(profile) });
       return res.status(200).send(cached.buffer);
     }
@@ -1250,23 +1469,27 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
   } catch (e) {
     console.error(`[embedded] multi-zone layout render error: ${e.message}`);
     if (isExplicit) {
+      if (cmdOpts.pendingCmd) res.setHeader('X-ST-Command', cmdOpts.pendingCmd);
+      deliverCommand(device.id, cmdOpts);
       return res.status(500).json({
         error: 'Multi-zone layout rendering failed.',
         detail: 'An unexpected error occurred while rendering the layout.',
       });
     }
-    return handleRenderStandard(req, res, device, profile, { ...opts, isFallback: true, signal });
+    return handleRenderStandard(req, res, device, profile, { ...cmdOpts, isFallback: true, signal });
   }
 
   if (!renderResult || renderResult.unsupported) {
     if (isExplicit) {
+      if (cmdOpts.pendingCmd) res.setHeader('X-ST-Command', cmdOpts.pendingCmd);
+      deliverCommand(device.id, cmdOpts);
       return res.status(501).json({
         error: 'Multi-zone layout rendering failed or not supported.',
         detail: renderResult?.reason || 'Browser unavailable for multi-zone rendering',
       });
     }
     // Auto mode fallback to standard single-item rendering
-    return handleRenderStandard(req, res, device, profile, { ...opts, isFallback: true, signal });
+    return handleRenderStandard(req, res, device, profile, { ...cmdOpts, isFallback: true, signal });
   }
 
   // ── Post-process ─────────────────────────────────────────────────────────────
@@ -1275,6 +1498,8 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     processed = await postprocess(renderResult.png, profile);
   } catch (e) {
     console.error('[embedded] postprocess error:', e.message);
+    if (cmdOpts.pendingCmd) res.setHeader('X-ST-Command', cmdOpts.pendingCmd);
+    deliverCommand(device.id, cmdOpts);
     return res.status(500).json({ error: `Post-processing failed: ${e.message}` });
   }
 
@@ -1290,6 +1515,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     'X-ST-Screen-Height': String(outHeight),
     'Content-Type': processed.contentType,
   });
+  deliverCommand(device.id, cmdOpts);
   res.status(200).send(processed.buffer);
 }
 
@@ -1300,7 +1526,26 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
  * JSON array of logs, or plain text log lines.
  * Emits dashboard:embedded-logs to dashboard subscribers in the device's workspace room.
  */
-router.post('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
+// The MCU ring holds 100 entries. The body is stored whole and re-emitted whole on the dashboard
+// socket, so it gets its own small parser (server.js leaves this path to it) instead of the 12 MB
+// global one.
+const LOG_BODY_LIMIT = '256kb';
+const MAX_LOG_ENTRIES = 100;
+const logJsonParser = express.json({ limit: LOG_BODY_LIMIT });
+
+router.post('/logs', deviceLogsLimiter, resolveAuth, (req, res, next) => {
+  logJsonParser(req, res, (err) => {
+    if (err) {
+      if (err.type === 'entity.too.large') {
+        return res.status(413).json({ error: `Log upload exceeds ${LOG_BODY_LIMIT}` });
+      }
+      return res.status(400).json({ error: 'Malformed JSON body' });
+    }
+    handleDeviceLogs(req, res);
+  });
+});
+
+function handleDeviceLogs(req, res) {
   const device = resolveDevice(req, res);
   if (!device) return;
 
@@ -1313,10 +1558,16 @@ router.post('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
   let version = null;
 
   if (typeof rawLogs === 'string') {
+    if (rawLogs.length > 500000) {
+      return res.status(400).json({ error: 'Payload size exceeds limit' });
+    }
     try {
       rawLogs = JSON.parse(rawLogs);
     } catch (_) {
       const lines = rawLogs.split('\n').filter(Boolean);
+      if (lines.length > MAX_LOG_ENTRIES) {
+        return res.status(400).json({ error: `Log entries exceed maximum limit of ${MAX_LOG_ENTRIES}` });
+      }
       rawLogs = {
         logs: lines.map(line => ({ msg: line, level: 'INFO' })),
         log_count: lines.length
@@ -1325,12 +1576,34 @@ router.post('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
   }
 
   if (Array.isArray(rawLogs)) {
+    if (rawLogs.length > MAX_LOG_ENTRIES) {
+      return res.status(400).json({ error: `Log entries exceed maximum limit of ${MAX_LOG_ENTRIES}` });
+    }
     rawLogs = { logs: rawLogs, log_count: rawLogs.length };
   }
 
   if (rawLogs && typeof rawLogs === 'object') {
-    battery = (rawLogs.battery !== undefined && rawLogs.battery !== null) ? Number(rawLogs.battery) : null;
-    wifiRssi = (rawLogs.rssi !== undefined && rawLogs.rssi !== null) ? Number(rawLogs.rssi) : null;
+    if (Array.isArray(rawLogs.logs) && rawLogs.logs.length > MAX_LOG_ENTRIES) {
+      return res.status(400).json({ error: `Log entries exceed maximum limit of ${MAX_LOG_ENTRIES}` });
+    }
+
+    if (rawLogs.battery !== undefined && rawLogs.battery !== null) {
+      const b = Number(rawLogs.battery);
+      if (!Number.isFinite(b) || b < 0 || b > 100) {
+        return res.status(400).json({ error: 'Invalid battery value; must be a finite number between 0 and 100' });
+      }
+      battery = b;
+    }
+
+    const rawRssi = rawLogs.wifi_rssi !== undefined ? rawLogs.wifi_rssi : rawLogs.rssi;
+    if (rawRssi !== undefined && rawRssi !== null) {
+      const r = Number(rawRssi);
+      if (!Number.isFinite(r) || r < -120 || r > 0) {
+        return res.status(400).json({ error: 'Invalid rssi value; must be a finite number between -120 and 0' });
+      }
+      wifiRssi = r;
+    }
+
     version = (rawLogs.version !== undefined && rawLogs.version !== null) ? String(rawLogs.version) : null;
     if (Array.isArray(rawLogs.logs)) {
       logCount = rawLogs.logs.length;
@@ -1339,11 +1612,16 @@ router.post('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
     }
   }
 
-  if (battery === null && req.headers['x-st-device-battery']) {
-    battery = parseInt(req.headers['x-st-device-battery'], 10);
+  if (battery === null && req.headers['x-st-device-battery'] !== undefined) {
+    const bH = Number(req.headers['x-st-device-battery']);
+    if (Number.isFinite(bH) && bH >= 0 && bH <= 100) battery = bH;
   }
-  if (wifiRssi === null && req.headers['x-st-device-rssi']) {
-    wifiRssi = parseInt(req.headers['x-st-device-rssi'], 10);
+  if (wifiRssi === null) {
+    const rHRaw = req.headers['x-st-device-rssi'] || req.headers['x-st-device-wifi-rssi'];
+    if (rHRaw !== undefined) {
+      const rH = Number(rHRaw);
+      if (Number.isFinite(rH) && rH >= -120 && rH <= 0) wifiRssi = rH;
+    }
   }
   if (!version && req.headers['x-st-firmware-version']) {
     version = String(req.headers['x-st-firmware-version']);
@@ -1351,14 +1629,13 @@ router.post('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
 
   const logJson = typeof rawLogs === 'object' ? JSON.stringify(rawLogs) : String(rawLogs || '');
 
-  const stmt = db.prepare(`
-    INSERT INTO device_diagnostic_logs (device_id, log_json, log_count, battery, wifi_rssi, version, uploaded_at)
-    VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now'))
-  `);
-  const info = stmt.run(device.id, logJson, logCount, battery, wifiRssi, version);
-  const logId = info.lastInsertRowid;
+  const insertAndPrune = db.transaction((devId, json, count, batt, rssi, ver) => {
+    const info = db.prepare(`
+      INSERT INTO device_diagnostic_logs (device_id, log_json, log_count, battery, wifi_rssi, version, uploaded_at)
+      VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now'))
+    `).run(devId, json, count, batt, rssi, ver);
+    const id = info.lastInsertRowid;
 
-  try {
     db.prepare(`
       DELETE FROM device_diagnostic_logs
       WHERE device_id = ? AND id NOT IN (
@@ -1367,7 +1644,22 @@ router.post('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
         ORDER BY uploaded_at DESC, id DESC
         LIMIT 20
       )
-    `).run(device.id, device.id);
+    `).run(devId, devId);
+
+    return id;
+  });
+
+  let logId;
+  try {
+    logId = insertAndPrune(device.id, logJson, logCount, battery, wifiRssi, version);
+  } catch (err) {
+    console.error('[embedded-logs] Failed to store diagnostic log:', err.message);
+    return res.status(500).json({ error: 'Failed to store diagnostic log' });
+  }
+
+  // Pop pending upload_logs command if queued
+  try {
+    popCommand(device.id, 'upload_logs');
   } catch (_) {}
 
   // Broadcast WebSocket event to dashboard room
@@ -1379,6 +1671,7 @@ router.post('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
       emitToWorkspace(dashboardNs, deviceRoom(device.id), 'dashboard:embedded-logs', {
         device_id: device.id,
         id: logId,
+        log_id: logId,
         log_count: logCount,
         battery,
         wifi_rssi: wifiRssi,
@@ -1391,8 +1684,8 @@ router.post('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
     console.warn(`[embedded-logs] Failed to emit socket event: ${err.message}`);
   }
 
-  res.status(200).json({ status: 'ok', id: logId, count: logCount });
-});
+  res.status(200).json({ status: 'ok', log_id: logId, id: logId, count: logCount });
+}
 
 // ─── GET /api/embedded/logs ───────────────────────────────────────────────────
 router.get('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
@@ -1411,21 +1704,24 @@ router.get('/logs', deviceLogsLimiter, resolveAuth, (req, res) => {
 
 // ─── Firmware Distribution & OTA Management ───────────────────────────────────
 
+const _firmwareHashCache = new Map(); // filePath -> { mtimeMs, size, sha256 }
+
 function getFirmwareInfo(preset) {
-  const safePreset = String(preset || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  const safePreset = normalizePresetName(preset);
   if (!safePreset) return null;
 
-  const candidates = [];
-  if (config.embeddedFirmwareDir) {
-    candidates.push(path.join(config.embeddedFirmwareDir, safePreset));
-    candidates.push(config.embeddedFirmwareDir);
+  const candidateDirs = [];
+  if (process.env.ST_FIRMWARE_DIR) {
+    candidateDirs.push(path.join(process.env.ST_FIRMWARE_DIR, safePreset));
+  } else {
+    if (config.embeddedFirmwareDir) {
+      candidateDirs.push(path.join(config.embeddedFirmwareDir, safePreset));
+    }
+    candidateDirs.push(path.join(__dirname, '../data/firmware', safePreset));
+    candidateDirs.push(path.join(__dirname, '../firmware', safePreset));
   }
-  candidates.push(path.join(__dirname, '../data/firmware', safePreset));
-  candidates.push(path.join(__dirname, '../data/firmware'));
-  candidates.push(path.join(__dirname, '../firmware', safePreset));
-  candidates.push(path.join(__dirname, '../firmware'));
 
-  for (const base of candidates) {
+  for (const base of candidateDirs) {
     const binPaths = [
       path.join(base, 'firmware.bin'),
       path.join(base, 'latest.bin'),
@@ -1437,10 +1733,27 @@ function getFirmwareInfo(preset) {
       if (fs.existsSync(binPath)) {
         try {
           const stat = fs.statSync(binPath);
-          const buf = fs.readFileSync(binPath);
-          const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+          let sha256 = null;
+          const cached = _firmwareHashCache.get(binPath);
+          if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+            sha256 = cached.sha256;
+          } else {
+            const fd = fs.openSync(binPath, 'r');
+            try {
+              const hash = crypto.createHash('sha256');
+              const chunk = Buffer.alloc(65536);
+              let bytesRead = 0;
+              while ((bytesRead = fs.readSync(fd, chunk, 0, chunk.length, null)) > 0) {
+                hash.update(chunk.subarray(0, bytesRead));
+              }
+              sha256 = hash.digest('hex');
+            } finally {
+              fs.closeSync(fd);
+            }
+            _firmwareHashCache.set(binPath, { mtimeMs: stat.mtimeMs, size: stat.size, sha256 });
+          }
 
-          let version = '1.3.0';
+          let version = null;
           const vJsonPath = path.join(path.dirname(binPath), 'version.json');
           const vTxtPath = path.join(path.dirname(binPath), 'version.txt');
           if (fs.existsSync(vJsonPath)) {
@@ -1499,10 +1812,20 @@ router.get('/firmware/:preset/latest.bin', firmwareLimiter, (req, res) => {
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Length', fw.size);
   res.setHeader('Content-Disposition', `attachment; filename="${fw.preset}-firmware.bin"`);
-  res.setHeader('X-ST-Firmware-Version', fw.version);
+  if (fw.version) {
+    res.setHeader('X-ST-Firmware-Version', fw.version);
+  }
   res.setHeader('X-ST-Firmware-SHA256', fw.sha256);
 
   const stream = fs.createReadStream(fw.filePath);
+  stream.on('error', (err) => {
+    stream.destroy();
+    if (!res.headersSent) {
+      res.status(500).end();
+    } else {
+      res.destroy();
+    }
+  });
   stream.pipe(res);
 });
 
@@ -1532,6 +1855,9 @@ module.exports.touchDeviceHeartbeat = touchDeviceHeartbeat;
 module.exports.dynamicRevFor = dynamicRevFor;
 module.exports.dynamicPeriodFor = dynamicPeriodFor;
 module.exports.getPendingCommand = getPendingCommand;
+module.exports.resolvePendingCommand = resolvePendingCommand;
+module.exports.normalizePresetName = normalizePresetName;
 module.exports.getFirmwareInfo = getFirmwareInfo;
+module.exports.otaBreaker = otaBreaker;
 
 

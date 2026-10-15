@@ -128,7 +128,11 @@ Fetches the pre-rendered image for the current playlist item.
 - **`If-None-Match`** *(header, optional)*: ETag received in previous request.
 - **`X-ST-Device-Battery`** *(header, optional)*: Battery level as an integer percentage (`0`–`100`). Automatically stored in `device_telemetry` and displayed on the device health card.
 - **`X-ST-Device-RSSI`** *(header, optional)*: Wi-Fi signal strength in dBm (e.g. `-65`). Stored in `device_telemetry`.
-- **`X-ST-Firmware-Version`** *(header, optional)*: Firmware / client version string (e.g. `1.2.0`). Updates `devices.app_version`.
+- **`X-ST-Device-Temperature`** *(header, optional)*: Ambient temperature in degrees Celsius (e.g. `23.5` via SHT40). Stored in `device_telemetry`.
+- **`X-ST-Device-Humidity`** *(header, optional)*: Relative humidity percentage (`0`–`100`, e.g. `45.2` via SHT40). Stored in `device_telemetry`.
+- **`X-ST-Device-Orientation`** *(header, optional)*: Device mounting orientation (`landscape`, `portrait`, `landscape-flipped`, `portrait-flipped`).
+- **`X-ST-Device-Rotation`** *(header, optional)*: Device rotation angle in degrees (`0`, `90`, `180`, `270`).
+- **`X-ST-Firmware-Version`** *(header, optional)*: Firmware / client version string (e.g. `1.3.0`). Updates `devices.app_version`.
 - **`orientation`** *(query, optional)*: Override screen orientation (`landscape`, `portrait`, `landscape-flipped`, `portrait-flipped`). Swaps resolution axes and aligns row stride automatically.
 - **`rotation`** *(query, optional)*: Explicit rotation angle in degrees (`0`, `90`, `180`, `270`).
 - **`format`** *(query, optional)*: Override output format (`x-epd-packed`, `x-epd-spectra6`, `x-epd-gray16`, `png`, `jpeg`, `bmp`, `raw`).
@@ -144,6 +148,10 @@ Fetches the pre-rendered image for the current playlist item.
     - `ETag`: `"sha256-hash..."`
     - `X-ST-Expires-In`: Seconds until the current item ends, or seconds until morning 'on' window if display power schedule is off (sleep timer for MCU). Clamped to at least `profile.minRefreshInterval`.
     - `X-ST-Power-State`: `'on'` or `'scheduled_off'` according to the device's weekly Display Power Schedule.
+    - `X-ST-Command`: Optional pending command for the device:
+      - `update <url> [sha256]`: Download and flash OTA firmware binary.
+      - `upload_logs`: Upload in-memory diagnostic ring buffer to `/api/embedded/logs`.
+      - `reboot`: Reboot the device microcontroller.
     - `X-ST-Screen-Width`: Active pixel width of the rendered buffer (e.g. `800` or `480`).
     - `X-ST-Screen-Height`: Active pixel height of the rendered buffer (e.g. `480` or `800`).
     - `X-ST-Orientation`: Active orientation (`landscape`, `portrait`, `landscape-flipped`, `portrait-flipped`).
@@ -156,6 +164,7 @@ Fetches the pre-rendered image for the current playlist item.
     - `X-ST-Device-Id`: Device UUID.
     - `X-ST-Content-Id`: Content ID (or Layout ID in layout mode).
     - `X-ST-Layout-Id`: Layout UUID (in layout mode).
+
 - **`304 Not Modified`**: Sent when `If-None-Match` matches the current content digest. Body is empty.
 - **`400 Bad Request`**: Device lacks a configured `screen_profile`.
 - **`401 Unauthorized`**: Invalid or missing device token.
@@ -256,15 +265,97 @@ Polled by the MCU during setup to detect when the user claims the display in the
 Protected by `pairLockout` and constant-time `claim_secret` validation.
 
 #### Headers / Query
-- **`Authorization`** *(header, recommended)*: `Bearer <claim_secret>`
-- **`claim_secret`** *(query, fallback)*: The secret token issued at registration.
+- **`Authorization`** *(header, required)*: `Bearer <claim_secret>`
 - **`device_id`** *(query, required)*: The UUID returned by `/pair/register`.
 
 #### Response (`200 OK`)
 - **Unclaimed:** `{"paired": false, "status": "provisioning", "pairing_code": "545658"}`
 - **Claimed / Paired:** `{"paired": true, "status": "online", "device_id": "<UUID>", "device_token": "<SECRET_TOKEN>"}` *(burns `claim_secret` on delivery)*
 
+---
+
+### 3.7 Device Diagnostic Logs API
+
+Embedded devices capture internal boot and network events in a circular in-memory ring buffer (default 100 entries). When requested remotely or after persistent sync errors, devices upload this buffer to ScreenTinker for administrative troubleshooting.
+
+#### `POST /api/embedded/logs`
+Dispatched by the device upon receiving `X-ST-Command: upload_logs` or after repeated sync failures.
+Rate-limited (max 30 requests / 15 minutes per IP).
+
+- **Headers**:
+  - `Authorization: Bearer <device_token>`
+  - `X-ST-Device-Id: <UUID>`
+  - `X-ST-Firmware-Version: <version>`
+  - `X-ST-Device-Battery: <percent>`
+  - `X-ST-Device-RSSI: <rssi>`
+- **Body**: JSON payload containing the structured log ring:
+  ```json
+  {
+    "device_id": "06813352-374a-476b-bca9-986ebdb1ff2c",
+    "version": "1.3.0",
+    "battery": 82,
+    "wifi_rssi": -55,
+    "log_count": 14,
+    "logs": [
+      { "uptime_ms": 120, "level": "INFO", "tag": "Boot", "msg": "ScreenTinker MCU v1.3.0 booting..." },
+      { "uptime_ms": 342, "level": "INFO", "tag": "IMU", "msg": "LSM6DS3TR-C detected OK" },
+      { "uptime_ms": 410, "level": "INFO", "tag": "SHT40", "msg": "SHT40 ready: 24.2 C, 48.1 %RH" },
+      { "uptime_ms": 1820, "level": "INFO", "tag": "Sync", "msg": "HTTP 200 frame received (48000 B)" }
+    ]
+  }
+  ```
+- **Response**: `200 OK` with `{"status": "ok", "log_id": 42}`.
+
+#### `GET /api/embedded/logs`
+Used by the ScreenTinker web dashboard to view recently uploaded diagnostics.
+- **Query Parameters**:
+  - `device_id` *(required)*: The UUID of the device.
+  - `limit` *(optional)*: Max number of log records to return (default `5`).
+- **Response**: `200 OK` with JSON array of diagnostic uploads.
+
+---
+
+### 3.8 Firmware Distribution & Over-The-Air (OTA) Updates
+
+ScreenTinker distributes compiled microcontroller binaries over HTTP to enable remote firmware updates without USB cables.
+
+#### `GET /api/embedded/firmware/:preset/version`
+Returns the latest staged firmware metadata for the specified hardware preset (`seeed_reterminal_sticky`, `seeed_reterminal_e1001`, `seeed_reterminal_e1002`, `seeed_reterminal_e1003`, `seeed_reterminal_e1004`).
+Rate-limited (max 120 requests / 15 minutes per IP).
+
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "preset": "seeed_reterminal_sticky",
+    "version": "1.3.0",
+    "size": 1067440,
+    "sha256": "4a7f05c3b0df329b3a5b28e6c4e09f7a...",
+    "download_url": "/api/embedded/firmware/seeed_reterminal_sticky/latest.bin"
+  }
+  ```
+
+#### `GET /api/embedded/firmware/:preset/latest.bin`
+Streams the compiled binary image for flashing to the device's secondary flash partition.
+- **Response Headers**:
+  - `Content-Type: application/octet-stream`
+  - `Content-Disposition: attachment; filename="<preset>-firmware.bin"`
+  - `X-ST-Firmware-Version: <version>`
+  - `X-ST-Firmware-SHA256: <sha256>`
+
+#### Triggering an Update
+1. **Web Dashboard**: An administrator clicks **"Update Firmware"** on the device page.
+2. **Command Queue**: The server issues `X-ST-Command: update /api/embedded/firmware/<preset>/latest.bin <sha256>`.
+3. **Flashing & Rollback Protection**:
+   - The device streams the binary into its inactive partition while calculating SHA-256 in real time.
+   - Upon reboot, the new firmware enters `ESP_OTA_IMG_PENDING_VERIFY`.
+   - Once the new build successfully connects to Wi-Fi and fetches its first valid frame (`HTTP 200`), it marks the partition valid and cancels rollback. If it crashes or fails to connect, the hardware bootloader automatically reverts to the previous working partition.
+4. **Circuit Breaker (`ota-breaker.js`)**:
+   - If an unstable device fails to apply an update and repeatedly polls with an older version, the server halts update offers after 6 attempts (`NO_PROGRESS_LIMIT = 6`) to prevent boot-loop storms and save battery.
+
+---
+
 ## 4. Screen Profiles & Output Formats
+
 
 A device's screen configuration is stored in the `devices.screen_profile` JSON column.
 

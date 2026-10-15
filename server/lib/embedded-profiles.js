@@ -183,8 +183,8 @@ function parseProfile(raw, overrides = {}) {
   let rotation = DEFAULTS.rotation;
   if (VALID_ROTATIONS.has(opts.rotation)) {
     rotation = opts.rotation;
-  } else if (orientation && (orientation === 'landscape-flipped' || orientation === 'portrait-flipped')) {
-    rotation = 180;
+  } else if (orientation && ROTATION_DEG[orientation] !== undefined) {
+    rotation = ROTATION_DEG[orientation];
   } else if (VALID_ROTATIONS.has(obj.rotation)) {
     rotation = obj.rotation;
   }
@@ -201,6 +201,10 @@ function parseProfile(raw, overrides = {}) {
   if (orientation) {
     result.orientation = orientation;
   }
+  // S6: the packers lay out one pixel-row after another in a flat stream. An odd width (nibble
+  // formats or 1-bit) makes a row boundary straddle bytes/nibbles, so refuse the profile rather
+  // than emit a skewed picture.
+  if ((result.colorDepth === 'spectra6' || result.colorDepth === 'gray16' || result.colorDepth === '1bit') && width % 2 !== 0) return null;
 
   if (typeof obj.supportsPartialRefresh === 'boolean') {
     result.supportsPartialRefresh = obj.supportsPartialRefresh;

@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS devices (
     screen_profile  TEXT,
     -- embedded-renderer: one-time secret for claim polling security
     claim_secret    TEXT,
+    orientation     TEXT DEFAULT 'landscape',
     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );

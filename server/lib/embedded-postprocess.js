@@ -144,13 +144,19 @@ function to4BitGray(rgba) {
 
 // ─── Spectra 6 Packing (6-Color E-Paper) ──────────────────────────────────────
 
+/*
+ * ⚠️ `ctrl` IS THE CONTROLLER INDEX WRITTEN INTO THE NIBBLE, not the array position.
+ * The Seeed driver copies nibbles straight to the panel. ED2208 (E1002 / EL073TF1) and T133A01
+ * (E1004) both use standard E-Ink Spectra 6 controller nibble codes: 0 black, 1 white, 2 yellow,
+ * 3 red, 4 unused, 5 blue, 6 green. Index 4 is an empty slot, so blue must be 5 and green 6.
+ */
 const SPECTRA6_PALETTE = [
-  { r: 20,  g: 20,  b: 20  }, // 0: Black
-  { r: 251, g: 251, b: 251 }, // 1: White
-  { r: 245, g: 222, b: 0   }, // 2: Yellow
-  { r: 215, g: 25,  b: 32  }, // 3: Red
-  { r: 0,   g: 91,  b: 172 }, // 4: Blue
-  { r: 0,   g: 135, b: 61  }, // 5: Green
+  { r: 20,  g: 20,  b: 20,  ctrl: 0 }, // Black
+  { r: 251, g: 251, b: 251, ctrl: 1 }, // White
+  { r: 245, g: 222, b: 0,   ctrl: 2 }, // Yellow
+  { r: 215, g: 25,  b: 32,  ctrl: 3 }, // Red
+  { r: 0,   g: 91,  b: 172, ctrl: 5 }, // Blue
+  { r: 0,   g: 135, b: 61,  ctrl: 6 }, // Green
 ];
 
 function findNearestSpectra6(r, g, b) {
@@ -199,9 +205,9 @@ function packSpectra6(rgba, w, h, dither = 'floyd-steinberg') {
         const eb = b - palette.b;
 
         if (idx % 2 === 0) {
-          out[idx >> 1] = (colorIdx & 0x0F) << 4;
+          out[idx >> 1] = (SPECTRA6_PALETTE[colorIdx].ctrl & 0x0F) << 4;
         } else {
-          out[idx >> 1] |= (colorIdx & 0x0F);
+          out[idx >> 1] |= (SPECTRA6_PALETTE[colorIdx].ctrl & 0x0F);
         }
 
         if (x + 1 < w) {
@@ -237,9 +243,9 @@ function packSpectra6(rgba, w, h, dither = 'floyd-steinberg') {
       const b = rgba[i * 4 + 2];
       const colorIdx = findNearestSpectra6(r, g, b);
       if (i % 2 === 0) {
-        out[i >> 1] = (colorIdx & 0x0F) << 4;
+        out[i >> 1] = (SPECTRA6_PALETTE[colorIdx].ctrl & 0x0F) << 4;
       } else {
-        out[i >> 1] |= (colorIdx & 0x0F);
+        out[i >> 1] |= (SPECTRA6_PALETTE[colorIdx].ctrl & 0x0F);
       }
     }
   }
@@ -356,6 +362,10 @@ function packBMP1bit(packed, w, h) {
  * @param {object} profile      Validated screen_profile object.
  * @returns {Promise<{ buffer: Buffer, contentType: string }>}
  */
+class UnpackableWidthError extends Error {
+  constructor(message) { super(message); this.name = 'UnpackableWidthError'; this.code = 'UNPACKABLE_WIDTH'; }
+}
+
 async function postprocess(pngBuffer, profile) {
   const { width, height, rotation = 0, colorDepth, dither, outputFormat } = profile;
 
@@ -364,10 +374,9 @@ async function postprocess(pngBuffer, profile) {
   // Cover resize: crop to fill target box without letterboxing
   img.cover({ w: width, h: height });
 
-  // Only 180-degree flip is applied post-resize so that the output width and height
-  // match profile.width and profile.height (and don't swap dimensions and row stride).
-  // 90 and 270 degree orientations are handled by rendering directly to the target canvas
-  // dimensions (profile.width x profile.height).
+  // A 180-degree flip is applied post-resize for flipped orientations (landscape-flipped 180°
+  // and portrait-flipped 270°) so that preview/host simulators render inverted orientations upright,
+  // while the hardware MCU applies a fixed portrait transpose.
   const postRotation = (rotation === 180 || rotation === 270 || profile.orientation === 'landscape-flipped' || profile.orientation === 'portrait-flipped') ? 180 : 0;
   if (postRotation) img.rotate(postRotation);
 
@@ -391,6 +400,11 @@ async function postprocess(pngBuffer, profile) {
     return { buffer: to4BitGray(rgba), contentType: 'application/octet-stream', width: w, height: h2 };
   }
 
+  // ── Spectra 6 / Gray16 need an even width (two pixels per byte) ──────────────
+  if ((colorDepth === 'spectra6' || colorDepth === 'gray16') && w % 2 !== 0) {
+    throw new UnpackableWidthError(`width ${w} is odd: ${colorDepth} packs two pixels per byte and would straddle rows`);
+  }
+
   // ── Spectra 6 (6-Color E-Paper) ──────────────────────────────────────────────
   if (colorDepth === 'spectra6') {
     return { buffer: packSpectra6(rgba, w, h2, dither), contentType: 'application/octet-stream', width: w, height: h2 };
@@ -402,6 +416,9 @@ async function postprocess(pngBuffer, profile) {
   }
 
   // ── 1-bit ────────────────────────────────────────────────────────────────────
+  if (w % 2 !== 0) {
+    throw new UnpackableWidthError(`width ${w} is odd: 1-bit packing would straddle rows`);
+  }
   // Build a Float32 grayscale buffer (0.0 = black, 1.0 = white) using BT.601 luminance.
   const pixels = w * h2;
   const gray   = new Float32Array(pixels);
@@ -481,4 +498,4 @@ async function encodeColour(pngBuffer, { width, height, format = 'jpeg', quality
   return { buffer: await img.getBuffer('image/jpeg', { quality: q }), contentType: 'image/jpeg' };
 }
 
-module.exports = { postprocess, encodeColour };
+module.exports = { postprocess, encodeColour, UnpackableWidthError };
