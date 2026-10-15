@@ -322,7 +322,7 @@ const jsonBody = express.json({ limit: '12mb' });
  * limit never applied because this 12 MB parser had already consumed the body. routes/mcp.js has
  * the parser and the error handler both.
  */
-app.use((req, res, next) => (req.path === '/api/templates/import' || req.path.startsWith('/api/hooks/in/') || isMcpPath(req.path) || /^\/api\/embedded\/logs\/?$/i.test(req.path) ? next() : jsonBody(req, res, next)));
+app.use((req, res, next) => (/^\/api\/embedded\/logs\/?$/i.test(req.path) || req.path === '/api/templates/import' || req.path.startsWith('/api/hooks/in/') || isMcpPath(req.path) ? next() : jsonBody(req, res, next)));
 const { sanitizeBody } = require('./middleware/sanitize');
 app.use(sanitizeBody);
 
