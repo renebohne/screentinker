@@ -247,6 +247,7 @@ const EXCLUDED = {
   play_log_rollup_dirty: 'internal rollup bookkeeping',
   play_log_rollup_state: 'internal rollup bookkeeping',
   player_debug_logs: 'short-lived player diagnostics keyed by device, not tenant',
+  device_diagnostic_logs: 'short-lived hardware diagnostics keyed by device, not tenant',
   data_exports: 'the export jobs themselves',
   instance_exports: 'the platform administrator\'s whole-server export jobs',
   org_imports: 'organization import jobs on this server (docs/move-server.md): may hold an encrypted download key',

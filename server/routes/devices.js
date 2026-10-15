@@ -1552,6 +1552,7 @@ router.delete('/:id', (req, res) => {
     require('../lib/corporate/cleanup').removeTargets(db, 'device', id);
     db.prepare('DELETE FROM screenshots WHERE device_id = ?').run(id);
     db.prepare('DELETE FROM device_telemetry WHERE device_id = ?').run(id);
+    db.prepare('DELETE FROM device_diagnostic_logs WHERE device_id = ?').run(id);
     db.prepare('DELETE FROM video_wall_devices WHERE device_id = ?').run(id);
     db.prepare('DELETE FROM devices WHERE id = ?').run(id);
 
