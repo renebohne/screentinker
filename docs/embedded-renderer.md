@@ -1,6 +1,6 @@
 # Embedded Renderer for Digital Signage (E-Paper & MCU Displays)
 
-ScreenTinker includes a dedicated server-side embedded renderer designed for lightweight microcontrollers (MCUs) such as the **ESP32-S3**, **Raspberry Pi Pico W**, or **Seeed Studio reTerminal Sticky** (3.97" B/W E-Paper 800×480 with SSD1677).
+ScreenTinker includes a dedicated server-side embedded renderer designed for lightweight microcontrollers (MCUs) such as the **ESP32-S3**, **Raspberry Pi Pico W**, the **Seeed Studio reTerminal Sticky** (3.97" B/W E-Paper 800×480 with SSD1677), and the **Seeed Studio reTerminal E-Series** (`E1001` 7.5" Mono, `E1002` 7.3" 6-Color Spectra 6, `E1003` 10.3" 16-Level Grayscale, `E1004` 13.3" 6-Color Spectra 6).
 
 Instead of requiring the display hardware to run a full web browser or render HTML/CSS, the embedded system periodically makes an HTTP `GET` request to the ScreenTinker server and receives a **pre-rendered, pre-dithered binary image** formatted specifically for its display panel.
 
@@ -118,7 +118,7 @@ Or with custom dimensions:
 
 ## 3. API Endpoints
 
-### 2.1 `GET /api/embedded/render`
+### 3.1 `GET /api/embedded/render`
 
 Fetches the pre-rendered image for the current playlist item.
 
@@ -127,9 +127,11 @@ Fetches the pre-rendered image for the current playlist item.
 - **`device_id`** *(query, required)*: The UUID of the device.
 - **`If-None-Match`** *(header, optional)*: ETag received in previous request.
 - **`X-ST-Device-Battery`** *(header, optional)*: Battery level as an integer percentage (`0`–`100`). Automatically stored in `device_telemetry` and displayed on the device health card.
+- **`X-ST-Power-Source`** *(header, optional)*: Active power source (`usb` or `battery`). Stored in `device_telemetry.power_source` and displayed on the device card.
+- **`X-ST-Charging`** *(header, optional)*: Battery charging state (`1` / `true` or `0` / `false`).
 - **`X-ST-Device-RSSI`** *(header, optional)*: Wi-Fi signal strength in dBm (e.g. `-65`). Stored in `device_telemetry`.
-- **`X-ST-Device-Temperature`** *(header, optional)*: Ambient temperature in degrees Celsius (e.g. `23.5` via SHT40). Stored in `device_telemetry`.
-- **`X-ST-Device-Humidity`** *(header, optional)*: Relative humidity percentage (`0`–`100`, e.g. `45.2` via SHT40). Stored in `device_telemetry`.
+- **`X-ST-Device-Temperature`** *(header, optional)*: Ambient temperature in degrees Celsius (e.g. `23.5` via SHT40). Stored in `device_telemetry.temperature_c`.
+- **`X-ST-Device-Humidity`** *(header, optional)*: Relative humidity percentage (`0`–`100`, e.g. `45.2` via SHT40). Stored in `device_telemetry.humidity`.
 - **`X-ST-Device-Orientation`** *(header, optional)*: Device mounting orientation (`landscape`, `portrait`, `landscape-flipped`, `portrait-flipped`).
 - **`X-ST-Device-Rotation`** *(header, optional)*: Device rotation angle in degrees (`0`, `90`, `180`, `270`).
 - **`X-ST-Firmware-Version`** *(header, optional)*: Firmware / client version string (e.g. `1.3.0`). Updates `devices.app_version`.
@@ -280,7 +282,7 @@ Embedded devices capture internal boot and network events in a circular in-memor
 
 #### `POST /api/embedded/logs`
 Dispatched by the device upon receiving `X-ST-Command: upload_logs` or after repeated sync failures.
-Rate-limited (max 30 requests / 15 minutes per IP).
+Rate-limited (`deviceLogsLimiter`: max 60 requests / minute per IP; 256 KB JSON payload limit). Emits a tenant-scoped `embedded:logs` WebSocket event to live-update open dashboard tabs.
 
 - **Headers**:
   - `Authorization: Bearer <device_token>`
@@ -306,30 +308,30 @@ Rate-limited (max 30 requests / 15 minutes per IP).
   ```
 - **Response**: `200 OK` with `{"status": "ok", "log_id": 42}`.
 
-#### `GET /api/embedded/logs`
-Used by the ScreenTinker web dashboard to view recently uploaded diagnostics.
-- **Query Parameters**:
-  - `device_id` *(required)*: The UUID of the device.
-  - `limit` *(optional)*: Max number of log records to return (default `5`).
-- **Response**: `200 OK` with JSON array of diagnostic uploads.
+#### `GET /api/embedded/logs` & `GET /api/devices/:id/diagnostic-logs`
+Used by the ScreenTinker web dashboard and REST clients to view recently uploaded diagnostics.
+- **`GET /api/embedded/logs?device_id=<UUID>&limit=5`**: Accepts device token, API token, or user session.
+- **`GET /api/devices/:id/diagnostic-logs?limit=10`**: Dashboard endpoint (rate-limited at 300 requests / minute per IP).
+- **Response**: `200 OK` with JSON array of diagnostic uploads (`logs` parsed as an array of entries).
 
 ---
 
 ### 3.8 Firmware Distribution & Over-The-Air (OTA) Updates
 
 ScreenTinker distributes compiled microcontroller binaries over HTTP to enable remote firmware updates without USB cables.
+Staged binaries and manifests live in `server/firmware/<preset>/` (`firmware.bin` + `version.json`). Both hyphenated preset keys (`seeed-reterminal-sticky`, `seeed-reterminal-e1001`–`e1004`) and underscored directory names (`seeed_reterminal_sticky`, `seeed_reterminal_e1001`–`e1004`) are accepted in `:preset`.
 
 #### `GET /api/embedded/firmware/:preset/version`
 Returns the latest staged firmware metadata for the specified hardware preset (`seeed_reterminal_sticky`, `seeed_reterminal_e1001`, `seeed_reterminal_e1002`, `seeed_reterminal_e1003`, `seeed_reterminal_e1004`).
-Rate-limited (max 120 requests / 15 minutes per IP).
+Rate-limited (`firmwareLimiter`: max 120 requests / 15 minutes per IP).
 
 - **Response (`200 OK`)**:
   ```json
   {
     "preset": "seeed_reterminal_sticky",
     "version": "1.3.0",
-    "size": 1067440,
-    "sha256": "4a7f05c3b0df329b3a5b28e6c4e09f7a...",
+    "size": 1072592,
+    "sha256": "9d4c2056e9dfceb9f9db99889ebafab69cdc3e0051918465a283c87b6917dd0a",
     "download_url": "/api/embedded/firmware/seeed_reterminal_sticky/latest.bin"
   }
   ```
@@ -343,14 +345,28 @@ Streams the compiled binary image for flashing to the device's secondary flash p
   - `X-ST-Firmware-SHA256: <sha256>`
 
 #### Triggering an Update
-1. **Web Dashboard**: An administrator clicks **"Update Firmware"** on the device page.
+1. **Web Dashboard**: An administrator clicks **"Update Firmware"** on the device detail page.
 2. **Command Queue**: The server issues `X-ST-Command: update /api/embedded/firmware/<preset>/latest.bin <sha256>`.
 3. **Flashing & Rollback Protection**:
    - The device streams the binary into its inactive partition while calculating SHA-256 in real time.
    - Upon reboot, the new firmware enters `ESP_OTA_IMG_PENDING_VERIFY`.
-   - Once the new build successfully connects to Wi-Fi and fetches its first valid frame (`HTTP 200`), it marks the partition valid and cancels rollback. If it crashes or fails to connect, the hardware bootloader automatically reverts to the previous working partition.
+   - Once the new build successfully connects to Wi-Fi and fetches its first valid frame (`HTTP 200` / `304`), it marks the partition valid and cancels rollback. If it crashes or fails to connect (3 consecutive failures or >90 seconds elapsed), the hardware bootloader automatically reverts to the previous working partition.
 4. **Circuit Breaker (`ota-breaker.js`)**:
    - If an unstable device fails to apply an update and repeatedly polls with an older version, the server halts update offers after 6 attempts (`NO_PROGRESS_LIMIT = 6`) to prevent boot-loop storms and save battery.
+
+---
+
+### 3.9 Dashboard Controls & Telemetry Cards
+
+When viewing an embedded / e-paper display in the ScreenTinker Web UI (**Displays → select device**):
+- **Info Tab**:
+  - **Environmental Telemetry**: Live ambient **Temperature (°C)** and **Humidity (% RH)** cards when reported by an onboard sensor (e.g. Sensirion SHT40).
+  - **Battery & Power**: Battery percentage, active power source (`USB` vs. `Battery`), and Wi-Fi RSSI signal strength.
+  - **Display Orientation**: Dropdown selector (`Landscape (0°)`, `Portrait (90°)`, `Landscape Flipped (180°)`, `Portrait Flipped (270°)`) that updates `devices.orientation` and `screen_profile` and immediately transposes the rendered canvas and row stride on the next poll.
+  - **Update Firmware**: Queues an OTA firmware update command (`update <url> <sha256>`) delivered on the device's next wake cycle.
+  - **Diagnostic Logs Card**: Displays the latest uploaded 100-entry ring buffer with **Request Diagnostic Logs** (`upload_logs`), **Refresh**, and **Copy** buttons, plus automatic live updates over WebSocket (`embedded:logs`).
+- **Controls Tab**:
+  - **Display Power Schedule**: Weekly on/off schedule coordinating `X-ST-Power-State` (`on` / `scheduled_off`) and multi-hour overnight `X-ST-Expires-In` deep sleep intervals.
 
 ---
 
@@ -402,7 +418,11 @@ A device's screen configuration is stored in the `devices.screen_profile` JSON c
 
 ---
 
-## 5. Reference ESP32 Firmware Implementation (C++ / Arduino)
+## 6. Reference ESP32 Firmware Implementation (C++ / Arduino)
+
+For the complete production firmware supporting the **Seeed Studio reTerminal Sticky & E-Series (`E1001`–`E1004`)**—including Captive Portal Wi-Fi onboarding, 6-digit PIN pairing, PSRAM frame caching, IMU auto-rotation, SHT40 telemetry, dual-partition OTA rollback, and a native SDL2 desktop simulator—see the **[`screentinker_mcu`](https://github.com/renebohne/screentinker_mcu)** repository.
+
+Below is a minimal standalone reference sketch illustrating the core HTTP polling and ETag sleep loop:
 
 ```cpp
 #include <WiFi.h>
