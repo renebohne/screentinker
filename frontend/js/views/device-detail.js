@@ -843,19 +843,22 @@ async function loadDevice(deviceId, activeTab = null) {
       return 'floyd-steinberg';
     })();
 
-    const { currentPreset, currentColorDepth } = (() => {
+    const { currentPreset, currentColorDepth, currentRefreshMode } = (() => {
       let preset = 'seeed-reterminal-sticky';
       let depth = '1bit';
+      let refreshMode = 'smart_partial';
       if (device.screen_profile) {
         if (typeof device.screen_profile === 'object') {
           if (device.screen_profile.preset) preset = device.screen_profile.preset;
           if (device.screen_profile.colorDepth) depth = device.screen_profile.colorDepth;
+          if (device.screen_profile.refreshMode) refreshMode = device.screen_profile.refreshMode;
         } else if (typeof device.screen_profile === 'string') {
           if (device.screen_profile.startsWith('{')) {
             try {
               const p = JSON.parse(device.screen_profile);
               if (p && p.preset) preset = p.preset;
               if (p && p.colorDepth) depth = p.colorDepth;
+              if (p && p.refreshMode) refreshMode = p.refreshMode;
             } catch (_) {}
           } else {
             preset = device.screen_profile;
@@ -866,7 +869,7 @@ async function loadDevice(deviceId, activeTab = null) {
         if (preset.includes('e1002') || preset.includes('e1004')) depth = 'spectra6';
         else if (preset.includes('e1003')) depth = 'gray16';
       }
-      return { currentPreset: preset, currentColorDepth: depth };
+      return { currentPreset: preset, currentColorDepth: depth, currentRefreshMode: refreshMode };
     })();
 
     const colorModeBadgeHtml = () => {
@@ -1468,6 +1471,15 @@ async function loadDevice(deviceId, activeTab = null) {
                 <option value="gray4" ${currentColorDepth === 'gray4' ? 'selected' : ''}>${t('device.form.color_mode_gray4')}</option>
               </select>
               <div style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('device.form.color_mode_hint')}</div>
+            </div>` : ''}
+            ${(currentPreset === 'seeed-reterminal-sticky' || currentPreset === 'seeed-reterminal-e1001' || currentPreset === 'seeed-reterminal-e1003') ? `
+            <div class="form-group">
+              <label>${t('device.form.refresh_mode_label')}</label>
+              <select id="epdRefreshMode" class="input" style="background:var(--bg-input)">
+                <option value="smart_partial" ${currentRefreshMode !== 'always_full' ? 'selected' : ''}>${t('device.form.refresh_mode_smart_partial')}</option>
+                <option value="always_full" ${currentRefreshMode === 'always_full' ? 'selected' : ''}>${t('device.form.refresh_mode_always_full')}</option>
+              </select>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('device.form.refresh_mode_hint')}</div>
             </div>` : ''}
             <div class="form-group">
               <label>${t('device.form.dither_label')}</label>
@@ -3006,27 +3018,32 @@ function setupActions(device) {
       let epdProfileUpdate = undefined;
       const ditherEl = document.getElementById('epdDither');
       const colorModeEl = document.getElementById('epdColorMode');
-      if (ditherEl || colorModeEl) {
+      const refreshModeEl = document.getElementById('epdRefreshMode');
+      if (ditherEl || colorModeEl || refreshModeEl) {
         let existingPreset = 'seeed-reterminal-sticky';
         let existingColorDepth = '1bit';
+        let existingRefreshMode = 'smart_partial';
         try {
           if (typeof device.screen_profile === 'string') {
             if (device.screen_profile.startsWith('{')) {
               const p = JSON.parse(device.screen_profile);
               if (p.preset) existingPreset = p.preset;
               if (p.colorDepth) existingColorDepth = p.colorDepth;
+              if (p.refreshMode) existingRefreshMode = p.refreshMode;
             } else if (device.screen_profile) {
               existingPreset = device.screen_profile;
             }
           } else if (typeof device.screen_profile === 'object' && device.screen_profile) {
             if (device.screen_profile.preset) existingPreset = device.screen_profile.preset;
             if (device.screen_profile.colorDepth) existingColorDepth = device.screen_profile.colorDepth;
+            if (device.screen_profile.refreshMode) existingRefreshMode = device.screen_profile.refreshMode;
           }
         } catch (_) {}
         epdProfileUpdate = {
           preset: existingPreset,
           colorDepth: colorModeEl ? colorModeEl.value : (existingColorDepth || '1bit'),
           dither: ditherEl ? (ditherEl.value || 'floyd-steinberg') : 'floyd-steinberg',
+          refreshMode: refreshModeEl ? refreshModeEl.value : (existingRefreshMode || 'smart_partial'),
         };
       }
 

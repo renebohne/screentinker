@@ -1178,6 +1178,39 @@ router.get('/render-layout', resolveAuth, async (req, res) => {
     () => handleRenderLayout(req, res, device, profile, { pendingCmd, pendingCmdObj, explicitMode: true }));
 });
 
+// ─── Refresh Mode Hinting State (Ticket S5) ──────────────────────────────────
+/*
+ * In-memory state tracking previous render frame per device for refresh mode hinting.
+ * Maps deviceId -> { itemIndex, contentId, layoutId, at }
+ */
+const _lastRendered = new Map();
+
+function decideRefreshModeHeader(deviceId, profile, current) {
+  if (!profile.supportsPartialRefresh || profile.refreshMode === 'always_full') {
+    return 'full';
+  }
+  const prev = _lastRendered.get(deviceId);
+  if (!prev) {
+    return 'full';
+  }
+  if (prev.layoutId !== current.layoutId) {
+    return 'full';
+  }
+  if (prev.itemIndex !== current.itemIndex || prev.contentId !== current.contentId) {
+    return 'full';
+  }
+  return 'partial';
+}
+
+function recordRenderedFrame(deviceId, current) {
+  _lastRendered.set(deviceId, {
+    itemIndex: current.itemIndex,
+    contentId: current.contentId,
+    layoutId: current.layoutId,
+    at: Date.now(),
+  });
+}
+
 async function handleRenderStandard(req, res, device, profile, opts = {}) {
   const ac = opts.signal ? null : new AbortController();
   if (ac) {
@@ -1268,6 +1301,11 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     'X-ST-Power-State': power.state,
     ...frameHeaders(profile),
   };
+  headers['X-ST-Refresh-Mode'] = decideRefreshModeHeader(device.id, profile, {
+    itemIndex,
+    contentId: content?.content_id || item?.content_id || item?.id || '',
+    layoutId: null,
+  });
   if (profile.supportsPartialRefresh !== undefined) {
     headers['X-ST-Supports-Partial'] = profile.supportsPartialRefresh ? '1' : '0';
   }
@@ -1289,6 +1327,11 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     const cached = cacheGet(key);
     if (cached.hit) {
       markCommandDelivered(device.id, opts);
+      recordRenderedFrame(device.id, {
+        itemIndex,
+        contentId: content?.content_id || item?.content_id || item?.id || '',
+        layoutId: null,
+      });
       res.set({ ...headers, 'Content-Type': detectContentType(profile) });
       return res.status(200).send(cached.buffer);
     }
@@ -1342,6 +1385,11 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
   // Store in cache (non-blocking; non-fatal on failure)
   if (!isPreview) {
     try { cacheSet(key, processed.buffer); } catch { /* best-effort */ }
+    recordRenderedFrame(device.id, {
+      itemIndex,
+      contentId: content?.content_id || item?.content_id || item?.id || '',
+      layoutId: null,
+    });
   }
 
   res.set({
@@ -1469,6 +1517,11 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     'X-ST-Power-State': power.state,
     ...frameHeaders(profile),
   };
+  headers['X-ST-Refresh-Mode'] = decideRefreshModeHeader(device.id, profile, {
+    itemIndex: 0,
+    contentId: layout.id,
+    layoutId: layout.id,
+  });
   if (profile.supportsPartialRefresh !== undefined) {
     headers['X-ST-Supports-Partial'] = profile.supportsPartialRefresh ? '1' : '0';
   }
@@ -1487,6 +1540,11 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     const cached = cacheGet(key);
     if (cached.hit) {
       markCommandDelivered(device.id, cmdOpts);
+      recordRenderedFrame(device.id, {
+        itemIndex: 0,
+        contentId: layout.id,
+        layoutId: layout.id,
+      });
       res.set({ ...headers, 'Content-Type': detectContentType(profile) });
       return res.status(200).send(cached.buffer);
     }
@@ -1535,6 +1593,11 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
 
   if (!isPreview) {
     try { cacheSet(key, processed.buffer); } catch { /* best-effort */ }
+    recordRenderedFrame(device.id, {
+      itemIndex: 0,
+      contentId: layout.id,
+      layoutId: layout.id,
+    });
   }
 
   res.set({
@@ -1846,5 +1909,8 @@ module.exports.normalizePresetName = normalizePresetName;
 module.exports.getFirmwareInfo = getFirmwareInfo;
 module.exports.otaBreaker = otaBreaker;
 module.exports.logListLimit = logListLimit;
+module.exports.decideRefreshModeHeader = decideRefreshModeHeader;
+module.exports.recordRenderedFrame = recordRenderedFrame;
+module.exports._lastRendered = _lastRendered;
 
 

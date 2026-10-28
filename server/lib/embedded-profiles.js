@@ -271,6 +271,9 @@ function parseProfile(raw, overrides = {}) {
   if (typeof obj.supportsPartialRefresh === 'boolean') {
     result.supportsPartialRefresh = obj.supportsPartialRefresh;
   }
+  if (obj.refreshMode === 'always_full' || obj.refreshMode === 'smart_partial') {
+    result.refreshMode = obj.refreshMode;
+  }
   if (typeof obj.minRefreshInterval === 'number' && obj.minRefreshInterval >= 0) {
     result.minRefreshInterval = obj.minRefreshInterval;
   }
