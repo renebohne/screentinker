@@ -1812,6 +1812,7 @@ function frameHeaders(profile) {
     'X-ST-Screen-Height': String(dims.height),
     'X-ST-Rotation': String(profile.rotation || 0),
     'X-ST-Orientation': frameOrientation(profile),
+    'X-ST-Color-Mode': profile.colorDepth || '1bit',
   };
 }
 
@@ -1822,6 +1823,7 @@ function detectContentType(profile) {
     case 'jpg':            return 'image/jpeg';
     case 'bmp':            return 'image/bmp';
     case 'x-epd-packed':
+    case 'x-epd-gray4':
     case 'x-epd-spectra6':
     case 'x-epd-gray16':
     case 'raw':

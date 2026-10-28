@@ -843,11 +843,52 @@ async function loadDevice(deviceId, activeTab = null) {
       return 'floyd-steinberg';
     })();
 
+    const { currentPreset, currentColorDepth } = (() => {
+      let preset = 'seeed-reterminal-sticky';
+      let depth = '1bit';
+      if (device.screen_profile) {
+        if (typeof device.screen_profile === 'object') {
+          if (device.screen_profile.preset) preset = device.screen_profile.preset;
+          if (device.screen_profile.colorDepth) depth = device.screen_profile.colorDepth;
+        } else if (typeof device.screen_profile === 'string') {
+          if (device.screen_profile.startsWith('{')) {
+            try {
+              const p = JSON.parse(device.screen_profile);
+              if (p && p.preset) preset = p.preset;
+              if (p && p.colorDepth) depth = p.colorDepth;
+            } catch (_) {}
+          } else {
+            preset = device.screen_profile;
+          }
+        }
+      }
+      if (depth === '1bit') {
+        if (preset.includes('e1002') || preset.includes('e1004')) depth = 'spectra6';
+        else if (preset.includes('e1003')) depth = 'gray16';
+      }
+      return { currentPreset: preset, currentColorDepth: depth };
+    })();
+
+    const colorModeBadgeHtml = () => {
+      if (!isEmbeddedDevice(device)) return '';
+      if (currentColorDepth === 'gray4') {
+        return `<span class="device-status-badge" style="background:#2563eb;color:#fff" title="${t('device.color_mode.gray4_tip')}">${t('device.color_mode.gray4_badge')}</span>`;
+      }
+      if (currentColorDepth === 'gray16') {
+        return `<span class="device-status-badge" style="background:#4f46e5;color:#fff" title="${t('device.color_mode.gray16_tip')}">${t('device.color_mode.gray16_badge')}</span>`;
+      }
+      if (currentColorDepth === 'spectra6') {
+        return `<span class="device-status-badge" style="background:linear-gradient(90deg,#ef4444,#f59e0b,#10b981,#3b82f6,#8b5cf6);color:#fff;text-shadow:0 1px 2px rgba(0,0,0,0.6)" title="${t('device.color_mode.spectra6_tip')}">${t('device.color_mode.spectra6_badge')}</span>`;
+      }
+      return `<span class="device-status-badge" style="background:#6b7280;color:#fff" title="${t('device.color_mode.1bit_tip')}">${t('device.color_mode.1bit_badge')}</span>`;
+    };
+
     contentEl.innerHTML = `
       <div class="device-header">
         <div class="device-header-left">
           <h1 id="deviceName">${esc(device.name)}</h1>
           ${(() => { const b = livenessBadge(device); return `<span class="device-status-badge ${b.state}"${b.title ? ` title="${esc(b.title)}"` : ''}>${esc(b.label)}</span>`; })()}
+          ${colorModeBadgeHtml()}
           ${device.owner_name || device.owner_email ? `<span style="font-size:12px;color:var(--text-muted)">${t('device.owner_label', { owner: esc(device.owner_name || device.owner_email) })}</span>` : ''}
         </div>
         <div class="device-header-actions">
@@ -1419,6 +1460,15 @@ async function loadDevice(deviceId, activeTab = null) {
               </div>
             </div>
             ${isEmbeddedDevice(device) ? `
+            ${(currentPreset === 'seeed-reterminal-sticky' || currentPreset === 'seeed-reterminal-e1001') ? `
+            <div class="form-group">
+              <label>${t('device.form.color_mode_label')}</label>
+              <select id="epdColorMode" class="input" style="background:var(--bg-input)">
+                <option value="1bit" ${currentColorDepth === '1bit' ? 'selected' : ''}>${t('device.form.color_mode_1bit')}</option>
+                <option value="gray4" ${currentColorDepth === 'gray4' ? 'selected' : ''}>${t('device.form.color_mode_gray4')}</option>
+              </select>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('device.form.color_mode_hint')}</div>
+            </div>` : ''}
             <div class="form-group">
               <label>${t('device.form.dither_label')}</label>
               <select id="epdDither" class="input" style="background:var(--bg-input)">
@@ -2955,23 +3005,28 @@ function setupActions(device) {
 
       let epdProfileUpdate = undefined;
       const ditherEl = document.getElementById('epdDither');
-      if (ditherEl) {
+      const colorModeEl = document.getElementById('epdColorMode');
+      if (ditherEl || colorModeEl) {
         let existingPreset = 'seeed-reterminal-sticky';
+        let existingColorDepth = '1bit';
         try {
           if (typeof device.screen_profile === 'string') {
             if (device.screen_profile.startsWith('{')) {
               const p = JSON.parse(device.screen_profile);
               if (p.preset) existingPreset = p.preset;
+              if (p.colorDepth) existingColorDepth = p.colorDepth;
             } else if (device.screen_profile) {
               existingPreset = device.screen_profile;
             }
-          } else if (typeof device.screen_profile === 'object' && device.screen_profile?.preset) {
-            existingPreset = device.screen_profile.preset;
+          } else if (typeof device.screen_profile === 'object' && device.screen_profile) {
+            if (device.screen_profile.preset) existingPreset = device.screen_profile.preset;
+            if (device.screen_profile.colorDepth) existingColorDepth = device.screen_profile.colorDepth;
           }
         } catch (_) {}
         epdProfileUpdate = {
           preset: existingPreset,
-          dither: ditherEl.value || 'floyd-steinberg',
+          colorDepth: colorModeEl ? colorModeEl.value : (existingColorDepth || '1bit'),
+          dither: ditherEl ? (ditherEl.value || 'floyd-steinberg') : 'floyd-steinberg',
         };
       }
 

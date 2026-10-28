@@ -27,13 +27,17 @@ const PRESETS = {
   // ── Seeed Studio reTerminal Series ──────────────────────────────────────────
   'seeed-reterminal-sticky': {
     width: 800, height: 480, rotation: 0,
+    supportedColorModes: ['1bit', 'gray4'],
+    defaultColorDepth: '1bit',
     colorDepth: '1bit', dither: 'floyd-steinberg', outputFormat: 'x-epd-packed',
     supportsPartialRefresh: true, minRefreshInterval: 5,
     fullRefreshDurationMs: 1800, partialRefreshDurationMs: 350,
-    touchSupported: true, touchController: 'FT6336U',
+    touchSupported: true, touchController: 'GT911',
   },
   'seeed-reterminal-e1001': {
     width: 800, height: 480, rotation: 0,
+    supportedColorModes: ['1bit', 'gray4'],
+    defaultColorDepth: '1bit',
     colorDepth: '1bit', dither: 'floyd-steinberg', outputFormat: 'x-epd-packed',
     supportsPartialRefresh: true, minRefreshInterval: 5,
     fullRefreshDurationMs: 3000, partialRefreshDurationMs: 350,
@@ -42,6 +46,8 @@ const PRESETS = {
   },
   'seeed-reterminal-e1002': {
     width: 800, height: 480, rotation: 0,
+    supportedColorModes: ['spectra6'],
+    defaultColorDepth: 'spectra6',
     colorDepth: 'spectra6', dither: 'floyd-steinberg', outputFormat: 'x-epd-spectra6',
     supportsPartialRefresh: false, minRefreshInterval: 30,
     fullRefreshDurationMs: 14000, partialRefreshDurationMs: 0,
@@ -50,6 +56,8 @@ const PRESETS = {
   },
   'seeed-reterminal-e1003': {
     width: 1872, height: 1404, rotation: 0,
+    supportedColorModes: ['gray16'],
+    defaultColorDepth: 'gray16',
     colorDepth: 'gray16', dither: 'floyd-steinberg', outputFormat: 'x-epd-gray16',
     supportsPartialRefresh: true, minRefreshInterval: 2,
     fullRefreshDurationMs: 1200, partialRefreshDurationMs: 180,
@@ -58,6 +66,8 @@ const PRESETS = {
   },
   'seeed-reterminal-e1004': {
     width: 1200, height: 1600, rotation: 0,
+    supportedColorModes: ['spectra6'],
+    defaultColorDepth: 'spectra6',
     colorDepth: 'spectra6', dither: 'floyd-steinberg', outputFormat: 'x-epd-spectra6',
     supportsPartialRefresh: false, minRefreshInterval: 60,
     fullRefreshDurationMs: 22000, partialRefreshDurationMs: 0,
@@ -108,9 +118,9 @@ const PRESETS = {
   },
 };
 
-const VALID_COLOR_DEPTHS   = new Set(['1bit', '4bit-gray', 'gray16', 'spectra6', '16bit-rgb565', '24bit-rgb888']);
+const VALID_COLOR_DEPTHS   = new Set(['1bit', 'gray4', '4bit-gray', 'gray16', 'spectra6', '16bit-rgb565', '24bit-rgb888']);
 const VALID_DITHERS        = new Set(['none', 'floyd-steinberg', 'atkinson']);
-const VALID_OUTPUT_FORMATS = new Set(['png', 'bmp', 'raw', 'x-epd-packed', 'x-epd-spectra6', 'x-epd-gray16', 'jpeg', 'jpg']);
+const VALID_OUTPUT_FORMATS = new Set(['png', 'bmp', 'raw', 'x-epd-packed', 'x-epd-gray4', 'x-epd-spectra6', 'x-epd-gray16', 'jpeg', 'jpg']);
 const VALID_ROTATIONS      = new Set([0, 90, 180, 270]);
 
 const DEFAULTS = {
@@ -143,6 +153,7 @@ const VALID_ORIENTATIONS = new Set(['landscape', 'portrait', 'landscape-flipped'
  */
 const MCU_TRANSPOSE_STATED = new Set(['seeed-reterminal-sticky']);
 const NIBBLE_DEPTHS = new Set(['spectra6', 'gray16']);
+const CRUMB_DEPTHS  = new Set(['gray4']);
 
 /**
  * Return a validated, fully-populated profile object.
@@ -227,10 +238,22 @@ function parseProfile(raw, overrides = {}) {
     width,
     height,
     rotation,
-    colorDepth:   VALID_COLOR_DEPTHS.has(obj.colorDepth)      ? obj.colorDepth   : DEFAULTS.colorDepth,
+    colorDepth:   VALID_COLOR_DEPTHS.has(obj.colorDepth)      ? obj.colorDepth   : (obj.defaultColorDepth || DEFAULTS.colorDepth),
     dither:       VALID_DITHERS.has(obj.dither)               ? obj.dither       : DEFAULTS.dither,
     outputFormat: VALID_OUTPUT_FORMATS.has(obj.outputFormat)  ? obj.outputFormat : DEFAULTS.outputFormat,
   };
+
+  if (Array.isArray(obj.supportedColorModes)) {
+    result.supportedColorModes = [...obj.supportedColorModes];
+  }
+  if (obj.defaultColorDepth) {
+    result.defaultColorDepth = obj.defaultColorDepth;
+  }
+
+  // Validate: colorDepth must be supported by the profile (if supportedColorModes is defined)
+  if (result.supportedColorModes && !result.supportedColorModes.includes(result.colorDepth)) {
+    result.colorDepth = result.defaultColorDepth || DEFAULTS.colorDepth;
+  }
 
   if (orientation) {
     result.orientation = orientation;
@@ -242,6 +265,8 @@ function parseProfile(raw, overrides = {}) {
   // makes every row boundary straddle a byte. Refuse the profile rather than emit a skewed picture.
   // Only the nibble formats: 1-bit always accepted odd widths and fielded panels use them.
   if (NIBBLE_DEPTHS.has(result.colorDepth) && frameDimensions(result).width % 2 !== 0) return null;
+  // gray4 packs 4 pixels per byte: width must be divisible by 4 to avoid straddling byte boundaries.
+  if (CRUMB_DEPTHS.has(result.colorDepth) && frameDimensions(result).width % 4 !== 0) return null;
 
   if (typeof obj.supportsPartialRefresh === 'boolean') {
     result.supportsPartialRefresh = obj.supportsPartialRefresh;

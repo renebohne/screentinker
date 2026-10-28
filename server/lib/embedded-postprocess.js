@@ -302,6 +302,57 @@ function packGray16(rgba, w, h, dither = 'floyd-steinberg') {
   return out;
 }
 
+// ─── Gray4 Packing (4-Level Grayscale) ─────────────────────────────────────────
+
+/*
+ * 4-level grayscale packing for SSD1677 (Sticky) and UC8179 (E1001).
+ * 2 bits per pixel, 4 pixels per byte (MSB-first):
+ *   byte = [px0 (bits 7..6) | px1 (bits 5..4) | px2 (bits 3..2) | px3 (bits 1..0)]
+ *
+ * Levels:
+ *   0 = Black (#000000)
+ *   1 = Dark Gray (#555555)
+ *   2 = Light Gray (#AAAAAA)
+ *   3 = White (#FFFFFF)
+ */
+function packGray4(rgba, w, h, dither = 'floyd-steinberg') {
+  if (w % 4 !== 0) {
+    throw new UnpackableWidthError(`width ${w} is not divisible by 4: gray4 packs four pixels per byte and would straddle rows`);
+  }
+  const pixels = w * h;
+  const out = Buffer.alloc(Math.ceil(pixels / 4), 0);
+  const err = new Float32Array(pixels);
+
+  // 1. Calculate luminance (BT.601) scaled to 0..3
+  for (let i = 0; i < pixels; i++) {
+    const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
+    err[i] = ((0.299 * r + 0.587 * g + 0.114 * b) / 255) * 3.0;
+  }
+
+  // 2. Quantize & diffuse error (0=Black, 1=DarkGray, 2=LightGray, 3=White)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      const oldVal = err[idx];
+      const quantized = Math.min(3, Math.max(0, Math.round(oldVal)));
+      const e = oldVal - quantized;
+
+      if (dither === 'floyd-steinberg') {
+        if (x + 1 < w) err[idx + 1] += (e * 7) / 16;
+        if (x > 0 && y + 1 < h) err[idx + w - 1] += (e * 3) / 16;
+        if (y + 1 < h) err[idx + w] += (e * 5) / 16;
+        if (x + 1 < w && y + 1 < h) err[idx + w + 1] += (e * 1) / 16;
+      }
+
+      // 3. Pack 4 pixels per byte (MSB-first)
+      const byteIdx = (idx >> 2);
+      const shift = 6 - (2 * (x & 3));
+      out[byteIdx] |= ((quantized & 0x03) << shift);
+    }
+  }
+  return out;
+}
+
 // ─── BMP encoding for 1-bit ────────────────────────────────────────────────────
 
 /*
@@ -406,9 +457,19 @@ async function postprocess(pngBuffer, profile) {
     return { buffer: to4BitGray(rgba), contentType: 'application/octet-stream', width: w, height: h2 };
   }
 
+  // ── Gray4 needs width divisible by 4 (four pixels per byte) ──────────────────
+  if (colorDepth === 'gray4' && w % 4 !== 0) {
+    throw new UnpackableWidthError(`width ${w} is not divisible by 4: gray4 packs four pixels per byte and would straddle rows`);
+  }
+
   // ── Spectra 6 / Gray16 need an even width (two pixels per byte) ──────────────
   if ((colorDepth === 'spectra6' || colorDepth === 'gray16') && w % 2 !== 0) {
     throw new UnpackableWidthError(`width ${w} is odd: ${colorDepth} packs two pixels per byte and would straddle rows`);
+  }
+
+  // ── Gray4 (4-Level Grayscale) ────────────────────────────────────────────────
+  if (colorDepth === 'gray4') {
+    return { buffer: packGray4(rgba, w, h2, dither), contentType: 'application/octet-stream', outputFormat: 'x-epd-gray4', width: w, height: h2 };
   }
 
   // ── Spectra 6 (6-Color E-Paper) ──────────────────────────────────────────────
@@ -502,4 +563,4 @@ async function encodeColour(pngBuffer, { width, height, format = 'jpeg', quality
   return { buffer: await img.getBuffer('image/jpeg', { quality: q }), contentType: 'image/jpeg' };
 }
 
-module.exports = { postprocess, encodeColour, UnpackableWidthError };
+module.exports = { postprocess, encodeColour, UnpackableWidthError, packGray4 };
