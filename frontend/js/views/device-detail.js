@@ -1463,6 +1463,7 @@ async function loadDevice(deviceId, activeTab = null) {
               </div>
             </div>
             ${isEmbeddedDevice(device) ? `
+            ${/* SYNC with server/lib/embedded-profiles.js: show only for presets whose supportedColorModes has more than one entry */''}
             ${(currentPreset === 'seeed-reterminal-sticky' || currentPreset === 'seeed-reterminal-e1001') ? `
             <div class="form-group">
               <label>${t('device.form.color_mode_label')}</label>
@@ -1472,6 +1473,7 @@ async function loadDevice(deviceId, activeTab = null) {
               </select>
               <div style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('device.form.color_mode_hint')}</div>
             </div>` : ''}
+            ${/* SYNC with server/lib/embedded-profiles.js: show only for presets with supportsPartialRefresh: true */''}
             ${(currentPreset === 'seeed-reterminal-sticky' || currentPreset === 'seeed-reterminal-e1001' || currentPreset === 'seeed-reterminal-e1003') ? `
             <div class="form-group">
               <label>${t('device.form.refresh_mode_label')}</label>

@@ -1182,8 +1182,21 @@ router.get('/render-layout', resolveAuth, async (req, res) => {
 /*
  * In-memory state tracking previous render frame per device for refresh mode hinting.
  * Maps deviceId -> { itemIndex, contentId, layoutId, at }
+ *
+ * Note: this state is per-process. In a multi-instance deployment (PM2 cluster,
+ * multiple replicas) each worker hints independently — this fails safe: a worker
+ * that has not seen a device advises 'full' (never a missing 'full' where one was
+ * required), only redundant full refreshes can occur.
+ *
+ * Memory is bounded two ways:
+ *   - TTL: entries older than LAST_RENDERED_TTL_MS are evicted lazily on access;
+ *     a device that has been offline that long gets a full refresh anyway.
+ *   - Size cap: beyond LAST_RENDERED_MAX_ENTRIES the least-recently-recorded
+ *     entry is evicted (Map insertion order + delete/re-set gives LRU behavior).
  */
 const _lastRendered = new Map();
+const LAST_RENDERED_TTL_MS = 24 * 60 * 60 * 1000; // 24 h
+const LAST_RENDERED_MAX_ENTRIES = 10000;
 
 function decideRefreshModeHeader(deviceId, profile, current) {
   if (!profile.supportsPartialRefresh || profile.refreshMode === 'always_full') {
@@ -1191,6 +1204,10 @@ function decideRefreshModeHeader(deviceId, profile, current) {
   }
   const prev = _lastRendered.get(deviceId);
   if (!prev) {
+    return 'full';
+  }
+  if (Date.now() - prev.at > LAST_RENDERED_TTL_MS) {
+    _lastRendered.delete(deviceId);
     return 'full';
   }
   if (prev.layoutId !== current.layoutId) {
@@ -1203,6 +1220,11 @@ function decideRefreshModeHeader(deviceId, profile, current) {
 }
 
 function recordRenderedFrame(deviceId, current) {
+  _lastRendered.delete(deviceId); // re-insert at tail: keeps Map order LRU-fresh
+  if (_lastRendered.size >= LAST_RENDERED_MAX_ENTRIES) {
+    const oldestKey = _lastRendered.keys().next().value;
+    _lastRendered.delete(oldestKey);
+  }
   _lastRendered.set(deviceId, {
     itemIndex: current.itemIndex,
     contentId: current.contentId,
@@ -1912,5 +1934,7 @@ module.exports.logListLimit = logListLimit;
 module.exports.decideRefreshModeHeader = decideRefreshModeHeader;
 module.exports.recordRenderedFrame = recordRenderedFrame;
 module.exports._lastRendered = _lastRendered;
+module.exports.LAST_RENDERED_TTL_MS = LAST_RENDERED_TTL_MS;
+module.exports.LAST_RENDERED_MAX_ENTRIES = LAST_RENDERED_MAX_ENTRIES;
 
 

@@ -25,6 +25,9 @@
 
 const PRESETS = {
   // ── Seeed Studio reTerminal Series ──────────────────────────────────────────
+  // NOTE: supportedColorModes and supportsPartialRefresh drive the dashboard dropdowns
+  // in frontend/js/views/device-detail.js (color mode & refresh behavior selectors).
+  // Keep both places in sync when adding presets or modes.
   'seeed-reterminal-sticky': {
     width: 800, height: 480, rotation: 0,
     supportedColorModes: ['1bit', 'gray4'],
