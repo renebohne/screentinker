@@ -3018,6 +3018,13 @@ function setupActions(device) {
   }
 
   wireLocationSearch();
+
+  const orientSelect = document.getElementById('deviceOrientation');
+  if (orientSelect && !orientSelect.dataset.wired) {
+    orientSelect.dataset.wired = '1';
+    orientSelect.addEventListener('change', () => { orientSelect.dataset.changed = '1'; });
+  }
+
   document.getElementById('saveSettingsTopBtn')?.addEventListener('click', () => {
     document.getElementById('saveNotesBtn')?.click();
   });
@@ -3034,12 +3041,6 @@ function setupActions(device) {
       bgInput.dataset.cleared = '1';
     });
     bgInput.addEventListener('input', () => { bgInput.dataset.cleared = ''; });
-  }
-
-  const orientSelect = document.getElementById('deviceOrientation');
-  if (orientSelect && !orientSelect.dataset.wired) {
-    orientSelect.dataset.wired = '1';
-    orientSelect.addEventListener('change', () => { orientSelect.dataset.changed = '1'; });
   }
 
       const loc = document.getElementById('deviceLocSearch');
@@ -3113,6 +3114,7 @@ function setupActions(device) {
       if (saved && saved.screen_profile !== undefined) {
         device.screen_profile = saved.screen_profile;
       }
+      if (orientationEl) delete orientationEl.dataset.changed;
       showToast(t('device.toast.settings_saved'), 'success');
       // A tag change can move the screen into or out of dynamic groups; say which.
       for (const c of (saved && saved.groups_changed) || []) {
