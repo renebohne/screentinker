@@ -127,6 +127,18 @@ function toRGB565(rgba) {
   return out;
 }
 
+/** Pack RGBA bitmap to raw 24-bit RGB888. 3 bytes per pixel. */
+function toRGB888(rgba) {
+  const pixels = rgba.length / 4;
+  const out = Buffer.allocUnsafe(pixels * 3);
+  for (let i = 0; i < pixels; i++) {
+    out[i * 3]     = rgba[i * 4];     // R
+    out[i * 3 + 1] = rgba[i * 4 + 1]; // G
+    out[i * 3 + 2] = rgba[i * 4 + 2]; // B
+  }
+  return out;
+}
+
 /** Pack RGBA bitmap to 4-bit grayscale. MSN first per byte. */
 function to4BitGray(rgba) {
   const pixels = rgba.length / 4;
@@ -447,8 +459,11 @@ async function postprocess(pngBuffer, profile) {
   const w    = img.bitmap.width;
   const h2   = img.bitmap.height;
 
-  // ── 24-bit pass-through ──────────────────────────────────────────────────────
+  // ── 24-bit pass-through / raw RGB888 ──────────────────────────────────────────
   if (colorDepth === '24bit-rgb888') {
+    if (outputFormat === 'raw') {
+      return { buffer: toRGB888(rgba), contentType: 'application/octet-stream', width: w, height: h2 };
+    }
     const buf = await img.getBuffer('image/png');
     return { buffer: buf, contentType: 'image/png', width: w, height: h2 };
   }

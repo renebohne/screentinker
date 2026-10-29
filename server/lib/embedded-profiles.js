@@ -119,6 +119,15 @@ const PRESETS = {
     width: 128, height: 32, rotation: 0,
     colorDepth: '1bit', dither: 'atkinson', outputFormat: 'raw',
   },
+  // ── LED Strip (Seeed Studio XIAO LED Controller) ──────────────────────────────
+  'seeed-xiao-led': {
+    width: 5, height: 1, rotation: 0,
+    supportedColorModes: ['24bit-rgb888'],
+    defaultColorDepth: '24bit-rgb888',
+    colorDepth: '24bit-rgb888', dither: 'none', outputFormat: 'raw',
+    supportsPartialRefresh: true, minRefreshInterval: 1,
+    fullRefreshDurationMs: 50, partialRefreshDurationMs: 50,
+  },
 };
 
 const VALID_COLOR_DEPTHS   = new Set(['1bit', 'gray4', '4bit-gray', 'gray16', 'spectra6', '16bit-rgb565', '24bit-rgb888']);
