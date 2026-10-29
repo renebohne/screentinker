@@ -1333,11 +1333,11 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
   // ── Cache check ─────────────────────────────────────────────────────────────
   const dynamicRev = dynamicRevFor(item, Math.floor(Date.now() / 1000));
   const effectiveFitMode = (item && item.fit_mode)
-    ? safeFitMode(item.fit_mode)
-    : (opts.zoneFitMode ? safeFitMode(opts.zoneFitMode) : 'cover');
+    ? safeFitMode(item.fit_mode, 'cover')
+    : (opts.zoneFitMode ? safeFitMode(opts.zoneFitMode, 'cover') : 'cover');
   const fitSuffix = (item && item.fit_mode)
-    ? `_${safeFitMode(item.fit_mode)}`
-    : (opts.zoneFitMode ? `_${safeFitMode(opts.zoneFitMode)}` : '');
+    ? `_${safeFitMode(item.fit_mode, 'cover')}`
+    : (opts.zoneFitMode ? `_${safeFitMode(opts.zoneFitMode, 'cover')}` : '');
   const effectiveBg = opts.zoneBackgroundColor || device?.background_color;
 
   let key = cacheKey(
@@ -1444,11 +1444,11 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     itemIndex = renderIndex;
     const nextRev = dynamicRevFor(item, Math.floor(Date.now() / 1000));
     const nextFitMode = (item && item.fit_mode)
-      ? safeFitMode(item.fit_mode)
-      : (opts.zoneFitMode ? safeFitMode(opts.zoneFitMode) : 'cover');
+      ? safeFitMode(item.fit_mode, 'cover')
+      : (opts.zoneFitMode ? safeFitMode(opts.zoneFitMode, 'cover') : 'cover');
     const nextFitSuffix = (item && item.fit_mode)
-      ? `_${safeFitMode(item.fit_mode)}`
-      : (opts.zoneFitMode ? `_${safeFitMode(opts.zoneFitMode)}` : '');
+      ? `_${safeFitMode(item.fit_mode, 'cover')}`
+      : (opts.zoneFitMode ? `_${safeFitMode(opts.zoneFitMode, 'cover')}` : '');
     key = cacheKey(
       device.id,
       `${item.content_id || item.widget_id || item.id || 'item'}${nextFitSuffix}`,
