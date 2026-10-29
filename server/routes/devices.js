@@ -876,6 +876,28 @@ router.put('/:id', (req, res) => {
   }
   if (normTags !== undefined) { updates.push('tags = ?'); values.push(JSON.stringify(normTags)); }
   if (locUpdate) for (const [k, v] of Object.entries(locUpdate)) { updates.push(`${k} = ?`); values.push(v); }
+  if (device.client_type === 'embedded' && orientation !== undefined) {
+    updates.push('reported_orientation = ?');
+    values.push(orientation);
+    if (screen_profile === undefined) {
+      let profileObj = {};
+      try {
+        if (typeof device.screen_profile === 'string' && device.screen_profile.startsWith('{')) {
+          profileObj = JSON.parse(device.screen_profile);
+        } else if (typeof device.screen_profile === 'object' && device.screen_profile) {
+          profileObj = { ...device.screen_profile };
+        } else if (typeof device.screen_profile === 'string' && device.screen_profile) {
+          profileObj = { preset: device.screen_profile };
+        }
+      } catch (_) {}
+      profileObj.orientation = orientation;
+      const { parseProfile } = require('../lib/embedded-profiles');
+      if (parseProfile(profileObj)) {
+        updates.push('screen_profile = ?');
+        values.push(JSON.stringify(profileObj));
+      }
+    }
+  }
   if (screen_profile !== undefined) {
     // Only an embedded (server-rendered) panel has a render profile. Anything else would silently
     // keep it and ignore it, so refuse rather than store a setting nothing reads.
@@ -884,6 +906,9 @@ router.put('/:id', (req, res) => {
     }
     let profileVal = null;
     if (screen_profile !== null && screen_profile !== '') {
+      if (typeof screen_profile === 'object' && orientation !== undefined && !screen_profile.orientation) {
+        screen_profile.orientation = orientation;
+      }
       const { parseProfile } = require('../lib/embedded-profiles');
       const parsed = parseProfile(screen_profile);
       if (!parsed) {

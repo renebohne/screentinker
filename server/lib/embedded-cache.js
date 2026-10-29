@@ -41,7 +41,7 @@ function defaultCacheDir() {
  * @param {object} profile         Validated screen_profile object
  * @returns {string}  64-char hex SHA-256
  */
-function cacheKey(deviceId, itemId, itemUpdatedAt, profile) {
+function cacheKey(deviceId, itemId, itemUpdatedAt, profile, extra = {}) {
   const parts = [
     deviceId,
     itemId,
@@ -60,6 +60,13 @@ function cacheKey(deviceId, itemId, itemUpdatedAt, profile) {
    */
   if (profile.orientation || profile.mcuTranspose) {
     parts.push(profile.orientation || null, profile.mcuTranspose ? 'mcu-transpose' : null);
+  }
+  const bg = (extra && extra.backgroundColor) || profile.backgroundColor;
+  if (bg && typeof bg === 'string') {
+    const normBg = bg.trim().toLowerCase();
+    if (normBg && normBg !== '#000000' && normBg !== '#000') {
+      parts.push(`bg:${normBg}`);
+    }
   }
   const payload = JSON.stringify(parts);
   return crypto.createHash('sha256').update(payload).digest('hex');

@@ -26,7 +26,7 @@ const { assertSafeUrl, guardedRequest, SsrfError } = require('./ssrf-guard');
 const REMOTE_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 
 const VALID_FIT_MODES = new Set(['cover', 'contain', 'fill']);
-function safeFitMode(m, fallback = 'contain') {
+function safeFitMode(m, fallback = 'cover') {
   return (typeof m === 'string' && VALID_FIT_MODES.has(m.toLowerCase())) ? m.toLowerCase() : fallback;
 }
 function safeHexColor(c, fallback = '#000000') {
@@ -303,17 +303,19 @@ async function renderRemoteImage(content, profile, options = {}, item = null) {
 
   const buf = response.buffer;
   const img = await Jimp.fromBuffer(buf);
-  const fitMode = safeFitMode(item && item.fit_mode, 'cover');
+  const fitMode = safeFitMode((item && item.fit_mode) || options?.fitMode, options?.defaultFitMode || 'cover');
+  const bgColorHex = safeHexColor(options?.device?.background_color || options?.backgroundColor, '#000000');
+  const bgRgba = parseColorToRgba(bgColorHex, 0x000000FF);
+  const canvas = new Jimp({ width: profile.width, height: profile.height, color: bgRgba });
   if (fitMode === 'cover') {
     img.cover({ w: profile.width, h: profile.height });
   } else if (fitMode === 'fill') {
     img.resize({ w: profile.width, h: profile.height });
   } else {
-    const bgColorHex = safeHexColor(options?.device?.background_color || options?.backgroundColor, '#000000');
-    img.background = parseColorToRgba(bgColorHex, 0x000000FF);
     img.contain({ w: profile.width, h: profile.height });
   }
-  return img.getBuffer('image/png');
+  canvas.composite(img, 0, 0);
+  return canvas.getBuffer('image/png');
 }
 
 function localBaseUrl() {
@@ -755,17 +757,19 @@ async function render(item, content, screenProfile, options = {}) {
       try {
         const fileBuffer = fs.readFileSync(safe);
         const img = await Jimp.fromBuffer(fileBuffer);
-        const fitMode = safeFitMode(item && item.fit_mode, 'cover');
+        const fitMode = safeFitMode((item && item.fit_mode) || options?.fitMode, options?.defaultFitMode || 'cover');
+        const bgColorHex = safeHexColor(options?.device?.background_color || options?.backgroundColor, '#000000');
+        const bgRgba = parseColorToRgba(bgColorHex, 0x000000FF);
+        const canvas = new Jimp({ width: profile.width, height: profile.height, color: bgRgba });
         if (fitMode === 'cover') {
           img.cover({ w: profile.width, h: profile.height });
         } else if (fitMode === 'fill') {
           img.resize({ w: profile.width, h: profile.height });
         } else {
-          const bgColorHex = safeHexColor(options?.device?.background_color || options?.backgroundColor, '#000000');
-          img.background = parseColorToRgba(bgColorHex, 0x000000FF);
           img.contain({ w: profile.width, h: profile.height });
         }
-        const png = await img.getBuffer('image/png');
+        canvas.composite(img, 0, 0);
+        const png = await canvas.getBuffer('image/png');
         return { png };
       } catch (e) {
         if (e.code === 'INVALID_PATH' || e.code === 'NOT_FOUND') throw e;
@@ -1078,6 +1082,8 @@ module.exports = {
   safeDimension,
   safeLocalImagePath,
   parseColorToRgba,
+  safeHexColor,
+  safeFitMode,
   withTimeout,
   guardRasterRequests,
   safeZoneRemoteUrl,

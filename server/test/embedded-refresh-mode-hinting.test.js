@@ -126,4 +126,44 @@ describe('Ticket S5: Server Refresh Mode Hinting Logic', () => {
 
     _lastRendered.clear();
   });
+
+  test('transitioning orientation, colorDepth, dither, fitMode, or backgroundColor advises "full"', () => {
+    const sticky = parseProfile('seeed-reterminal-sticky');
+    const devId = 'dev-profile-transitions';
+
+    const baseState = {
+      itemIndex: 0,
+      contentId: 'item-0',
+      layoutId: null,
+      orientation: 'landscape',
+      colorDepth: '1bit',
+      dither: 'floyd-steinberg',
+      fitMode: 'cover',
+      backgroundColor: '#000000',
+    };
+
+    // 1. Initial render -> 'full', record base state
+    assert.equal(decideRefreshModeHeader(devId, sticky, baseState), 'full');
+    recordRenderedFrame(devId, baseState);
+
+    // 2. Same state -> 'partial'
+    assert.equal(decideRefreshModeHeader(devId, sticky, baseState), 'partial');
+
+    // 3. Orientation change -> 'full'
+    assert.equal(decideRefreshModeHeader(devId, sticky, { ...baseState, orientation: 'portrait' }), 'full');
+
+    // 4. Color depth change (e.g. 1bit to gray4) -> 'full'
+    assert.equal(decideRefreshModeHeader(devId, sticky, { ...baseState, colorDepth: 'gray4' }), 'full');
+
+    // 5. Dither change -> 'full'
+    assert.equal(decideRefreshModeHeader(devId, sticky, { ...baseState, dither: 'atkinson' }), 'full');
+
+    // 6. Fit mode change (e.g. cover to contain) -> 'full'
+    assert.equal(decideRefreshModeHeader(devId, sticky, { ...baseState, fitMode: 'contain' }), 'full');
+
+    // 7. Background color change -> 'full'
+    assert.equal(decideRefreshModeHeader(devId, sticky, { ...baseState, backgroundColor: '#FFFFFF' }), 'full');
+
+    _lastRendered.clear();
+  });
 });

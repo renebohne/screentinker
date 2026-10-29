@@ -43,7 +43,7 @@ const { resolveTenancy }    = require('../lib/tenancy');
 const { resolveDevicePlaylist, resolvedLayoutId, resolveDeviceContext } = require('../lib/resolve-device-playlist');
 const { parseProfile, listPresets, getPreset, frameDimensions, frameOrientation } = require('../lib/embedded-profiles');
 const { cacheKey, toETag, isNotModified, get: cacheGet, set: cacheSet } = require('../lib/embedded-cache');
-const { render, renderLayout, isLayoutImageOnly, isBrowserAvailable, looksLikeImage } = require('../lib/embedded-render');
+const { render, renderLayout, isLayoutImageOnly, isBrowserAvailable, looksLikeImage, safeFitMode } = require('../lib/embedded-render');
 const { postprocess }       = require('../lib/embedded-postprocess');
 const pairLockout           = require('../lib/pair-lockout');
 const { sixDigitCode }      = require('../lib/numeric-code');
@@ -857,7 +857,8 @@ function resolveLayoutItems(deviceId, forceIndex, { advance = true } = {}) {
     expiresList.push(expiresIn);
 
     const dRev = dynamicRevFor(item, now);
-    dynamicRevParts.push(`z_${zone.id}_${item.content_id || item.widget_id || item.id || 'item'}_${dRev}`);
+    const fitSuffix = (item.fit_mode || zone.fit_mode) ? `_${safeFitMode(item.fit_mode || zone.fit_mode)}` : '';
+    dynamicRevParts.push(`z_${zone.id}_${item.content_id || item.widget_id || item.id || 'item'}${fitSuffix}_${dRev}`);
 
     zoneEntries.push({ zone, item, content: item });
   }
@@ -1141,6 +1142,15 @@ router.get('/render', resolveAuth, async (req, res) => {
       return handleRenderLayout(req, res, device, profile, { ...renderOpts, explicitMode: false, preResolved: layoutResolved });
     }
 
+    if (layoutResolved && layoutResolved.zoneEntries.length === 1) {
+      const singleEntry = layoutResolved.zoneEntries[0];
+      return handleRenderStandard(req, res, device, profile, {
+        ...renderOpts,
+        zoneFitMode: singleEntry.zone?.fit_mode,
+        zoneBackgroundColor: singleEntry.zone?.background_color,
+      });
+    }
+
     return handleRenderStandard(req, res, device, profile, renderOpts);
   });
 });
@@ -1216,6 +1226,21 @@ function decideRefreshModeHeader(deviceId, profile, current) {
   if (prev.itemIndex !== current.itemIndex || prev.contentId !== current.contentId) {
     return 'full';
   }
+  if (current.orientation !== undefined && prev.orientation !== undefined && prev.orientation !== current.orientation) {
+    return 'full';
+  }
+  if (current.colorDepth !== undefined && prev.colorDepth !== undefined && prev.colorDepth !== current.colorDepth) {
+    return 'full';
+  }
+  if (current.dither !== undefined && prev.dither !== undefined && prev.dither !== current.dither) {
+    return 'full';
+  }
+  if (current.fitMode !== undefined && prev.fitMode !== undefined && prev.fitMode !== current.fitMode) {
+    return 'full';
+  }
+  if (current.backgroundColor !== undefined && prev.backgroundColor !== undefined && prev.backgroundColor !== current.backgroundColor) {
+    return 'full';
+  }
   return 'partial';
 }
 
@@ -1229,6 +1254,11 @@ function recordRenderedFrame(deviceId, current) {
     itemIndex: current.itemIndex,
     contentId: current.contentId,
     layoutId: current.layoutId,
+    orientation: current.orientation,
+    colorDepth: current.colorDepth,
+    dither: current.dither,
+    fitMode: current.fitMode || null,
+    backgroundColor: current.backgroundColor || null,
     at: Date.now(),
   });
 }
@@ -1281,7 +1311,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
   }
 
   const clientIp = touchDeviceHeartbeat(device, req);
-  const { item, content, itemIndex, total } = resolved;
+  let { item, content, itemIndex, total } = resolved;
   let expiresIn = resolved.expiresIn;
   if (power.isOff && power.sleepSeconds) {
     expiresIn = power.sleepSeconds;
@@ -1302,14 +1332,32 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
 
   // ── Cache check ─────────────────────────────────────────────────────────────
   const dynamicRev = dynamicRevFor(item, Math.floor(Date.now() / 1000));
-  const fitSuffix = (item && item.fit_mode) ? `_${item.fit_mode.toLowerCase()}` : '';
+  const effectiveFitMode = (item && item.fit_mode)
+    ? safeFitMode(item.fit_mode)
+    : (opts.zoneFitMode ? safeFitMode(opts.zoneFitMode) : 'cover');
+  const fitSuffix = (item && item.fit_mode)
+    ? `_${safeFitMode(item.fit_mode)}`
+    : (opts.zoneFitMode ? `_${safeFitMode(opts.zoneFitMode)}` : '');
+  const effectiveBg = opts.zoneBackgroundColor || device?.background_color;
 
-  const key = cacheKey(
+  let key = cacheKey(
     device.id,
     `${item.content_id || item.widget_id || item.id || 'item'}${fitSuffix}`,
     dynamicRev,
-    profile
+    profile,
+    { backgroundColor: effectiveBg }
   );
+
+  const currentRenderState = {
+    itemIndex,
+    contentId: content?.content_id || item?.content_id || item?.id || '',
+    layoutId: null,
+    orientation: frameOrientation(profile),
+    colorDepth: profile.colorDepth,
+    dither: profile.dither,
+    fitMode: effectiveFitMode,
+    backgroundColor: effectiveBg || null,
+  };
 
   // Common response headers
   const headers = {
@@ -1324,11 +1372,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     'X-ST-Power-State': power.state,
     ...frameHeaders(profile),
   };
-  headers['X-ST-Refresh-Mode'] = decideRefreshModeHeader(device.id, profile, {
-    itemIndex,
-    contentId: content?.content_id || item?.content_id || item?.id || '',
-    layoutId: null,
-  });
+  headers['X-ST-Refresh-Mode'] = decideRefreshModeHeader(device.id, profile, currentRenderState);
   if (profile.supportsPartialRefresh !== undefined) {
     headers['X-ST-Supports-Partial'] = profile.supportsPartialRefresh ? '1' : '0';
   }
@@ -1350,11 +1394,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     const cached = cacheGet(key);
     if (cached.hit) {
       markCommandDelivered(device.id, opts);
-      recordRenderedFrame(device.id, {
-        itemIndex,
-        contentId: content?.content_id || item?.content_id || item?.id || '',
-        layoutId: null,
-      });
+      recordRenderedFrame(device.id, currentRenderState);
       res.set({ ...headers, 'Content-Type': detectContentType(profile) });
       return res.status(200).send(cached.buffer);
     }
@@ -1371,7 +1411,8 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
       renderResult = await render(renderItem, renderContent, profile, {
         signal,
         device,
-        backgroundColor: device?.background_color,
+        backgroundColor: effectiveBg,
+        fitMode: effectiveFitMode,
       });
       if (!renderResult.unsupported) break;
     } catch (e) {
@@ -1396,10 +1437,42 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     });
   }
 
+  // If the fallback loop advanced to another item, recompute key, headers and state before caching
+  if (renderIndex !== itemIndex) {
+    item = renderItem;
+    content = renderContent;
+    itemIndex = renderIndex;
+    const nextRev = dynamicRevFor(item, Math.floor(Date.now() / 1000));
+    const nextFitMode = (item && item.fit_mode)
+      ? safeFitMode(item.fit_mode)
+      : (opts.zoneFitMode ? safeFitMode(opts.zoneFitMode) : 'cover');
+    const nextFitSuffix = (item && item.fit_mode)
+      ? `_${safeFitMode(item.fit_mode)}`
+      : (opts.zoneFitMode ? `_${safeFitMode(opts.zoneFitMode)}` : '');
+    key = cacheKey(
+      device.id,
+      `${item.content_id || item.widget_id || item.id || 'item'}${nextFitSuffix}`,
+      nextRev,
+      profile,
+      { backgroundColor: effectiveBg }
+    );
+    headers['ETag'] = toETag(key);
+    headers['X-ST-Item-Index'] = String(itemIndex);
+    headers['X-ST-Content-Id'] = content?.content_id || item?.content_id || item?.id || '';
+    currentRenderState.itemIndex = itemIndex;
+    currentRenderState.contentId = content?.content_id || item?.content_id || item?.id || '';
+    currentRenderState.fitMode = nextFitMode;
+  }
+
   // ── Post-process ─────────────────────────────────────────────────────────────
   let processed;
   try {
-    processed = await postprocess(renderResult.png, profile);
+    const postProfile = {
+      ...profile,
+      fitMode: currentRenderState.fitMode,
+      backgroundColor: effectiveBg || '#000000',
+    };
+    processed = await postprocess(renderResult.png, postProfile);
   } catch (e) {
     console.error('[embedded] postprocess error:', e.message);
     // Same as every other answer here (and the layout path's 500): a frame we could not build is
@@ -1412,11 +1485,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
   // Store in cache (non-blocking; non-fatal on failure)
   if (!isPreview) {
     try { cacheSet(key, processed.buffer); } catch { /* best-effort */ }
-    recordRenderedFrame(device.id, {
-      itemIndex,
-      contentId: content?.content_id || item?.content_id || item?.id || '',
-      layoutId: null,
-    });
+    recordRenderedFrame(device.id, currentRenderState);
   }
 
   res.set({
@@ -1529,8 +1598,20 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     device.id,
     'layout_' + layout.id,
     dynamicRev,
-    profile
+    profile,
+    { backgroundColor: device?.background_color }
   );
+
+  const currentRenderState = {
+    itemIndex: 0,
+    contentId: layout.id,
+    layoutId: layout.id,
+    orientation: frameOrientation(profile),
+    colorDepth: profile.colorDepth,
+    dither: profile.dither,
+    fitMode: null,
+    backgroundColor: device?.background_color || null,
+  };
 
   const headers = {
     'ETag': toETag(key),
@@ -1544,11 +1625,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     'X-ST-Power-State': power.state,
     ...frameHeaders(profile),
   };
-  headers['X-ST-Refresh-Mode'] = decideRefreshModeHeader(device.id, profile, {
-    itemIndex: 0,
-    contentId: layout.id,
-    layoutId: layout.id,
-  });
+  headers['X-ST-Refresh-Mode'] = decideRefreshModeHeader(device.id, profile, currentRenderState);
   if (profile.supportsPartialRefresh !== undefined) {
     headers['X-ST-Supports-Partial'] = profile.supportsPartialRefresh ? '1' : '0';
   }
@@ -1567,11 +1644,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     const cached = cacheGet(key);
     if (cached.hit) {
       markCommandDelivered(device.id, cmdOpts);
-      recordRenderedFrame(device.id, {
-        itemIndex: 0,
-        contentId: layout.id,
-        layoutId: layout.id,
-      });
+      recordRenderedFrame(device.id, currentRenderState);
       res.set({ ...headers, 'Content-Type': detectContentType(profile) });
       return res.status(200).send(cached.buffer);
     }
@@ -1620,11 +1693,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
 
   if (!isPreview) {
     try { cacheSet(key, processed.buffer); } catch { /* best-effort */ }
-    recordRenderedFrame(device.id, {
-      itemIndex: 0,
-      contentId: layout.id,
-      layoutId: layout.id,
-    });
+    recordRenderedFrame(device.id, currentRenderState);
   }
 
   res.set({

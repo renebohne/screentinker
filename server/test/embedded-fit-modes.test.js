@@ -90,7 +90,7 @@ test.describe('Embedded Single-Item Fit Modes (cover, contain, fill)', () => {
     assert.equal(rendered.getPixelColor(200, 400), 0x00FF00FF);
   });
 
-  test('unspecified fit_mode defaults to cover (matching native player parity)', async () => {
+  test('unspecified fit_mode defaults to cover (preserving fleet compatibility and parity)', async () => {
     const profile = { width: 400, height: 800 };
     const item = { id: 'item-default' }; // No fit_mode
     const content = { id: 'cnt-1', filepath: testFilename };
@@ -105,6 +105,58 @@ test.describe('Embedded Single-Item Fit Modes (cover, contain, fill)', () => {
 
     // Default is cover -> full canvas is green
     assert.equal(rendered.getPixelColor(200, 100), 0x00FF00FF);
+    assert.equal(rendered.getPixelColor(200, 400), 0x00FF00FF);
     assert.equal(rendered.getPixelColor(200, 700), 0x00FF00FF);
+  });
+
+  test('options.fitMode provides fallback when item.fit_mode is unspecified', async () => {
+    const profile = { width: 400, height: 800 };
+    const item = { id: 'item-inherit-zone' }; // No item fit_mode
+    const content = { id: 'cnt-1', filepath: testFilename };
+    const options = { backgroundColor: '#FF0000', fitMode: 'contain' };
+
+    const result = await render(item, content, profile, options);
+    assert.ok(result.png, 'Expected PNG buffer');
+
+    const rendered = await Jimp.fromBuffer(result.png);
+    assert.equal(rendered.bitmap.width, 400);
+    assert.equal(rendered.bitmap.height, 800);
+
+    // Inherited contain -> letterbox with background color
+    assert.equal(rendered.getPixelColor(200, 100), 0xFF0000FF, 'Top letterbox should be red');
+    assert.equal(rendered.getPixelColor(200, 400), 0x00FF00FF, 'Center of image should be green');
+    assert.equal(rendered.getPixelColor(200, 700), 0xFF0000FF, 'Bottom letterbox should be red');
+  });
+
+  test('transparent PNG composites over device.background_color inside bounding box', async () => {
+    const transparentFile = 'test-transparent.png';
+    const transparentPath = path.join(tmpUpload, transparentFile);
+    try {
+      // 200x200 image with transparent background and red square in center
+      const transImg = new Jimp({ width: 200, height: 200, color: 0x00000000 });
+      // Fill center 50x50 with blue
+      for (let x = 75; x < 125; x++) {
+        for (let y = 75; y < 125; y++) {
+          transImg.setPixelColor(0x0000FFFF, x, y);
+        }
+      }
+      fs.writeFileSync(transparentPath, await transImg.getBuffer('image/png'));
+
+      const profile = { width: 200, height: 200 };
+      const item = { id: 'item-trans', fit_mode: 'cover' };
+      const content = { id: 'cnt-trans', filepath: transparentFile };
+      // Background color: white (#FFFFFF)
+      const options = { backgroundColor: '#FFFFFF' };
+
+      const result = await render(item, content, profile, options);
+      const rendered = await Jimp.fromBuffer(result.png);
+
+      // Transparent corners should be filled with background color (white: 0xFFFFFFFF)
+      assert.equal(rendered.getPixelColor(10, 10), 0xFFFFFFFF, 'Transparent area should be background color');
+      // Center blue square should be preserved (blue: 0x0000FFFF)
+      assert.equal(rendered.getPixelColor(100, 100), 0x0000FFFF, 'Opaque blue pixel should be preserved');
+    } finally {
+      try { fs.unlinkSync(transparentPath); } catch (_) {}
+    }
   });
 });

@@ -292,6 +292,12 @@ function parseProfile(raw, overrides = {}) {
   if (obj.touchController !== undefined) {
     result.touchController = obj.touchController;
   }
+  if (typeof obj.fitMode === 'string') {
+    result.fitMode = obj.fitMode.toLowerCase();
+  }
+  if (typeof obj.backgroundColor === 'string') {
+    result.backgroundColor = obj.backgroundColor;
+  }
 
   return result;
 }

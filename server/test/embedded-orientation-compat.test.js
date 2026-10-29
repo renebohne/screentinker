@@ -18,7 +18,14 @@ const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 
-const h = require('./helpers/embedded-real-db').boot({});
+const deviceNs = { adapter: { rooms: new Map() }, to: () => ({ emit() {} }) };
+const h = require('./helpers/embedded-real-db').boot({
+  configure(app) {
+    app.set('io', { of: (n) => (n === '/device' ? deviceNs : { to: () => ({ emit() {} }) }) });
+    const { requireAuth } = require('../middleware/auth');
+    app.use('/api/devices', requireAuth, require('../routes/devices'));
+  },
+});
 const { parseProfile } = require('../lib/embedded-profiles');
 
 after(() => h.close());
@@ -164,4 +171,57 @@ test('a read API token (a preview) neither changes nor is the source of the stor
     'but a reader cannot re-mount the panel');
   const dev = await render(base, p);
   assert.equal(dev.res.headers.get('x-st-screen-width'), '800', 'the panel itself is unaffected');
+});
+
+test('saving settings updates orientation and preserves existing custom screen_profile fields', async () => {
+  const base = await h.ready();
+  const customProfile = {
+    preset: 'seeed-reterminal-sticky',
+    colorDepth: '1bit',
+    dither: 'atkinson',
+    refreshMode: 'smart_partial',
+    customTag: 'preserved-custom-setting',
+  };
+  const p = await h.mkPanel(customProfile);
+
+  // Initial render (landscape: 800x480)
+  const devInitial = await render(base, p);
+  assert.equal(devInitial.res.headers.get('x-st-screen-width'), '800');
+  assert.equal(devInitial.res.headers.get('x-st-screen-height'), '480');
+  assert.equal(devInitial.res.headers.get('x-st-orientation'), 'landscape');
+
+  // Operator saves settings in Dashboard with orientation: 'portrait' and preserved profile fields
+  const { generateToken } = require('../middleware/auth');
+  const userJwt = generateToken({ id: 'u-emb', email: 'emb@t.local', role: 'workspace_admin' }, 'ws-emb');
+  const rootUrl = base.replace(/\/api\/embedded\/?$/, '');
+  const updateBody = {
+    orientation: 'portrait',
+    screen_profile: {
+      ...customProfile,
+      orientation: 'portrait',
+    },
+  };
+  const putRes = await fetch(`${rootUrl}/api/devices/${p.id}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${userJwt}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(updateBody),
+  });
+  assert.equal(putRes.status, 200);
+
+  // Verify custom field in screen_profile was preserved in DB
+  const row = h.db.prepare('SELECT screen_profile, orientation, reported_orientation FROM devices WHERE id = ?').get(p.id);
+  assert.equal(row.orientation, 'portrait');
+  assert.equal(row.reported_orientation, 'portrait');
+  const storedProfile = JSON.parse(row.screen_profile);
+  assert.equal(storedProfile.customTag, 'preserved-custom-setting', 'custom fields must be preserved');
+  assert.equal(storedProfile.orientation, 'portrait');
+
+  // Verify next device poll renders portrait (480x800)
+  const devNext = await render(base, p);
+  assert.equal(devNext.res.headers.get('x-st-screen-width'), '480');
+  assert.equal(devNext.res.headers.get('x-st-screen-height'), '800');
+  assert.equal(devNext.res.headers.get('x-st-orientation'), 'portrait');
 });

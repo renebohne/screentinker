@@ -61,3 +61,15 @@ test('a stated orientation or an MCU-transposed frame does get its own key', () 
   const e1001 = parseProfile('seeed-reterminal-e1001');
   assert.notEqual(cacheKey('d', 'i', 1, e1001), mainCacheKey('d', 'i', 1, e1001), 'new presets need no old key');
 });
+
+test('a custom non-black background color gets its own key, while default black preserves main key', () => {
+  const plain = parseProfile('seeed-reterminal-sticky');
+  // Default black (#000000) produces main key
+  assert.equal(cacheKey('d', 'i', 1, plain, { backgroundColor: '#000000' }), mainCacheKey('d', 'i', 1, plain));
+  assert.equal(cacheKey('d', 'i', 1, plain, { backgroundColor: '#000' }), mainCacheKey('d', 'i', 1, plain));
+  // White or red background produces distinct key
+  const whiteKey = cacheKey('d', 'i', 1, plain, { backgroundColor: '#FFFFFF' });
+  assert.notEqual(whiteKey, mainCacheKey('d', 'i', 1, plain));
+  const redKey = cacheKey('d', 'i', 1, plain, { backgroundColor: '#FF0000' });
+  assert.notEqual(redKey, whiteKey);
+});
