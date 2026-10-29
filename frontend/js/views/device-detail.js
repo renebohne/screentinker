@@ -1443,16 +1443,24 @@ async function loadDevice(deviceId, activeTab = null) {
               ${(() => {
                 let effectiveOrientation = device.orientation || 'landscape';
                 if (isEmbeddedDevice(device)) {
+                  let pObj = null;
                   try {
-                    if (typeof device.screen_profile === 'object' && device.screen_profile?.orientation) {
-                      effectiveOrientation = device.screen_profile.orientation;
+                    if (typeof device.screen_profile === 'object' && device.screen_profile) {
+                      pObj = device.screen_profile;
                     } else if (typeof device.screen_profile === 'string' && device.screen_profile.startsWith('{')) {
-                      const p = JSON.parse(device.screen_profile);
-                      if (p.orientation) effectiveOrientation = p.orientation;
+                      pObj = JSON.parse(device.screen_profile);
+                    } else if (typeof device.screen_profile === 'string' && device.screen_profile) {
+                      pObj = { preset: device.screen_profile };
                     }
                   } catch (_) {}
-                  if (!effectiveOrientation || effectiveOrientation === 'landscape') {
-                    if (device.reported_orientation) effectiveOrientation = device.reported_orientation;
+                  if (pObj && pObj.orientation) {
+                    effectiveOrientation = pObj.orientation;
+                  } else if (device.reported_orientation) {
+                    effectiveOrientation = device.reported_orientation;
+                  } else if (pObj && (pObj.preset === 'seeed-reterminal-e1004' || (pObj.width && pObj.height && pObj.height > pObj.width))) {
+                    effectiveOrientation = 'portrait';
+                  } else {
+                    effectiveOrientation = device.orientation || 'landscape';
                   }
                 }
                 return `
@@ -3028,6 +3036,12 @@ function setupActions(device) {
     bgInput.addEventListener('input', () => { bgInput.dataset.cleared = ''; });
   }
 
+  const orientSelect = document.getElementById('deviceOrientation');
+  if (orientSelect && !orientSelect.dataset.wired) {
+    orientSelect.dataset.wired = '1';
+    orientSelect.addEventListener('change', () => { orientSelect.dataset.changed = '1'; });
+  }
+
       const loc = document.getElementById('deviceLocSearch');
       const locBody = loc && loc.dataset.changed === '1'
         ? (loc.dataset.lat ? { latitude: Number(loc.dataset.lat), longitude: Number(loc.dataset.lon), location_label: loc.value.trim() || null }
@@ -3039,6 +3053,7 @@ function setupActions(device) {
       const colorModeEl = document.getElementById('epdColorMode');
       const refreshModeEl = document.getElementById('epdRefreshMode');
       const orientationEl = document.getElementById('deviceOrientation');
+      const orientationChanged = orientationEl && orientationEl.dataset.changed === '1';
       if (ditherEl || colorModeEl || refreshModeEl || (isEmbeddedDevice(device) && orientationEl)) {
         let existingProfileObj = {};
         try {
@@ -3052,6 +3067,7 @@ function setupActions(device) {
             existingProfileObj = { ...device.screen_profile };
           }
         } catch (_) {}
+        const shouldWriteOrientation = orientationChanged || Boolean(existingProfileObj.orientation);
         epdProfileUpdate = {
           preset: 'seeed-reterminal-sticky',
           colorDepth: '1bit',
@@ -3061,7 +3077,7 @@ function setupActions(device) {
           ...(colorModeEl ? { colorDepth: colorModeEl.value } : {}),
           ...(ditherEl ? { dither: ditherEl.value || 'floyd-steinberg' } : {}),
           ...(refreshModeEl ? { refreshMode: refreshModeEl.value || 'smart_partial' } : {}),
-          ...(orientationEl ? { orientation: orientationEl.value } : {}),
+          ...(orientationEl && shouldWriteOrientation ? { orientation: orientationEl.value } : {}),
         };
       }
 
@@ -3069,7 +3085,9 @@ function setupActions(device) {
         ...locBody,
         tags: document.getElementById('deviceTags')?.value ?? undefined,
         notes: document.getElementById('deviceNotes').value,
-        orientation: document.getElementById('deviceOrientation').value,
+        orientation: isEmbeddedDevice(device)
+          ? (orientationChanged ? orientationEl?.value : undefined)
+          : document.getElementById('deviceOrientation')?.value,
         // #325: the reset button clears the field, which sends '' and the API stores NULL, putting
         // the screen back on the player's own default rather than pinning it to black.
         background_color: (document.getElementById('devBackground')?.dataset.cleared === '1')

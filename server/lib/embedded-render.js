@@ -26,7 +26,7 @@ const { assertSafeUrl, guardedRequest, SsrfError } = require('./ssrf-guard');
 const REMOTE_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 
 const VALID_FIT_MODES = new Set(['cover', 'contain', 'fill']);
-function safeFitMode(m, fallback = 'cover') {
+function safeFitMode(m, fallback = 'contain') {
   return (typeof m === 'string' && VALID_FIT_MODES.has(m.toLowerCase())) ? m.toLowerCase() : fallback;
 }
 function safeHexColor(c, fallback = '#000000') {

@@ -51,6 +51,10 @@ function render(device, telemetry) {
     talkAvailable: true,
     latestTelemetry: telemetry || {},
     currentDither: 'floyd-steinberg',   // resolved in loadDevice() for embedded panels, outside the slice
+    currentPreset: 'seeed-reterminal-sticky',
+    currentColorDepth: '1bit',
+    currentRefreshMode: 'smart_partial',
+    colorModeBadgeHtml: () => '',
     diagWidget: null,
     // Stubs. Each returns something recognisable so a control cannot be "found" by accident.
     t: (key) => key,

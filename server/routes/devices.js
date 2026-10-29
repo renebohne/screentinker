@@ -878,7 +878,7 @@ router.put('/:id', (req, res) => {
   if (locUpdate) for (const [k, v] of Object.entries(locUpdate)) { updates.push(`${k} = ?`); values.push(v); }
   if (device.client_type === 'embedded' && orientation !== undefined) {
     updates.push('reported_orientation = ?');
-    values.push(orientation);
+    values.push(null);
     if (screen_profile === undefined) {
       let profileObj = {};
       try {

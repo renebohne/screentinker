@@ -427,7 +427,7 @@ async function postprocess(pngBuffer, profile) {
   if (img.bitmap.width !== width || img.bitmap.height !== height) {
     const fitMode = (typeof profile.fitMode === 'string' && ['cover', 'contain', 'fill'].includes(profile.fitMode.toLowerCase()))
       ? profile.fitMode.toLowerCase()
-      : 'contain';
+      : 'cover';
     const bgColorHex = safeHexColor(profile.backgroundColor, '#000000');
     const bgRgba = parseColorToRgba(bgColorHex, 0x000000FF);
     const canvas = new Jimp({ width, height, color: bgRgba });
