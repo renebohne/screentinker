@@ -140,7 +140,7 @@ Fetches the pre-rendered image for the current playlist item.
 - **`rotation`** *(query, optional)*: The same as `X-ST-Device-Rotation`, for this request.
 - **`format`** *(query, optional)*: Override output format (`x-epd-packed`, `x-epd-gray4`, `x-epd-spectra6`, `x-epd-gray16`, `png`, `jpeg`, `bmp`, `raw`).
 - **`dither`** *(query, optional)*: Override dithering algorithm (`floyd-steinberg`, `atkinson`, `none`).
-- **`mode`** *(query, optional)*: `layout` (forces multi-zone layout rendering), `single` (forces single-item rendering). When omitted, automatically renders in multi-zone layout mode if the device has an assigned multi-zone layout (`zones.length > 1`), or single-item mode otherwise (inheriting `fit_mode` and `background_color` from the zone when a 1-zone layout is assigned).
+- **`mode`** *(query, optional)*: `layout` (forces multi-zone layout rendering), `single` (forces single-item rendering). When omitted, automatically renders in multi-zone layout mode if the device has an assigned multi-zone layout (`zones.length > 1`), or single-item mode otherwise (inheriting `background_color` from the zone when a 1-zone layout is assigned).
 - **`item`** *(query, optional)*: Force a specific playlist item index (0-based integer) for step testing or previewing.
 - **`preview`** *(query, optional)*: Set `preview=1` to bypass ETag 304 check and cache read/write (always renders live).
 
