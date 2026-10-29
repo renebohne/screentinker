@@ -4,6 +4,17 @@
 
 ### Added
 
+- **Single-item image fit modes (`cover`, `contain`, `fill`), 1-zone layout inheritance, and
+  dashboard orientation support for embedded displays.** Single-item image renders on `/api/embedded/render`
+  now honor playlist item `fit_mode` (`cover`, `contain`, `fill`) and composite transparent PNGs or
+  letterboxed `contain` frames onto the device's `background_color` (defaulting to `#000000`). When
+  a 1-zone layout is assigned, the single-item render path inherits the zone's `fit_mode` and
+  `background_color`. Changing `fit_mode`, `background_color`, `orientation`, `colorDepth`, or
+  `dither` invalidates the render cache key and triggers `X-ST-Refresh-Mode: full`. Saving a changed
+  **Orientation** on an embedded device's Settings page now persists `screen_profile.orientation`
+  and clears `reported_orientation` so operators can set a panel's orientation from the dashboard
+  when the firmware does not override it on every poll.
+
 - **Dynamic color modes for Seeed reTerminal E-Series embedded devices: 1-bit mono and 4-level
   grayscale (Gray4).** The reTerminal Sticky and E1001 profiles now declare
   `supportedColorModes: ['1bit', 'gray4']`, and the dashboard's device settings offer a Color Mode
