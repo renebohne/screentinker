@@ -1302,10 +1302,11 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
 
   // ── Cache check ─────────────────────────────────────────────────────────────
   const dynamicRev = dynamicRevFor(item, Math.floor(Date.now() / 1000));
+  const fitSuffix = (item && item.fit_mode) ? `_${item.fit_mode.toLowerCase()}` : '';
 
   const key = cacheKey(
     device.id,
-    item.content_id || item.widget_id || item.id || 'item',
+    `${item.content_id || item.widget_id || item.id || 'item'}${fitSuffix}`,
     dynamicRev,
     profile
   );
@@ -1367,7 +1368,11 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
 
   for (let attempt = 0; attempt < total; attempt++) {
     try {
-      renderResult = await render(renderItem, renderContent, profile, { signal });
+      renderResult = await render(renderItem, renderContent, profile, {
+        signal,
+        device,
+        backgroundColor: device?.background_color,
+      });
       if (!renderResult.unsupported) break;
     } catch (e) {
       console.warn(`[embedded] item ${renderIndex} render error: ${e.message}`);

@@ -422,8 +422,19 @@ async function postprocess(pngBuffer, profile) {
 
   let img = await Jimp.fromBuffer(pngBuffer);
 
-  // Cover resize: crop to fill target box without letterboxing
-  img.cover({ w: width, h: height });
+  // Resize if dimensions do not already match the target box
+  if (img.bitmap.width !== width || img.bitmap.height !== height) {
+    const fitMode = (typeof profile.fitMode === 'string' && ['cover', 'contain', 'fill'].includes(profile.fitMode.toLowerCase()))
+      ? profile.fitMode.toLowerCase()
+      : 'cover';
+    if (fitMode === 'contain') {
+      img.contain({ w: width, h: height });
+    } else if (fitMode === 'fill') {
+      img.resize({ w: width, h: height });
+    } else {
+      img.cover({ w: width, h: height });
+    }
+  }
 
   if (profile.mcuTranspose) {
     // reTerminal firmware (lib/embedded-profiles.js, "WHO TRANSPOSES"): the frame goes out as

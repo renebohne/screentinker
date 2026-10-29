@@ -26,8 +26,8 @@ const { assertSafeUrl, guardedRequest, SsrfError } = require('./ssrf-guard');
 const REMOTE_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 
 const VALID_FIT_MODES = new Set(['cover', 'contain', 'fill']);
-function safeFitMode(m) {
-  return (typeof m === 'string' && VALID_FIT_MODES.has(m.toLowerCase())) ? m.toLowerCase() : 'contain';
+function safeFitMode(m, fallback = 'contain') {
+  return (typeof m === 'string' && VALID_FIT_MODES.has(m.toLowerCase())) ? m.toLowerCase() : fallback;
 }
 function safeHexColor(c, fallback = '#000000') {
   if (!c || typeof c !== 'string') return fallback;
@@ -274,7 +274,7 @@ function releasePageSlot() {
   }
 }
 
-async function renderRemoteImage(content, profile) {
+async function renderRemoteImage(content, profile, options = {}, item = null) {
   const url = content.remote_url;
   if (!url) return null;
 
@@ -303,7 +303,16 @@ async function renderRemoteImage(content, profile) {
 
   const buf = response.buffer;
   const img = await Jimp.fromBuffer(buf);
-  img.cover({ w: profile.width, h: profile.height });
+  const fitMode = safeFitMode(item && item.fit_mode, 'cover');
+  if (fitMode === 'cover') {
+    img.cover({ w: profile.width, h: profile.height });
+  } else if (fitMode === 'fill') {
+    img.resize({ w: profile.width, h: profile.height });
+  } else {
+    const bgColorHex = safeHexColor(options?.device?.background_color || options?.backgroundColor, '#000000');
+    img.background = parseColorToRgba(bgColorHex, 0x000000FF);
+    img.contain({ w: profile.width, h: profile.height });
+  }
   return img.getBuffer('image/png');
 }
 
@@ -718,7 +727,7 @@ async function render(item, content, screenProfile, options = {}) {
     // (a dashboard/web page) skips the guarded image GET and goes straight to the browser render —
     // both cheaper and cleaner than fetching an HTML page just to discover it is not an image.
     const maybeImage = !content.mime_type || looksLikeImage(content.remote_url, content.mime_type);
-    const png = maybeImage ? await renderRemoteImage(content, profile) : null;
+    const png = maybeImage ? await renderRemoteImage(content, profile, options, item) : null;
     if (png) return { png };
 
     try {
@@ -746,7 +755,16 @@ async function render(item, content, screenProfile, options = {}) {
       try {
         const fileBuffer = fs.readFileSync(safe);
         const img = await Jimp.fromBuffer(fileBuffer);
-        img.cover({ w: profile.width, h: profile.height });
+        const fitMode = safeFitMode(item && item.fit_mode, 'cover');
+        if (fitMode === 'cover') {
+          img.cover({ w: profile.width, h: profile.height });
+        } else if (fitMode === 'fill') {
+          img.resize({ w: profile.width, h: profile.height });
+        } else {
+          const bgColorHex = safeHexColor(options?.device?.background_color || options?.backgroundColor, '#000000');
+          img.background = parseColorToRgba(bgColorHex, 0x000000FF);
+          img.contain({ w: profile.width, h: profile.height });
+        }
         const png = await img.getBuffer('image/png');
         return { png };
       } catch (e) {
