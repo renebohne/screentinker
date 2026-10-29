@@ -3,6 +3,7 @@
 const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
 
+const h = require('./helpers/embedded-real-db').boot();
 const { parseProfile } = require('../lib/embedded-profiles');
 const {
   decideRefreshModeHeader,
@@ -13,8 +14,9 @@ const {
 } = require('../routes/embedded');
 
 describe('Ticket S5: Server Refresh Mode Hinting Logic', () => {
-  after(() => {
+  after(async () => {
     _lastRendered.clear();
+    await h.close();
   });
 
   test('devices with supportsPartialRefresh: false always get "full"', () => {
@@ -165,5 +167,122 @@ describe('Ticket S5: Server Refresh Mode Hinting Logic', () => {
     assert.equal(decideRefreshModeHeader(devId, sticky, { ...baseState, backgroundColor: '#FFFFFF' }), 'full');
 
     _lastRendered.clear();
+  });
+
+  test('hasIfNoneMatch: false returns "full" even when previous frame matches (Item 5 unit test)', () => {
+    const sticky = parseProfile('seeed-reterminal-sticky');
+    const devId = 'dev-reboot-unit';
+    recordRenderedFrame(devId, { itemIndex: 0, contentId: 'c1', layoutId: null });
+
+    // With hasIfNoneMatch: false (device rebooted, no ETag sent)
+    const mode = decideRefreshModeHeader(devId, sticky, { itemIndex: 0, contentId: 'c1', layoutId: null, hasIfNoneMatch: false });
+    assert.equal(mode, 'full', 'must advise full refresh after cold boot / missing If-None-Match');
+
+    // With hasIfNoneMatch: true (subsequent poll sent ETag)
+    const mode2 = decideRefreshModeHeader(devId, sticky, { itemIndex: 0, contentId: 'c1', layoutId: null, hasIfNoneMatch: true });
+    assert.equal(mode2, 'partial');
+
+    // With hasIfNoneMatch: undefined (backwards compatibility for direct calls)
+    const mode3 = decideRefreshModeHeader(devId, sticky, { itemIndex: 0, contentId: 'c1', layoutId: null });
+    assert.equal(mode3, 'partial');
+  });
+
+  test('HTTP: poll without If-None-Match after matching frame advises "full" (Item 5)', async () => {
+    const base = await h.ready();
+    const p = await h.mkPanel('seeed-reterminal-sticky');
+
+    // 1. Initial poll -> 200, full refresh, get ETag
+    const res1 = await fetch(`${base}/render?device_id=${p.id}`, {
+      headers: { Authorization: `Bearer ${p.token}` },
+    });
+    assert.equal(res1.status, 200);
+    assert.equal(res1.headers.get('x-st-refresh-mode'), 'full');
+    const etag1 = res1.headers.get('etag');
+    assert.ok(etag1);
+
+    // 2. Poll with stale If-None-Match (simulating content update on device holding frame)
+    const res2 = await fetch(`${base}/render?device_id=${p.id}`, {
+      headers: { Authorization: `Bearer ${p.token}`, 'If-None-Match': '"stale-etag"' },
+    });
+    assert.equal(res2.status, 200);
+    assert.equal(res2.headers.get('x-st-refresh-mode'), 'partial', 'matching item with If-None-Match should advise partial');
+
+    // 3. Poll without If-None-Match (simulating device reboot)
+    const res3 = await fetch(`${base}/render?device_id=${p.id}`, {
+      headers: { Authorization: `Bearer ${p.token}` },
+    });
+    assert.equal(res3.status, 200);
+    assert.equal(res3.headers.get('x-st-refresh-mode'), 'full', 'poll without If-None-Match must advise full refresh');
+  });
+
+  test('HTTP: fallback loop advancing to another item recomputes X-ST-Refresh-Mode (Item 6)', async () => {
+    const base = await h.ready();
+    const p = await h.mkPanel('seeed-reterminal-sticky');
+
+    // Insert an unsupported content item (e.g. video or invalid file) as item 0
+    const badCid = 'c-bad-' + p.id;
+    h.insert('content', {
+      id: badCid,
+      workspace_id: h.ids.ws,
+      user_id: h.ids.user,
+      filename: 'video.mp4',
+      filepath: 'nonexistent-video.mp4',
+      mime_type: 'video/mp4',
+      file_size: 100,
+      created_at: 1,
+      updated_at: 1,
+    });
+
+    const plRow = h.db.prepare('SELECT playlist_id FROM devices WHERE id = ?').get(p.id);
+    const validItem = h.db.prepare('SELECT published_snapshot FROM playlists WHERE id = ?').get(plRow.playlist_id);
+    const goodCid = JSON.parse(validItem.published_snapshot)[0].content_id;
+
+    // Set up 2-item playlist: item 0 is bad, item 1 is good
+    const newSnapshot = [
+      { id: 'pi-0-' + p.id, content_id: badCid, duration_sec: 30, enabled: 1 },
+      { id: 'pi-1-' + p.id, content_id: goodCid, duration_sec: 30, enabled: 1 },
+    ];
+    h.db.prepare('UPDATE playlists SET published_snapshot = ? WHERE id = ?').run(JSON.stringify(newSnapshot), plRow.playlist_id);
+
+    // Poll once on item 1 so item 1 is recorded in _lastRendered
+    const res1 = await fetch(`${base}/render?device_id=${p.id}&item=1`, {
+      headers: { Authorization: `Bearer ${p.token}` },
+    });
+    assert.equal(res1.status, 200);
+    assert.equal(res1.headers.get('x-st-item-index'), '1');
+
+    // Now poll item 0 with If-None-Match. Item 0 fails/unsupported, falls back to item 1.
+    // Refresh mode must reflect item 1 actually served (matching previous render -> partial),
+    // not item 0 (which would have been full due to index/content change from item 1 to 0).
+    const res2 = await fetch(`${base}/render?device_id=${p.id}&item=0`, {
+      headers: { Authorization: `Bearer ${p.token}`, 'If-None-Match': '"stale-etag"' },
+    });
+    assert.equal(res2.status, 200);
+    assert.equal(res2.headers.get('x-st-item-index'), '1', 'fallback served item 1');
+    assert.equal(res2.headers.get('x-st-refresh-mode'), 'partial', 'refresh mode must reflect item 1 actually served');
+  });
+
+  test('HTTP: scheduled_off 304 response includes X-ST-Color-Mode and X-ST-Refresh-Mode (Item 9)', async () => {
+    const base = await h.ready();
+    const p = await h.mkPanel('seeed-reterminal-sticky');
+
+    // Create 24/7 OFF power schedule
+    const schedId = 'sched-off-' + p.id;
+    const windows = JSON.stringify([{ days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '24:00' }]);
+    h.db.prepare('INSERT INTO display_power_schedules (id, workspace_id, name, device_id, enabled, timezone, windows) VALUES (?, ?, ?, ?, 1, ?, ?)')
+      .run(schedId, h.ids.ws, 'Off Sched', p.id, 'UTC', windows);
+
+    const res = await fetch(`${base}/render?device_id=${p.id}`, {
+      headers: {
+        Authorization: `Bearer ${p.token}`,
+        'If-None-Match': '"cached-etag-123"',
+      },
+    });
+    assert.equal(res.status, 304);
+    assert.equal(res.headers.get('x-st-power-state'), 'scheduled_off');
+    assert.equal(res.headers.get('x-st-color-mode'), '1bit');
+    assert.equal(res.headers.get('x-st-refresh-mode'), 'partial');
+
+    h.db.prepare('DELETE FROM display_power_schedules WHERE id = ?').run(schedId);
   });
 });

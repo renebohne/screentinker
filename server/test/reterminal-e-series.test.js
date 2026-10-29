@@ -1077,6 +1077,18 @@ describe('reTerminal E-Series Registration & Route Handling', () => {
     assert.equal(resGray.status, 400);
     const bodyGray = await resGray.json();
     assert.ok(bodyGray.error.includes('not available for gray16'));
+
+    // dev-gray4 is gray4
+    db.prepare(`
+      INSERT OR IGNORE INTO devices (id, name, workspace_id, status, device_token, playlist_id, screen_profile)
+      VALUES ('dev-gray4', 'Gray4 Dev', 'ws-test', 'online', 'tok-gray4', 'pl-e1001', '{"preset":"seeed-reterminal-sticky","colorDepth":"gray4"}')
+    `).run();
+    const resGray4 = await fetch(`${baseUrl}/render?device_id=dev-gray4&format=png`, {
+      headers: { 'Authorization': 'Bearer tok-gray4' },
+    });
+    assert.equal(resGray4.status, 400);
+    const bodyGray4 = await resGray4.json();
+    assert.ok(bodyGray4.error.includes('not available for gray4 panels'));
   });
 
   test('update command delivery via X-ST-Command header', async () => {

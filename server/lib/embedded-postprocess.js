@@ -27,7 +27,7 @@
  */
 
 const { Jimp } = require('jimp');
-const { parseColorToRgba, safeHexColor } = require('./embedded-render');
+const { parseColorToRgba, safeHexColor, fitImageOntoCanvas } = require('./embedded-render');
 
 // ─── Dithering algorithms ──────────────────────────────────────────────────────
 
@@ -428,18 +428,7 @@ async function postprocess(pngBuffer, profile) {
     const fitMode = (typeof profile.fitMode === 'string' && ['cover', 'contain', 'fill'].includes(profile.fitMode.toLowerCase()))
       ? profile.fitMode.toLowerCase()
       : 'cover';
-    const bgColorHex = safeHexColor(profile.backgroundColor, '#000000');
-    const bgRgba = parseColorToRgba(bgColorHex, 0x000000FF);
-    const canvas = new Jimp({ width, height, color: bgRgba });
-    if (fitMode === 'fill') {
-      img.resize({ w: width, h: height });
-    } else if (fitMode === 'cover') {
-      img.cover({ w: width, h: height });
-    } else {
-      img.contain({ w: width, h: height });
-    }
-    canvas.composite(img, 0, 0);
-    img = canvas;
+    img = fitImageOntoCanvas(img, width, height, fitMode, profile.backgroundColor);
   }
 
   if (profile.mcuTranspose) {

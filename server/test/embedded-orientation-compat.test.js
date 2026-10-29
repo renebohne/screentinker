@@ -225,3 +225,102 @@ test('saving settings updates orientation and preserves existing custom screen_p
   assert.equal(devNext.res.headers.get('x-st-screen-height'), '800');
   assert.equal(devNext.res.headers.get('x-st-orientation'), 'portrait');
 });
+
+test('PUT /api/devices/:id with string screen_profile preserves orientation in screen_profile', async () => {
+  const base = await h.ready();
+  const rootUrl = base.replace(/\/api\/embedded\/?$/, '');
+  const userJwt = h.sessionToken();
+
+  // Test 1a: preset string
+  const p1 = await h.mkPanel('seeed-reterminal-sticky');
+  const res1 = await fetch(`${rootUrl}/api/devices/${p1.id}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${userJwt}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orientation: 'portrait', screen_profile: 'seeed-reterminal-sticky' }),
+  });
+  assert.equal(res1.status, 200);
+  const row1 = h.db.prepare('SELECT screen_profile, orientation FROM devices WHERE id = ?').get(p1.id);
+  assert.equal(row1.orientation, 'portrait');
+  const prof1 = JSON.parse(row1.screen_profile);
+  assert.equal(prof1.preset, 'seeed-reterminal-sticky');
+  assert.equal(prof1.orientation, 'portrait');
+
+  // Test 1b: JSON string
+  const p2 = await h.mkPanel('seeed-reterminal-sticky');
+  const res2 = await fetch(`${rootUrl}/api/devices/${p2.id}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${userJwt}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orientation: 'portrait', screen_profile: '{"preset":"seeed-reterminal-sticky"}' }),
+  });
+  assert.equal(res2.status, 200);
+  const row2 = h.db.prepare('SELECT screen_profile, orientation FROM devices WHERE id = ?').get(p2.id);
+  assert.equal(row2.orientation, 'portrait');
+  const prof2 = JSON.parse(row2.screen_profile);
+  assert.equal(prof2.preset, 'seeed-reterminal-sticky');
+  assert.equal(prof2.orientation, 'portrait');
+});
+
+test('echoing unchanged orientation does not clear reported_orientation', async () => {
+  const base = await h.ready();
+  const rootUrl = base.replace(/\/api\/embedded\/?$/, '');
+  const userJwt = h.sessionToken();
+
+  const p = await h.mkPanel('seeed-reterminal-e1001', { extra: { reported_orientation: 'portrait' } });
+  assert.equal(h.db.prepare('SELECT reported_orientation FROM devices WHERE id = ?').get(p.id).reported_orientation, 'portrait');
+
+  const res = await fetch(`${rootUrl}/api/devices/${p.id}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${userJwt}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ notes: 'hello', orientation: 'portrait' }),
+  });
+  assert.equal(res.status, 200);
+
+  const row = h.db.prepare('SELECT reported_orientation, notes FROM devices WHERE id = ?').get(p.id);
+  assert.equal(row.notes, 'hello');
+  assert.equal(row.reported_orientation, 'portrait', 'reported_orientation must not be cleared when orientation is unchanged');
+});
+
+test('echoing default landscape orientation does not inject orientation into screen_profile', async () => {
+  const base = await h.ready();
+  const rootUrl = base.replace(/\/api\/embedded\/?$/, '');
+  const userJwt = h.sessionToken();
+
+  const p = await h.mkPanel('seeed-reterminal-sticky');
+  const initialRow = h.db.prepare('SELECT screen_profile, orientation, reported_orientation FROM devices WHERE id = ?').get(p.id);
+  assert.equal(initialRow.screen_profile, 'seeed-reterminal-sticky');
+  assert.equal(initialRow.reported_orientation, null);
+  assert.equal(initialRow.orientation, 'landscape');
+
+  const res = await fetch(`${rootUrl}/api/devices/${p.id}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${userJwt}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ notes: 'hello', orientation: 'landscape' }),
+  });
+  assert.equal(res.status, 200);
+
+  const row = h.db.prepare('SELECT screen_profile, reported_orientation FROM devices WHERE id = ?').get(p.id);
+  assert.equal(row.screen_profile, 'seeed-reterminal-sticky', 'screen_profile should not have orientation injected');
+  assert.equal(row.reported_orientation, null);
+});
+
+test('operator changing orientation clears reported_orientation and sets screen_profile.orientation', async () => {
+  const base = await h.ready();
+  const rootUrl = base.replace(/\/api\/embedded\/?$/, '');
+  const userJwt = h.sessionToken();
+
+  const p = await h.mkPanel('seeed-reterminal-sticky', { extra: { reported_orientation: 'portrait' } });
+  assert.equal(h.db.prepare('SELECT reported_orientation FROM devices WHERE id = ?').get(p.id).reported_orientation, 'portrait');
+
+  const res = await fetch(`${rootUrl}/api/devices/${p.id}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${userJwt}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orientation: 'landscape' }),
+  });
+  assert.equal(res.status, 200);
+
+  const row = h.db.prepare('SELECT screen_profile, orientation, reported_orientation FROM devices WHERE id = ?').get(p.id);
+  assert.equal(row.reported_orientation, null, 'reported_orientation must be cleared to null');
+  assert.equal(row.orientation, 'landscape');
+  const prof = JSON.parse(row.screen_profile);
+  assert.equal(prof.orientation, 'landscape');
+});

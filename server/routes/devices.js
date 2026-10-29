@@ -876,25 +876,35 @@ router.put('/:id', (req, res) => {
   }
   if (normTags !== undefined) { updates.push('tags = ?'); values.push(JSON.stringify(normTags)); }
   if (locUpdate) for (const [k, v] of Object.entries(locUpdate)) { updates.push(`${k} = ?`); values.push(v); }
-  if (device.client_type === 'embedded' && orientation !== undefined) {
-    updates.push('reported_orientation = ?');
-    values.push(null);
-    if (screen_profile === undefined) {
-      let profileObj = {};
-      try {
-        if (typeof device.screen_profile === 'string' && device.screen_profile.startsWith('{')) {
-          profileObj = JSON.parse(device.screen_profile);
-        } else if (typeof device.screen_profile === 'object' && device.screen_profile) {
-          profileObj = { ...device.screen_profile };
-        } else if (typeof device.screen_profile === 'string' && device.screen_profile) {
-          profileObj = { preset: device.screen_profile };
-        }
-      } catch (_) {}
-      profileObj.orientation = orientation;
+  if (device.client_type === 'embedded') {
+    let existingProfileObj = {};
+    try {
+      if (typeof device.screen_profile === 'string' && device.screen_profile.trim().startsWith('{')) {
+        existingProfileObj = JSON.parse(device.screen_profile);
+      } else if (typeof device.screen_profile === 'object' && device.screen_profile) {
+        existingProfileObj = { ...device.screen_profile };
+      } else if (typeof device.screen_profile === 'string' && device.screen_profile) {
+        existingProfileObj = { preset: device.screen_profile };
+      }
+    } catch (_) {}
+
+    const currentEffectiveOrient = existingProfileObj.orientation
+      || device.reported_orientation
+      || device.orientation
+      || 'landscape';
+    const orientationActuallyChanged = orientation !== undefined && orientation !== currentEffectiveOrient;
+
+    if (orientationActuallyChanged) {
+      updates.push('reported_orientation = ?');
+      values.push(null);
+    }
+
+    if (screen_profile === undefined && orientationActuallyChanged) {
+      existingProfileObj.orientation = orientation;
       const { parseProfile } = require('../lib/embedded-profiles');
-      if (parseProfile(profileObj)) {
+      if (parseProfile(existingProfileObj)) {
         updates.push('screen_profile = ?');
-        values.push(JSON.stringify(profileObj));
+        values.push(JSON.stringify(existingProfileObj));
       }
     }
   }
@@ -906,15 +916,31 @@ router.put('/:id', (req, res) => {
     }
     let profileVal = null;
     if (screen_profile !== null && screen_profile !== '') {
-      if (typeof screen_profile === 'object' && orientation !== undefined && !screen_profile.orientation) {
-        screen_profile.orientation = orientation;
+      let profileObj = null;
+      if (typeof screen_profile === 'object' && screen_profile) {
+        profileObj = { ...screen_profile };
+      } else if (typeof screen_profile === 'string') {
+        const trimmed = screen_profile.trim();
+        if (trimmed.startsWith('{')) {
+          try { profileObj = JSON.parse(trimmed); } catch (_) {}
+        }
+        if (!profileObj) {
+          profileObj = { preset: trimmed };
+        }
       }
+
+      if (orientation !== undefined && profileObj && !profileObj.orientation) {
+        profileObj.orientation = orientation;
+      }
+
       const { parseProfile } = require('../lib/embedded-profiles');
-      const parsed = parseProfile(screen_profile);
+      const parsed = parseProfile(profileObj || screen_profile);
       if (!parsed) {
         return res.status(400).json({ error: 'Invalid screen_profile' });
       }
-      profileVal = typeof screen_profile === 'object' ? JSON.stringify(screen_profile) : String(screen_profile);
+      profileVal = (profileObj && (profileObj.orientation || typeof screen_profile === 'object'))
+        ? JSON.stringify(profileObj)
+        : String(screen_profile);
     }
     updates.push('screen_profile = ?'); values.push(profileVal);
   }

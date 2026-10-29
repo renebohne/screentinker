@@ -765,6 +765,8 @@ describe('Embedded HTTP Route & Fallback Handling', () => {
     });
     assert.equal(res.status, 304);
     assert.equal(res.headers.get('x-st-power-state'), 'scheduled_off');
+    assert.equal(res.headers.get('x-st-color-mode'), '1bit');
+    assert.equal(res.headers.get('x-st-refresh-mode'), 'partial');
     assert.equal(res.headers.get('x-st-expires-in'), '3600');
     assert.equal(res.headers.get('x-st-device-id'), devId);
 

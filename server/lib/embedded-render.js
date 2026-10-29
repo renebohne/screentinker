@@ -220,6 +220,20 @@ function parseColorToRgba(hexOrInt, fallback = 0x000000FF) {
   return fallback;
 }
 
+function fitImageOntoCanvas(img, width, height, fitMode, bgColorHex) {
+  const bgRgba = parseColorToRgba(safeHexColor(bgColorHex, '#000000'), 0x000000FF);
+  const canvas = new Jimp({ width, height, color: bgRgba });
+  if (fitMode === 'cover') {
+    img.cover({ w: width, h: height });
+  } else if (fitMode === 'fill') {
+    img.resize({ w: width, h: height });
+  } else {
+    img.contain({ w: width, h: height });
+  }
+  canvas.composite(img, 0, 0);
+  return canvas;
+}
+
 function withTimeout(promise, ms = 15000, timeoutErrorMsg = 'Render timed out') {
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
@@ -304,17 +318,8 @@ async function renderRemoteImage(content, profile, options = {}, item = null) {
   const buf = response.buffer;
   const img = await Jimp.fromBuffer(buf);
   const fitMode = safeFitMode((item && item.fit_mode) || options?.fitMode, options?.defaultFitMode || 'cover');
-  const bgColorHex = safeHexColor(options?.backgroundColor || options?.device?.background_color, '#000000');
-  const bgRgba = parseColorToRgba(bgColorHex, 0x000000FF);
-  const canvas = new Jimp({ width: profile.width, height: profile.height, color: bgRgba });
-  if (fitMode === 'cover') {
-    img.cover({ w: profile.width, h: profile.height });
-  } else if (fitMode === 'fill') {
-    img.resize({ w: profile.width, h: profile.height });
-  } else {
-    img.contain({ w: profile.width, h: profile.height });
-  }
-  canvas.composite(img, 0, 0);
+  const bgColorHex = options?.backgroundColor || options?.device?.background_color;
+  const canvas = fitImageOntoCanvas(img, profile.width, profile.height, fitMode, bgColorHex);
   return canvas.getBuffer('image/png');
 }
 
@@ -758,17 +763,8 @@ async function render(item, content, screenProfile, options = {}) {
         const fileBuffer = fs.readFileSync(safe);
         const img = await Jimp.fromBuffer(fileBuffer);
         const fitMode = safeFitMode((item && item.fit_mode) || options?.fitMode, options?.defaultFitMode || 'cover');
-        const bgColorHex = safeHexColor(options?.backgroundColor || options?.device?.background_color, '#000000');
-        const bgRgba = parseColorToRgba(bgColorHex, 0x000000FF);
-        const canvas = new Jimp({ width: profile.width, height: profile.height, color: bgRgba });
-        if (fitMode === 'cover') {
-          img.cover({ w: profile.width, h: profile.height });
-        } else if (fitMode === 'fill') {
-          img.resize({ w: profile.width, h: profile.height });
-        } else {
-          img.contain({ w: profile.width, h: profile.height });
-        }
-        canvas.composite(img, 0, 0);
+        const bgColorHex = options?.backgroundColor || options?.device?.background_color;
+        const canvas = fitImageOntoCanvas(img, profile.width, profile.height, fitMode, bgColorHex);
         const png = await canvas.getBuffer('image/png');
         return { png };
       } catch (e) {
@@ -896,14 +892,9 @@ async function renderLayoutNative(layout, zoneEntries, screenProfile, options = 
 
     if (img) {
       const fitMode = safeFitMode((entry.item && entry.item.fit_mode) || zone.fit_mode);
-      if (fitMode === 'cover') {
-        img.cover({ w: pixelW, h: pixelH });
-      } else if (fitMode === 'fill') {
-        img.resize({ w: pixelW, h: pixelH });
-      } else {
-        img.contain({ w: pixelW, h: pixelH });
-      }
-      canvas.composite(img, pixelX, pixelY);
+      const zoneBg = zone.background_color || options?.backgroundColor || options?.device?.background_color;
+      const zoneCanvas = fitImageOntoCanvas(img, pixelW, pixelH, fitMode, zoneBg);
+      canvas.composite(zoneCanvas, pixelX, pixelY);
     }
   }
 
@@ -1082,6 +1073,7 @@ module.exports = {
   safeDimension,
   safeLocalImagePath,
   parseColorToRgba,
+  fitImageOntoCanvas,
   safeHexColor,
   safeFitMode,
   withTimeout,

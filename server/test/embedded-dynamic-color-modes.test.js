@@ -160,4 +160,23 @@ describe('Ticket S4: Response Headers & Cache Key', () => {
 
     assert.notEqual(k1, k2, 'Cache key must differ when colorDepth changes so device re-downloads frame');
   });
+
+  test('applyFormatOverride rejects image formats on gray4 panels and allows x-epd-gray4', () => {
+    const { applyFormatOverride } = require('../routes/embedded');
+    const pGray4 = parseProfile(JSON.stringify({
+      preset: 'seeed-reterminal-sticky',
+      colorDepth: 'gray4'
+    }));
+
+    for (const fmt of ['png', 'jpeg', 'jpg', 'bmp']) {
+      const err = applyFormatOverride({ query: { format: fmt } }, pGray4);
+      assert.ok(err, `format=${fmt} should be rejected for gray4`);
+      assert.ok(err.includes('not available for gray4 panels'), `error message should mention gray4: ${err}`);
+    }
+
+    // x-epd-gray4 is recognized as a valid format override
+    const errOverride = applyFormatOverride({ query: { format: 'x-epd-gray4' } }, pGray4);
+    assert.equal(errOverride, null);
+    assert.equal(pGray4.outputFormat, 'x-epd-gray4');
+  });
 });

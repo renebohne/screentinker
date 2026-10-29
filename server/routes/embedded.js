@@ -1031,13 +1031,13 @@ function resolveOrientationRotation(req, device) {
  * request cannot be honoured by handing back nibbles. Refuse it rather than label nibbles as an image.
  */
 const IMAGE_FORMATS = new Set(['png', 'jpeg', 'jpg', 'bmp']);
-const PACKED_NIBBLE_DEPTHS = new Set(['spectra6', 'gray16']);
+const PACKED_CONTROLLER_DEPTHS = new Set(['spectra6', 'gray16', 'gray4']);
 function applyFormatOverride(req, profile) {
   if (!req.query.format) return null;
   const fmt = String(req.query.format).toLowerCase();
-  const known = fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed' || fmt === 'x-epd-spectra6' || fmt === 'x-epd-gray16';
+  const known = fmt === 'png' || fmt === 'jpeg' || fmt === 'jpg' || fmt === 'bmp' || fmt === 'raw' || fmt === 'x-epd-packed' || fmt === 'x-epd-spectra6' || fmt === 'x-epd-gray16' || fmt === 'x-epd-gray4';
   if (!known) return null;
-  if (PACKED_NIBBLE_DEPTHS.has(profile.colorDepth) && IMAGE_FORMATS.has(fmt)) {
+  if (PACKED_CONTROLLER_DEPTHS.has(profile.colorDepth) && IMAGE_FORMATS.has(fmt)) {
     return `format=${fmt} is not available for ${profile.colorDepth} panels: the response is packed controller nibbles`;
   }
   profile.outputFormat = fmt;
@@ -1218,6 +1218,9 @@ function decideRefreshModeHeader(deviceId, profile, current) {
   if (!profile.supportsPartialRefresh || profile.refreshMode === 'always_full') {
     return 'full';
   }
+  if (current && current.hasIfNoneMatch === false) {
+    return 'full';
+  }
   const prev = _lastRendered.get(deviceId);
   if (!prev) {
     return 'full';
@@ -1296,6 +1299,8 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
       'X-ST-Device-Id': device.id,
       'X-ST-Expires-In': String(power.sleepSeconds),
       'X-ST-Power-State': 'scheduled_off',
+      'X-ST-Color-Mode': profile.colorDepth || '1bit',
+      'X-ST-Refresh-Mode': (profile.supportsPartialRefresh && profile.refreshMode !== 'always_full') ? 'partial' : 'full',
     };
     if (opts.pendingCmd) {
       offHeaders['X-ST-Command'] = opts.pendingCmd;
@@ -1363,6 +1368,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     dither: profile.dither,
     fitMode: effectiveFitMode,
     backgroundColor: effectiveBg || null,
+    hasIfNoneMatch: isPreview ? undefined : Boolean(req.headers && req.headers['if-none-match']),
   };
 
   // Common response headers
@@ -1468,6 +1474,7 @@ async function handleRenderStandard(req, res, device, profile, opts = {}) {
     currentRenderState.itemIndex = itemIndex;
     currentRenderState.contentId = content?.content_id || item?.content_id || item?.id || '';
     currentRenderState.fitMode = nextFitMode;
+    headers['X-ST-Refresh-Mode'] = decideRefreshModeHeader(device.id, profile, currentRenderState);
   }
 
   // ── Post-process ─────────────────────────────────────────────────────────────
@@ -1570,6 +1577,8 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
       'X-ST-Device-Id': device.id,
       'X-ST-Expires-In': String(power.sleepSeconds),
       'X-ST-Power-State': 'scheduled_off',
+      'X-ST-Color-Mode': profile.colorDepth || '1bit',
+      'X-ST-Refresh-Mode': (profile.supportsPartialRefresh && profile.refreshMode !== 'always_full') ? 'partial' : 'full',
     };
     if (cmdOpts.pendingCmd) {
       offHeaders['X-ST-Command'] = cmdOpts.pendingCmd;
@@ -1617,6 +1626,7 @@ async function handleRenderLayout(req, res, device, profile, opts = {}) {
     dither: profile.dither,
     fitMode: null,
     backgroundColor: device?.background_color || null,
+    hasIfNoneMatch: isPreview ? undefined : Boolean(req.headers && req.headers['if-none-match']),
   };
 
   const headers = {
@@ -2016,5 +2026,6 @@ module.exports.recordRenderedFrame = recordRenderedFrame;
 module.exports._lastRendered = _lastRendered;
 module.exports.LAST_RENDERED_TTL_MS = LAST_RENDERED_TTL_MS;
 module.exports.LAST_RENDERED_MAX_ENTRIES = LAST_RENDERED_MAX_ENTRIES;
+module.exports.applyFormatOverride = applyFormatOverride;
 
 
