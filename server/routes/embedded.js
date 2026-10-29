@@ -857,7 +857,10 @@ function resolveLayoutItems(deviceId, forceIndex, { advance = true } = {}) {
     expiresList.push(expiresIn);
 
     const dRev = dynamicRevFor(item, now);
-    const fitSuffix = (item.fit_mode || zone.fit_mode) ? `_${safeFitMode(item.fit_mode || zone.fit_mode)}` : '';
+    // Only a non-default fit goes into the key: zone.fit_mode is always set ('contain' by default),
+    // and keying on it would change every multi-zone panel's ETag on upgrade for nothing.
+    const zoneFit = safeFitMode(item.fit_mode || zone.fit_mode || 'contain');
+    const fitSuffix = zoneFit !== 'contain' ? `_${zoneFit}` : '';
     dynamicRevParts.push(`z_${zone.id}_${item.content_id || item.widget_id || item.id || 'item'}${fitSuffix}_${dRev}`);
 
     zoneEntries.push({ zone, item, content: item });
@@ -1144,9 +1147,12 @@ router.get('/render', resolveAuth, async (req, res) => {
 
     if (layoutResolved && layoutResolved.zoneEntries.length === 1) {
       const singleEntry = layoutResolved.zoneEntries[0];
+      // ⚠️ Not the zone's fit_mode: layout_zones.fit_mode is NOT NULL DEFAULT 'contain', so "inherited"
+      // and "never set" look the same, and every 1-zone layout in the field would switch from the
+      // cover it has always rendered with to contain (letterboxed, new ETag, fleet-wide redraw).
+      // A per-item fit_mode still applies.
       return handleRenderStandard(req, res, device, profile, {
         ...renderOpts,
-        zoneFitMode: singleEntry.zone?.fit_mode,
         zoneBackgroundColor: singleEntry.zone?.background_color,
       });
     }

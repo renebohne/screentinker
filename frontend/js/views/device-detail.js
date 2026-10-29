@@ -3069,11 +3069,12 @@ function setupActions(device) {
           }
         } catch (_) {}
         const shouldWriteOrientation = orientationChanged || Boolean(existingProfileObj.orientation);
+        // ⚠️ No colorDepth/refreshMode/dither defaults here: this runs for EVERY embedded screen
+        // (anything with an orientation field), and a default would override the preset's own value
+        // whenever the stored profile does not name it, e.g. turn a generic RGB565 TFT into a 1-bit
+        // panel on an unrelated Save. Only what is stored and what the page shows is written.
         epdProfileUpdate = {
           preset: 'seeed-reterminal-sticky',
-          colorDepth: '1bit',
-          dither: 'floyd-steinberg',
-          refreshMode: 'smart_partial',
           ...existingProfileObj,
           ...(colorModeEl ? { colorDepth: colorModeEl.value } : {}),
           ...(ditherEl ? { dither: ditherEl.value || 'floyd-steinberg' } : {}),

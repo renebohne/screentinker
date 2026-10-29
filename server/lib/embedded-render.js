@@ -304,7 +304,7 @@ async function renderRemoteImage(content, profile, options = {}, item = null) {
   const buf = response.buffer;
   const img = await Jimp.fromBuffer(buf);
   const fitMode = safeFitMode((item && item.fit_mode) || options?.fitMode, options?.defaultFitMode || 'cover');
-  const bgColorHex = safeHexColor(options?.device?.background_color || options?.backgroundColor, '#000000');
+  const bgColorHex = safeHexColor(options?.backgroundColor || options?.device?.background_color, '#000000');
   const bgRgba = parseColorToRgba(bgColorHex, 0x000000FF);
   const canvas = new Jimp({ width: profile.width, height: profile.height, color: bgRgba });
   if (fitMode === 'cover') {
@@ -758,7 +758,7 @@ async function render(item, content, screenProfile, options = {}) {
         const fileBuffer = fs.readFileSync(safe);
         const img = await Jimp.fromBuffer(fileBuffer);
         const fitMode = safeFitMode((item && item.fit_mode) || options?.fitMode, options?.defaultFitMode || 'cover');
-        const bgColorHex = safeHexColor(options?.device?.background_color || options?.backgroundColor, '#000000');
+        const bgColorHex = safeHexColor(options?.backgroundColor || options?.device?.background_color, '#000000');
         const bgRgba = parseColorToRgba(bgColorHex, 0x000000FF);
         const canvas = new Jimp({ width: profile.width, height: profile.height, color: bgRgba });
         if (fitMode === 'cover') {
@@ -825,7 +825,7 @@ async function renderLayoutNative(layout, zoneEntries, screenProfile, options = 
     return za - zb;
   });
 
-  const bgColorHex = safeHexColor(options?.device?.background_color || options?.backgroundColor, '#000000');
+  const bgColorHex = safeHexColor(options?.backgroundColor || options?.device?.background_color, '#000000');
   const layoutBg = parseColorToRgba(bgColorHex, 0x000000FF);
   const canvas = new Jimp({ width: profile.width, height: profile.height, color: layoutBg });
 
@@ -1031,7 +1031,7 @@ async function renderLayout(layout, zoneEntries, screenProfile, options = {}) {
   }
 
   const baseUrl = localBaseUrl();
-  const compositeBg = safeHexColor(options?.device?.background_color || options?.backgroundColor, '#000000');
+  const compositeBg = safeHexColor(options?.backgroundColor || options?.device?.background_color, '#000000');
   const compositeHtml = `<!DOCTYPE html>
 <html>
 <head>

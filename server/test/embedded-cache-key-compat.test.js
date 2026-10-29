@@ -73,3 +73,23 @@ test('a custom non-black background color gets its own key, while default black 
   const redKey = cacheKey('d', 'i', 1, plain, { backgroundColor: '#FF0000' });
   assert.notEqual(redKey, whiteKey);
 });
+
+test('a panel on an existing 1-zone layout keeps main\'s ETag and its cover fit (zone fit_mode is NOT NULL DEFAULT \'contain\')', async () => {
+  // #748 review: the zone's fit_mode was inherited by single-item renders, but the column default
+  // means every untouched zone says 'contain', so every 1-zone panel in the field switched from
+  // cover to letterboxed contain and missed its 304. The zone row here is inserted with the
+  // schema's own defaults (no fit_mode, no background_color), as a fielded layout has them.
+  const base = await h.ready();
+  const p = await h.mkPanel('waveshare-7.5in-v2');
+  const lay = 'lay-' + p.id, zone = 'zone-' + p.id;
+  h.insert('layouts', { id: lay, name: 'One zone', workspace_id: h.ids.ws, user_id: h.ids.user });
+  h.db.prepare("INSERT INTO layout_zones (id, layout_id, name) VALUES (?, ?, 'Main')").run(zone, lay);
+  assert.equal(h.db.prepare('SELECT fit_mode FROM layout_zones WHERE id = ?').get(zone).fit_mode, 'contain', 'the real default');
+  h.db.prepare('UPDATE devices SET layout_id = ? WHERE id = ?').run(lay, p.id);
+
+  const res = await fetch(`${base}/render?device_id=${p.id}`, { headers: { Authorization: `Bearer ${p.token}` } });
+  assert.equal(res.status, 200);
+  const cid = 'c-' + p.id;
+  const rev = h.db.prepare('SELECT COALESCE(NULLIF(updated_at, 0), created_at) AS rev FROM content WHERE id = ?').get(cid).rev;
+  assert.equal(res.headers.get('etag'), `"${mainCacheKey(p.id, cid, rev, parseProfile('waveshare-7.5in-v2'))}"`);
+});
