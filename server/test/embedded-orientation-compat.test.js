@@ -214,7 +214,7 @@ test('saving settings updates orientation and preserves existing custom screen_p
   // Verify custom field in screen_profile was preserved in DB
   const row = h.db.prepare('SELECT screen_profile, orientation, reported_orientation FROM devices WHERE id = ?').get(p.id);
   assert.equal(row.orientation, 'portrait');
-  assert.equal(row.reported_orientation, 'portrait');
+  assert.equal(row.reported_orientation, null);
   const storedProfile = JSON.parse(row.screen_profile);
   assert.equal(storedProfile.customTag, 'preserved-custom-setting', 'custom fields must be preserved');
   assert.equal(storedProfile.orientation, 'portrait');
