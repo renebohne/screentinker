@@ -129,7 +129,7 @@ function toRGB565(rgba) {
 
 /** Pack RGBA bitmap to raw 24-bit RGB888. 3 bytes per pixel. */
 function toRGB888(rgba) {
-  const pixels = rgba.length / 4;
+  const pixels = Math.floor(rgba.length / 4);
   const out = Buffer.allocUnsafe(pixels * 3);
   for (let i = 0; i < pixels; i++) {
     out[i * 3]     = rgba[i * 4];     // R

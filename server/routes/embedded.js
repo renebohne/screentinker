@@ -890,15 +890,25 @@ router.post('/pair/register', (req, res) => {
   const newToken = crypto.randomBytes(32).toString('hex');
   const claimSecret = crypto.randomBytes(32).toString('hex');
   const parsed = parseProfile(screen_profile || 'seeed-reterminal-sticky');
-  const width = parseInt(screen_width) || parsed?.width || 800;
-  const height = parseInt(screen_height) || parsed?.height || 480;
+  let width = parseInt(screen_width) || parsed?.width || 800;
+  let height = parseInt(screen_height) || parsed?.height || 480;
   let profile;
   if (typeof screen_profile === 'object' && screen_profile !== null) {
     profile = JSON.stringify(screen_profile);
   } else if (typeof screen_profile === 'string' && getPreset(screen_profile)) {
     const presetObj = getPreset(screen_profile);
-    if ((screen_width && parseInt(screen_width) !== presetObj.width) || (screen_height && parseInt(screen_height) !== presetObj.height)) {
-      profile = JSON.stringify({ preset: screen_profile, width, height });
+    if (
+      presetObj.parameterizedDimensions &&
+      ((screen_width && parseInt(screen_width) !== presetObj.width) || (screen_height && parseInt(screen_height) !== presetObj.height))
+    ) {
+      const candidate = { preset: screen_profile, width, height };
+      if (parseProfile(candidate)) {
+        profile = JSON.stringify(candidate);
+      } else {
+        width = presetObj.width;
+        height = presetObj.height;
+        profile = screen_profile;
+      }
     } else {
       profile = screen_profile;
     }

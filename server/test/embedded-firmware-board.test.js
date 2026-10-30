@@ -279,4 +279,47 @@ test('parameterizedDimensions: fixed-geometry e-paper presets are never affected
   // Sticky panel must report 800x480, NOT 1920x1080!
   assert.equal(infoData.screen_profile.width, 800);
   assert.equal(infoData.screen_profile.height, 480);
+
+  // 4. POST /pair/register only stores custom dimension JSON for parameterizedDimensions presets
+  const regFixedRes = await fetch(`${base}/pair/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ screen_profile: 'seeed-reterminal-sticky', screen_width: 640, screen_height: 400 }),
+  });
+  assert.equal(regFixedRes.status, 200);
+  const regFixed = await regFixedRes.json();
+  assert.equal(row(regFixed.device_id).screen_profile, 'seeed-reterminal-sticky');
+
+  // 5. POST /pair/register for seeed-xiao-led with oversized dimensions falls back safely to defaults
+  const regOversizedRes = await fetch(`${base}/pair/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ screen_profile: 'seeed-xiao-led', screen_width: 5000, screen_height: 5000 }),
+  });
+  assert.equal(regOversizedRes.status, 200);
+  const regOversized = await regOversizedRes.json();
+  assert.equal(row(regOversized.device_id).screen_profile, 'seeed-xiao-led');
+  assert.equal(row(regOversized.device_id).screen_width, 5);
+  assert.equal(row(regOversized.device_id).screen_height, 1);
+});
+
+test('security hardening: parseProfile dimension ceiling and toRGB888 buffer bounds', async () => {
+  const { parseProfile } = await import('../lib/embedded-profiles.js');
+  const { toRGB888 } = await import('../lib/embedded-postprocess.js');
+
+  // Valid LED dimensions within 512 edge / 16384 pixel ceiling
+  assert.ok(parseProfile({ preset: 'seeed-xiao-led', width: 64, height: 64 }));
+  assert.ok(parseProfile({ preset: 'seeed-xiao-led', width: 128, height: 64 }));
+  assert.ok(parseProfile({ preset: 'seeed-xiao-led', width: 512, height: 1 }));
+
+  // Rejects oversized LED dimensions (DoS protection)
+  assert.equal(parseProfile({ preset: 'seeed-xiao-led', width: 10000, height: 10000 }), null);
+  assert.equal(parseProfile({ preset: 'seeed-xiao-led', width: 513, height: 1 }), null);
+  assert.equal(parseProfile({ preset: 'seeed-xiao-led', width: 256, height: 128 }), null); // 32768 > 16384
+
+  // toRGB888 safely floors non-multiple-of-4 buffer lengths without leaking uninitialized memory
+  const oddRgba = Buffer.from([10, 20, 30, 255, 99, 88]);
+  const rgb = toRGB888(oddRgba);
+  assert.equal(rgb.length, 3);
+  assert.deepEqual([...rgb], [10, 20, 30]);
 });

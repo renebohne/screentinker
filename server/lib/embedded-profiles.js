@@ -222,6 +222,9 @@ function parseProfile(raw, overrides = {}) {
   let width  = Number.isInteger(obj.width)  && obj.width  > 0 && obj.width  <= 10000 ? obj.width  : null;
   let height = Number.isInteger(obj.height) && obj.height > 0 && obj.height <= 10000 ? obj.height : null;
   if (!width || !height) return null;
+  if (obj.parameterizedDimensions && (width > 512 || height > 512 || width * height > 16384)) {
+    return null;
+  }
 
   // A stated orientation wins; otherwise the profile's own `orientation` field, if it has one.
   const profileOrientation = VALID_ORIENTATIONS.has(obj.orientation) ? obj.orientation : null;
