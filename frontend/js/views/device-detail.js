@@ -857,10 +857,12 @@ async function loadDevice(deviceId, activeTab = null) {
           }
         }
       }
+      if (depth === 'rgb888') depth = '24bit-rgb888';
+      if (depth === 'mono') depth = '1bit';
       if (depth === '1bit') {
         if (preset.includes('e1002') || preset.includes('e1004')) depth = 'spectra6';
         else if (preset.includes('e1003')) depth = 'gray16';
-        else if (preset.includes('seeed-xiao-led') || preset.includes('rgb888')) depth = '24bit-rgb888';
+        else if (preset.includes('seeed-xiao-led') || preset.includes('rgb888') || preset.includes('xiao_led')) depth = '24bit-rgb888';
       }
       return { currentPreset: preset, currentColorDepth: depth, currentRefreshMode: refreshMode };
     })();
@@ -886,7 +888,7 @@ async function loadDevice(deviceId, activeTab = null) {
       if (currentColorDepth === 'spectra6') {
         return `<span class="device-status-badge" style="background:linear-gradient(90deg,#ef4444,#f59e0b,#10b981,#3b82f6,#8b5cf6);color:#fff;text-shadow:0 1px 2px rgba(0,0,0,0.6)" title="${t('device.color_mode.spectra6_tip')}">${t('device.color_mode.spectra6_badge')}</span>`;
       }
-      if (currentColorDepth === '24bit-rgb888') {
+      if (currentColorDepth === '24bit-rgb888' || currentColorDepth === 'rgb888') {
         return `<span class="device-status-badge" style="background:#059669;color:#fff" title="${t('device.color_mode.24bit_tip')}">${t('device.color_mode.24bit_badge')}</span>`;
       }
       return `<span class="device-status-badge" style="background:#6b7280;color:#fff" title="${t('device.color_mode.1bit_tip')}">${t('device.color_mode.1bit_badge')}</span>`;

@@ -250,11 +250,12 @@ function parseProfile(raw, overrides = {}) {
 
   const mcuTranspose = obj.mcuTranspose === true || (stated && MCU_TRANSPOSE_STATED.has(presetName));
 
+  const rawDepth = obj.colorDepth === 'rgb888' ? '24bit-rgb888' : (obj.colorDepth === 'mono' ? '1bit' : obj.colorDepth);
   const result = {
     width,
     height,
     rotation,
-    colorDepth:   VALID_COLOR_DEPTHS.has(obj.colorDepth)      ? obj.colorDepth   : (obj.defaultColorDepth || DEFAULTS.colorDepth),
+    colorDepth:   VALID_COLOR_DEPTHS.has(rawDepth)            ? rawDepth         : (obj.defaultColorDepth || DEFAULTS.colorDepth),
     dither:       VALID_DITHERS.has(obj.dither)               ? obj.dither       : DEFAULTS.dither,
     outputFormat: VALID_OUTPUT_FORMATS.has(obj.outputFormat)  ? obj.outputFormat : DEFAULTS.outputFormat,
   };
