@@ -122,6 +122,7 @@ const PRESETS = {
   // ── LED Strip (Seeed Studio XIAO LED Controller) ──────────────────────────────
   'seeed-xiao-led': {
     width: 5, height: 1, rotation: 0,
+    parameterizedDimensions: true,
     supportedColorModes: ['24bit-rgb888'],
     defaultColorDepth: '24bit-rgb888',
     colorDepth: '24bit-rgb888', dither: 'none', outputFormat: 'raw',

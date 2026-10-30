@@ -1068,12 +1068,14 @@ function deviceProfile(device, stated) {
   }
   if (typeof raw === 'object' && raw !== null && raw.preset) {
     const preset = getPreset(raw.preset);
-    if (preset && w > 0 && h > 0 && (!raw.width || !raw.height)) {
-      raw = { ...raw, width: w, height: h };
+    if (preset && preset.parameterizedDimensions && w > 0 && h > 0 && (!raw.width || !raw.height)) {
+      if (w !== preset.width || h !== preset.height) {
+        raw = { ...raw, width: w, height: h };
+      }
     }
   } else if (typeof raw === 'string' && getPreset(raw)) {
     const preset = getPreset(raw);
-    if (w > 0 && h > 0 && (w !== preset.width || h !== preset.height)) {
+    if (preset && preset.parameterizedDimensions && w > 0 && h > 0 && (w !== preset.width || h !== preset.height)) {
       raw = { preset: raw, width: w, height: h };
     }
   }

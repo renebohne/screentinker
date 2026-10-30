@@ -3081,10 +3081,11 @@ function setupActions(device) {
             existingProfileObj = { ...device.screen_profile };
           }
         } catch (_) {}
-        if ((!existingProfileObj.width || !existingProfileObj.height) && device.screen_width && device.screen_height) {
+        const isParamPreset = existingProfileObj.preset === 'seeed-xiao-led';
+        if (isParamPreset && (!existingProfileObj.width || !existingProfileObj.height) && device.screen_width && device.screen_height) {
           const w = parseInt(device.screen_width);
           const h = parseInt(device.screen_height);
-          if (w > 0 && h > 0) {
+          if (w > 0 && h > 0 && (w !== 5 || h !== 1)) {
             existingProfileObj.width = w;
             existingProfileObj.height = h;
           }

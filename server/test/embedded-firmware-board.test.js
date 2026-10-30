@@ -240,3 +240,43 @@ test('seeed-xiao-led end-to-end render with custom dimensions and dimension pres
   const afterBuf = Buffer.from(await afterUpdateRes.arrayBuffer());
   assert.equal(afterBuf.length, 64 * 64 * 3);
 });
+
+test('parameterizedDimensions: fixed-geometry e-paper presets are never affected by devices.screen_width/height', async () => {
+  const base = await h.ready();
+  const api = base.replace('/api/embedded', '/api/devices');
+
+  // 1. Device with Sticky preset and screen_width 800, screen_height 480
+  const p1 = await h.mkPanel('seeed-reterminal-sticky', { extra: { screen_width: 800, screen_height: 480, power_source: 'usb' } });
+
+  // Switching preset to waveshare-4.2in-v2 (400x300) does NOT copy Sticky's 800x480 dimensions
+  const updateRes1 = await fetch(`${api}/${p1.id}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${h.sessionToken()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ screen_profile: 'waveshare-4.2in-v2' }),
+  });
+  assert.equal(updateRes1.status, 200);
+  const row1 = row(p1.id);
+  assert.equal(row1.screen_profile, 'waveshare-4.2in-v2');
+
+  // 2. PUT with string preset seeed-reterminal-sticky stays a string
+  const p2 = await h.mkPanel('seeed-reterminal-sticky', { extra: { screen_width: 800, screen_height: 480, power_source: 'usb' } });
+  const updateRes2 = await fetch(`${api}/${p2.id}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${h.sessionToken()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ screen_profile: 'seeed-reterminal-sticky' }),
+  });
+  assert.equal(updateRes2.status, 200);
+  const row2 = row(p2.id);
+  assert.equal(row2.screen_profile, 'seeed-reterminal-sticky');
+
+  // 3. Legacy row with stale screen_width 1920x1080 and preset seeed-reterminal-sticky
+  const p3 = await h.mkPanel('seeed-reterminal-sticky', { extra: { screen_width: 1920, screen_height: 1080, power_source: 'usb' } });
+  const infoRes = await fetch(`${base}/info?device_id=${p3.id}`, {
+    headers: { Authorization: `Bearer ${p3.token}` },
+  });
+  assert.equal(infoRes.status, 200);
+  const infoData = await infoRes.json();
+  // Sticky panel must report 800x480, NOT 1920x1080!
+  assert.equal(infoData.screen_profile.width, 800);
+  assert.equal(infoData.screen_profile.height, 480);
+});
