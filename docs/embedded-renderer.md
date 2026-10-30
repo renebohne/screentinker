@@ -1,6 +1,6 @@
-# Embedded Renderer for Digital Signage (E-Paper & MCU Displays)
+# Embedded Renderer for Digital Signage (E-Paper, Smart LED Matrices & MCU Displays)
 
-ScreenTinker includes a dedicated server-side embedded renderer designed for lightweight microcontrollers (MCUs) such as the **ESP32-S3**, **Raspberry Pi Pico W**, the **Seeed Studio reTerminal Sticky** (3.97" B/W E-Paper 800×480 with SSD1677), and the **Seeed Studio reTerminal E-Series** (`E1001` 7.5" Mono, `E1002` 7.3" 6-Color Spectra 6, `E1003` 10.3" 16-Level Grayscale, `E1004` 13.3" 6-Color Spectra 6).
+ScreenTinker includes a dedicated server-side embedded renderer designed for lightweight microcontrollers (MCUs) such as the **ESP32-S3 / ESP32-C6 / ESP32-C3**, **Raspberry Pi Pico W**, the **Seeed Studio reTerminal Sticky** (3.97" B/W E-Paper 800×480 with SSD1677), the **Seeed Studio reTerminal E-Series** (`E1001` 7.5" Mono, `E1002` 7.3" 6-Color Spectra 6, `E1003` 10.3" 16-Level Grayscale, `E1004` 13.3" 6-Color Spectra 6), and the **Seeed Studio XIAO Smart LED Controller** (`seeed-xiao-led` driving WS2812B / SK6812 addressable RGB LED strips and 2D matrices).
 
 Instead of requiring the display hardware to run a full web browser or render HTML/CSS, the embedded system periodically makes an HTTP `GET` request to the ScreenTinker server and receives a **pre-rendered, pre-dithered binary image** formatted specifically for its display panel.
 
@@ -252,6 +252,8 @@ Rate-limited and protected by `pairLockout`.
 ```
 `screen_width` / `screen_height` default to the preset's. When `screen_profile` is a preset key, it is also recorded as the board the hardware reports (`devices.reported_board`): the firmware sends the preset it was built for, while `screen_profile` stays an editable setting.
 
+For presets that declare `parameterizedDimensions: true` (`seeed-xiao-led`), passing custom `screen_width` and `screen_height` during registration (within valid bounds: `1..512` per edge and `width * height <= 16384`) automatically stores `{"preset":"seeed-xiao-led","width":W,"height":H}` in `devices.screen_profile` so the device's runtime LED matrix geometry is preserved across subsequent renders and dashboard settings updates. Fixed-geometry e-paper presets always keep their native panel resolution.
+
 #### Response (`200 OK`)
 ```json
 {
@@ -377,6 +379,7 @@ A device's screen configuration is stored in the `devices.screen_profile` JSON c
 |---|---|---|---|
 | `width` | `number` | Positive integer (e.g. `800`) | Logical pixel width |
 | `height` | `number` | Positive integer (e.g. `480`) | Logical pixel height |
+| `parameterizedDimensions` | `boolean` | `true` | Marks presets with user-configurable runtime dimensions (`seeed-xiao-led`); enforces `width <= 512`, `height <= 512`, and `width * height <= 16384` |
 | `orientation` | `string` | `landscape`, `portrait`, `landscape-flipped`, `portrait-flipped` | Composition orientation: swaps `width`/`height` when they disagree with it |
 | `rotation` | `number` | `0`, `90`, `180`, `270` | Mounting rotation in degrees. A profile's own `rotation` wins over its own `orientation` |
 | `mcuTranspose` | `boolean` | `true` | The panel transposes portrait frames itself (see [Orientation and rotation](#orientation-and-rotation)). Set on the E1001-E1004 presets |
@@ -397,6 +400,7 @@ A device's screen configuration is stored in the `devices.screen_profile` JSON c
 - **`bmp`**: Standard 1-bit Windows BMP (Bitmap DIB v3) with 2-color palette (Black / White).
 - **`png` & `jpeg`**: Rendered raster images with dithering applied (ideal for browser previewing and debugging).
 - **`16bit-rgb565`**: 2 bytes per pixel (Little-Endian R5G6B5) for SPI TFT displays (ILI9341, ST7789).
+- **`24bit-rgb888` (`raw`)**: 3 bytes per pixel (`R, G, B` in logical row-major top-left order, no header, `width * height * 3` bytes) for addressable smart RGB LED strips and 2D matrices (`seeed-xiao-led`). Dithering is bypassed (`dither: 'none'`) to preserve crisp pixel art and color gradients. Requesting `?format=jpeg` or `?format=jpg` on a `24bit-rgb888` device encodes the rendered frame as `image/jpeg` for dashboard live previews.
 
 ---
 
@@ -466,11 +470,26 @@ How the final binary buffer is oriented depends on whether the device uses **MCU
 | `generic-320x240-rgb565` | 320 | 240 | `16bit-rgb565` | `raw` | - | Standard 2.4"/2.8" SPI TFT |
 | `generic-128x64-1bit` | 128 | 64 | `1bit` | `raw` | - | SSD1306 0.96" OLED |
 
+### 5.1 Smart RGB LED Strip & Matrix Mode (`seeed-xiao-led`)
+
+The `seeed-xiao-led` preset turns ScreenTinker into a pixel-art, ticker, and ambient signage server for **Seeed Studio XIAO ESP32-C6 / ESP32-S3 / ESP32-C3** microcontrollers paired with the **Seeed Studio LED Driver Board for XIAO** (SKU 105100021, 5V level-shifted `WS2812B` / `SK6812` output):
+
+- **Parametric Matrix Dimensions (`parameterizedDimensions: true`)**:
+  - Defaults to `5×1` (5-LED ambient strip), but supports any runtime strip or 2D matrix resolution configured on the MCU (e.g. `32×8` LED banner, `16×16` grid, `64×64` or `128×64` matrix wall) up to **`512` pixels per edge** and **`16,384` total pixels** (48 KB raw RGB888 payload).
+  - During `POST /api/embedded/pair/register`, the MCU sends its configured `screen_width` and `screen_height` from NVS (`led_driver_get_matrix_config()`). The server persists `{"preset":"seeed-xiao-led","width":W,"height":H}` in `devices.screen_profile`.
+  - Updating orientation or other settings via `PUT /api/devices/:id` in the dashboard automatically preserves the device's custom `width` and `height`.
+- **Wire Protocol & Coordinate Mapping**:
+  - `GET /api/embedded/render` returns `Content-Type: application/octet-stream` (`X-ST-Color-Mode: 24bit-rgb888`) containing `width * height * 3` raw RGB888 bytes (`[R0, G0, B0, R1, G1, B1, ...]`) ordered in standard **top-left, row-major** raster sequence.
+  - Physical LED wiring topology—**Serpentine** (zig-zag) vs. **Progressive** (linear), **Row-Major** vs. **Column-Major** scanning axis, and **Origin Corner** (`TOP_LEFT`, `TOP_RIGHT`, `BOTTOM_LEFT`, `BOTTOM_RIGHT`)—is translated on the MCU at display-refresh time (`led_matrix_map.h`), keeping the server's render cache independent of physical panel wiring.
+- **Dashboard Controls**:
+  - Displays a **`24-Bit RGB`** color mode badge and automatically hides the E-Paper dithering selector (`#epdDither`), since LEDs render full 24-bit color without monochrome quantization.
+  - Supports live browser previews via `?format=jpeg` (`image/jpeg`).
+
 ---
 
 ## 6. Reference ESP32 Firmware Implementation (C++ / Arduino)
 
-For the complete production firmware supporting the **Seeed Studio reTerminal Sticky & E-Series (`E1001`–`E1004`)**—including Captive Portal Wi-Fi onboarding, 6-digit PIN pairing, PSRAM frame caching, IMU auto-rotation, SHT40 telemetry, dual-partition OTA rollback, and a native SDL2 desktop simulator—see the **[`screentinker_mcu`](https://github.com/renebohne/screentinker_mcu)** repository.
+For the complete production firmware supporting the **Seeed Studio reTerminal Sticky & E-Series (`E1001`–`E1004`)** and **Seeed Studio XIAO Smart LED Controllers (`ESP32-C6` / `ESP32-S3` / `ESP32-C3`)**—including the [1-Click Universal Browser Web Flasher](https://www.rene-bohne.de/screentinker_mcu/tools/), Captive Portal Wi-Fi onboarding, 6-digit PIN pairing, dynamic LED matrix serpentine/progressive coordinate mapping, PSRAM frame caching, IMU auto-rotation, SHT40 telemetry, dual-partition OTA rollback, and a native SDL2 desktop simulator—see the **[`screentinker_mcu`](https://github.com/renebohne/screentinker_mcu)** repository.
 
 Below is a minimal standalone reference sketch illustrating the core HTTP polling and ETag sleep loop:
 
