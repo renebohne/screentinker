@@ -63,6 +63,22 @@ test('pairing records the preset the firmware registered with as the panel\'s re
   // No profile sent: the server's Sticky default is not something the hardware said.
   const res2 = await fetch(`${base}/pair/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   assert.equal(row((await res2.json()).device_id).reported_board, null);
+
+  // seeed-xiao-led with custom dimensions: preserves custom dimensions in screen_profile JSON
+  const res3 = await fetch(`${base}/pair/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ screen_profile: 'seeed-xiao-led', screen_width: 64, screen_height: 64 }),
+  });
+  assert.equal(res3.status, 200);
+  const r3 = row((await res3.json()).device_id);
+  assert.equal(r3.reported_board, 'seeed_xiao_led');
+  assert.equal(r3.screen_width, 64);
+  assert.equal(r3.screen_height, 64);
+  const parsedProfile = JSON.parse(r3.screen_profile);
+  assert.equal(parsedProfile.preset, 'seeed-xiao-led');
+  assert.equal(parsedProfile.width, 64);
+  assert.equal(parsedProfile.height, 64);
 });
 
 test('a panel this server has no firmware for is refused when update is queued, with the reason', async () => {

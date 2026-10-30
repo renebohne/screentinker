@@ -457,6 +457,7 @@ How the final binary buffer is oriented depends on whether the device uses **MCU
 | `seeed-reterminal-e1002` | 800 | 480 | `spectra6` | `x-epd-spectra6` | No (min 30s) | Seeed Studio reTerminal E1002 (7.3" 6-Color Spectra 6) |
 | `seeed-reterminal-e1003` | 1872 | 1404 | `gray16` | `x-epd-gray16` | Yes (180ms) | Seeed Studio reTerminal E1003 (10.3" Gray16, touch) |
 | `seeed-reterminal-e1004` | 1200 | 1600 | `spectra6` | `x-epd-spectra6` | No (min 60s) | Seeed Studio reTerminal E1004 (13.3" 6-Color Spectra 6) |
+| `seeed-xiao-led` | 5 (param.) | 1 (param.) | `24bit-rgb888` | `raw` | Yes (50ms) | Seeed Studio XIAO LED Controller (WS2812B/SK6812 strip/matrix) |
 | `waveshare-7.5in-v2` | 800 | 480 | `1bit` | `x-epd-packed` | - | Waveshare 7.5" e-Paper |
 | `waveshare-4.2in-v2` | 400 | 300 | `1bit` | `x-epd-packed` | - | Waveshare 4.2" e-Paper |
 | `waveshare-2.9in-v2` | 296 | 128 | `1bit` | `x-epd-packed` | - | Waveshare 2.9" e-Paper |
