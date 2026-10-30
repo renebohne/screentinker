@@ -282,7 +282,9 @@ function parseProfile(raw, overrides = {}) {
 
   const mcuTranspose = obj.mcuTranspose === true || (stated && MCU_TRANSPOSE_STATED.has(presetName));
 
-  const rawDepth = obj.colorDepth === 'rgb888' ? '24bit-rgb888' : (obj.colorDepth === 'mono' ? '1bit' : obj.colorDepth);
+  const rawDepth = obj.colorDepth === 'rgb888' ? '24bit-rgb888' :
+                   obj.colorDepth === 'rgb565' ? '16bit-rgb565' :
+                   (obj.colorDepth === 'mono' ? '1bit' : obj.colorDepth);
   const result = {
     width,
     height,

@@ -882,6 +882,7 @@ async function loadDevice(deviceId, activeTab = null) {
         }
       }
       if (depth === 'rgb888') depth = '24bit-rgb888';
+      if (depth === 'rgb565') depth = '16bit-rgb565';
       if (depth === 'mono') depth = '1bit';
       if (depth === '1bit') {
         if (preset.includes('e1002') || preset.includes('e1004')) depth = 'spectra6';
@@ -893,13 +894,14 @@ async function loadDevice(deviceId, activeTab = null) {
     })();
 
     const currentDither = (() => {
-      if (!device.screen_profile) return currentColorDepth === '24bit-rgb888' ? 'none' : 'floyd-steinberg';
-      if (typeof device.screen_profile === 'object') return device.screen_profile.dither || (currentColorDepth === '24bit-rgb888' ? 'none' : 'floyd-steinberg');
+      const isDirectColor = (currentColorDepth === '24bit-rgb888' || currentColorDepth === '16bit-rgb565');
+      if (!device.screen_profile) return isDirectColor ? 'none' : 'floyd-steinberg';
+      if (typeof device.screen_profile === 'object') return device.screen_profile.dither || (isDirectColor ? 'none' : 'floyd-steinberg');
       try {
         const p = JSON.parse(device.screen_profile);
         if (p && p.dither) return p.dither;
       } catch (_) {}
-      return currentColorDepth === '24bit-rgb888' ? 'none' : 'floyd-steinberg';
+      return isDirectColor ? 'none' : 'floyd-steinberg';
     })();
 
     const colorModeBadgeHtml = () => {
