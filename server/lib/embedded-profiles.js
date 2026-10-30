@@ -101,6 +101,16 @@ const PRESETS = {
     width: 600, height: 448, rotation: 0,
     colorDepth: '24bit-rgb888', dither: 'none', outputFormat: 'png',
   },
+  // ── Elecrow CrowPanel Series ──────────────────────────────────────────────────
+  'elecrow-crowpanel-43': {
+    width: 480, height: 272, rotation: 0,
+    supportedColorModes: ['16bit-rgb565'],
+    defaultColorDepth: '16bit-rgb565',
+    colorDepth: '16bit-rgb565', dither: 'none', outputFormat: 'raw',
+    supportsPartialRefresh: false, minRefreshInterval: 1,
+    fullRefreshDurationMs: 20, partialRefreshDurationMs: 20,
+    touchSupported: true, touchController: 'XPT2046',
+  },
   // ── TFT / ILI9341 class ───────────────────────────────────────────────────────
   'generic-320x240-rgb565': {
     width: 320, height: 240, rotation: 0,

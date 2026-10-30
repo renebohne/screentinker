@@ -887,6 +887,7 @@ async function loadDevice(deviceId, activeTab = null) {
         if (preset.includes('e1002') || preset.includes('e1004')) depth = 'spectra6';
         else if (preset.includes('e1003')) depth = 'gray16';
         else if (preset.includes('seeed-xiao-led') || preset.includes('rgb888') || preset.includes('xiao_led')) depth = '24bit-rgb888';
+        else if (preset.includes('crowpanel') || preset.includes('rgb565')) depth = '16bit-rgb565';
       }
       return { currentPreset: preset, currentColorDepth: depth, currentRefreshMode: refreshMode };
     })();
@@ -914,6 +915,9 @@ async function loadDevice(deviceId, activeTab = null) {
       }
       if (currentColorDepth === '24bit-rgb888' || currentColorDepth === 'rgb888') {
         return `<span class="device-status-badge" style="background:#059669;color:#fff" title="${t('device.color_mode.24bit_tip')}">${t('device.color_mode.24bit_badge')}</span>`;
+      }
+      if (currentColorDepth === '16bit-rgb565' || currentColorDepth === 'rgb565') {
+        return `<span class="device-status-badge" style="background:#0284c7;color:#fff" title="${t('device.color_mode.16bit_tip')}">${t('device.color_mode.16bit_badge')}</span>`;
       }
       return `<span class="device-status-badge" style="background:#6b7280;color:#fff" title="${t('device.color_mode.1bit_tip')}">${t('device.color_mode.1bit_badge')}</span>`;
     };
@@ -1541,7 +1545,7 @@ async function loadDevice(deviceId, activeTab = null) {
               </select>
               <div style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('device.form.refresh_mode_hint')}</div>
             </div>` : ''}
-            ${currentColorDepth !== '24bit-rgb888' ? `
+            ${(currentColorDepth !== '24bit-rgb888' && currentColorDepth !== '16bit-rgb565') ? `
             <div class="form-group">
               <label>${t('device.form.dither_label')}</label>
               <select id="epdDither" class="input" style="background:var(--bg-input)">
