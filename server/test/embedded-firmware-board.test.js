@@ -38,6 +38,8 @@ const h = require('./helpers/embedded-real-db').boot({
 });
 const queue = require('../lib/command-queue');
 const otaBreaker = require('../lib/ota-breaker');
+const { Jimp } = require('jimp');
+const { toRGB888, postprocess } = require('../lib/embedded-postprocess');
 
 after(async () => { queue._resetForTests(); await h.close(); fs.rmSync(fwRoot, { recursive: true, force: true }); });
 
@@ -134,4 +136,107 @@ test('a board stated per poll (X-ST-Preset) is checked and remembered', async ()
   assert.equal(r.body.firmware.board_verified, true);
   const res = await poll(base, p, { 'X-ST-Preset': 'seeed-reterminal-e1001' });
   assert.equal(res.headers.get('x-st-command'), `update /api/embedded/firmware/seeed_reterminal_e1001/latest.bin ${FW_SHA}`);
+});
+
+test('toRGB888 packs RGBA to exact 24-bit [R, G, B] order and correct length', () => {
+  const rgba = Buffer.from([
+    255, 0, 0, 255,     // Red
+    0, 255, 0, 255,     // Green
+    0, 0, 255, 255,     // Blue
+    128, 64, 32, 255,   // Custom
+  ]);
+  const packed = toRGB888(rgba);
+  assert.equal(packed.length, 12);
+  assert.deepEqual(Array.from(packed), [
+    255, 0, 0,
+    0, 255, 0,
+    0, 0, 255,
+    128, 64, 32,
+  ]);
+});
+
+test('postprocess() handles 24bit-rgb888: raw RGB888 and format=jpeg override', async () => {
+  const img = new Jimp({ width: 4, height: 2, color: 0xFF0000FF });
+  const png = await img.getBuffer('image/png');
+
+  // Raw RGB888 output
+  const rawRes = await postprocess(png, {
+    width: 4,
+    height: 2,
+    colorDepth: '24bit-rgb888',
+    outputFormat: 'raw',
+  });
+  assert.equal(rawRes.contentType, 'application/octet-stream');
+  assert.equal(rawRes.buffer.length, 4 * 2 * 3); // 24 bytes
+
+  // JPEG format override output
+  const jpegRes = await postprocess(png, {
+    width: 4,
+    height: 2,
+    colorDepth: '24bit-rgb888',
+    outputFormat: 'jpeg',
+  });
+  assert.equal(jpegRes.contentType, 'image/jpeg');
+  assert.equal(jpegRes.buffer[0], 0xFF);
+  assert.equal(jpegRes.buffer[1], 0xD8);
+  assert.equal(jpegRes.buffer[2], 0xFF);
+});
+
+test('seeed-xiao-led end-to-end render with custom dimensions and dimension preservation', async () => {
+  const base = await h.ready();
+  // Register or create panel with seeed-xiao-led and custom 64x64 dimensions
+  const p = await h.mkPanel('seeed-xiao-led', { extra: { screen_width: 64, screen_height: 64, power_source: 'usb' } });
+
+  // 1. Initial render -> 64x64 raw RGB888 (12,288 bytes)
+  const res = await fetch(`${base}/render?device_id=${p.id}`, {
+    headers: { Authorization: `Bearer ${p.token}` },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'application/octet-stream');
+  assert.equal(res.headers.get('x-st-color-mode'), '24bit-rgb888');
+  const buf = Buffer.from(await res.arrayBuffer());
+  assert.equal(buf.length, 64 * 64 * 3); // 12,288 bytes
+
+  // 2. Format override ?format=jpeg returns real JPEG bytes and image/jpeg Content-Type
+  const jpegRes = await fetch(`${base}/render?device_id=${p.id}&format=jpeg`, {
+    headers: { Authorization: `Bearer ${p.token}` },
+  });
+  assert.equal(jpegRes.status, 200);
+  assert.equal(jpegRes.headers.get('content-type'), 'image/jpeg');
+  const jpegBuf = Buffer.from(await jpegRes.arrayBuffer());
+  assert.equal(jpegBuf[0], 0xFF);
+  assert.equal(jpegBuf[1], 0xD8);
+  assert.equal(jpegBuf[2], 0xFF);
+
+  // 3. Cache hit for ?format=jpeg also serves JPEG bytes and image/jpeg
+  const cachedJpegRes = await fetch(`${base}/render?device_id=${p.id}&format=jpeg`, {
+    headers: { Authorization: `Bearer ${p.token}` },
+  });
+  assert.equal(cachedJpegRes.status, 200);
+  assert.equal(cachedJpegRes.headers.get('content-type'), 'image/jpeg');
+  const cachedBuf = Buffer.from(await cachedJpegRes.arrayBuffer());
+  assert.equal(cachedBuf[0], 0xFF);
+  assert.equal(cachedBuf[1], 0xD8);
+  assert.equal(cachedBuf[2], 0xFF);
+
+  // 4. PUT /api/devices/:id updating orientation preserves 64x64 dimensions in screen_profile
+  const api = base.replace('/api/embedded', '/api/devices');
+  const updateRes = await fetch(`${api}/${p.id}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${h.sessionToken()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orientation: 'portrait' }),
+  });
+  assert.equal(updateRes.status, 200);
+  const updatedDev = row(p.id);
+  const prof = typeof updatedDev.screen_profile === 'string' ? JSON.parse(updatedDev.screen_profile) : updatedDev.screen_profile;
+  assert.equal(prof.width, 64);
+  assert.equal(prof.height, 64);
+
+  // 5. Subsequent render still uses 64x64 (12,288 bytes)
+  const afterUpdateRes = await fetch(`${base}/render?device_id=${p.id}`, {
+    headers: { Authorization: `Bearer ${p.token}` },
+  });
+  assert.equal(afterUpdateRes.status, 200);
+  const afterBuf = Buffer.from(await afterUpdateRes.arrayBuffer());
+  assert.equal(afterBuf.length, 64 * 64 * 3);
 });

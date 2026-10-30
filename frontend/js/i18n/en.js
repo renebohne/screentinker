@@ -2766,6 +2766,8 @@ export default {
   'device.color_mode.gray16_tip': '16-Level Grayscale',
   'device.color_mode.spectra6_badge': 'Spectra 6 Color',
   'device.color_mode.spectra6_tip': 'Spectra 6 Color',
+  'device.color_mode.24bit_badge': '24-Bit RGB',
+  'device.color_mode.24bit_tip': '24-Bit RGB (True Color)',
   'device.form.color_mode_label': 'Color Mode',
   'device.form.color_mode_1bit': '1-Bit Monochrome (Fast Refresh, 48 KB)',
   'device.form.color_mode_gray4': '4-Level Grayscale (Smooth Gradients, 96 KB)',

@@ -1058,10 +1058,21 @@ function applyFormatOverride(req, profile) {
 
 function deviceProfile(device, stated) {
   let raw = device.screen_profile;
-  if (typeof raw === 'string' && getPreset(raw)) {
+  const w = parseInt(device.screen_width);
+  const h = parseInt(device.screen_height);
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === 'object' && parsed !== null) raw = parsed;
+    } catch (_) {}
+  }
+  if (typeof raw === 'object' && raw !== null && raw.preset) {
+    const preset = getPreset(raw.preset);
+    if (preset && w > 0 && h > 0 && (!raw.width || !raw.height)) {
+      raw = { ...raw, width: w, height: h };
+    }
+  } else if (typeof raw === 'string' && getPreset(raw)) {
     const preset = getPreset(raw);
-    const w = parseInt(device.screen_width);
-    const h = parseInt(device.screen_height);
     if (w > 0 && h > 0 && (w !== preset.width || h !== preset.height)) {
       raw = { preset: raw, width: w, height: h };
     }

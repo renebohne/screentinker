@@ -835,16 +835,6 @@ async function loadDevice(deviceId, activeTab = null) {
     const latestTelemetry = device.telemetry?.[0] || {};
     const diagWidget = (device.assignments || []).find(a => a && a.widget_type === 'diag-smoothness');
 
-    const currentDither = (() => {
-      if (!device.screen_profile) return 'floyd-steinberg';
-      if (typeof device.screen_profile === 'object') return device.screen_profile.dither || 'floyd-steinberg';
-      try {
-        const p = JSON.parse(device.screen_profile);
-        if (p && p.dither) return p.dither;
-      } catch (_) {}
-      return 'floyd-steinberg';
-    })();
-
     const { currentPreset, currentColorDepth, currentRefreshMode } = (() => {
       let preset = 'seeed-reterminal-sticky';
       let depth = '1bit';
@@ -870,8 +860,19 @@ async function loadDevice(deviceId, activeTab = null) {
       if (depth === '1bit') {
         if (preset.includes('e1002') || preset.includes('e1004')) depth = 'spectra6';
         else if (preset.includes('e1003')) depth = 'gray16';
+        else if (preset.includes('seeed-xiao-led') || preset.includes('rgb888')) depth = '24bit-rgb888';
       }
       return { currentPreset: preset, currentColorDepth: depth, currentRefreshMode: refreshMode };
+    })();
+
+    const currentDither = (() => {
+      if (!device.screen_profile) return currentColorDepth === '24bit-rgb888' ? 'none' : 'floyd-steinberg';
+      if (typeof device.screen_profile === 'object') return device.screen_profile.dither || (currentColorDepth === '24bit-rgb888' ? 'none' : 'floyd-steinberg');
+      try {
+        const p = JSON.parse(device.screen_profile);
+        if (p && p.dither) return p.dither;
+      } catch (_) {}
+      return currentColorDepth === '24bit-rgb888' ? 'none' : 'floyd-steinberg';
     })();
 
     const colorModeBadgeHtml = () => {
@@ -884,6 +885,9 @@ async function loadDevice(deviceId, activeTab = null) {
       }
       if (currentColorDepth === 'spectra6') {
         return `<span class="device-status-badge" style="background:linear-gradient(90deg,#ef4444,#f59e0b,#10b981,#3b82f6,#8b5cf6);color:#fff;text-shadow:0 1px 2px rgba(0,0,0,0.6)" title="${t('device.color_mode.spectra6_tip')}">${t('device.color_mode.spectra6_badge')}</span>`;
+      }
+      if (currentColorDepth === '24bit-rgb888') {
+        return `<span class="device-status-badge" style="background:#059669;color:#fff" title="${t('device.color_mode.24bit_tip')}">${t('device.color_mode.24bit_badge')}</span>`;
       }
       return `<span class="device-status-badge" style="background:#6b7280;color:#fff" title="${t('device.color_mode.1bit_tip')}">${t('device.color_mode.1bit_badge')}</span>`;
     };
@@ -1510,6 +1514,7 @@ async function loadDevice(deviceId, activeTab = null) {
               </select>
               <div style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('device.form.refresh_mode_hint')}</div>
             </div>` : ''}
+            ${currentColorDepth !== '24bit-rgb888' ? `
             <div class="form-group">
               <label>${t('device.form.dither_label')}</label>
               <select id="epdDither" class="input" style="background:var(--bg-input)">
@@ -1518,7 +1523,7 @@ async function loadDevice(deviceId, activeTab = null) {
                 <option value="none" ${currentDither === 'none' ? 'selected' : ''}>${t('device.form.dither_none')}</option>
               </select>
               <div style="font-size:12px;color:var(--text-muted);margin-top:4px">${t('device.form.dither_hint')}</div>
-            </div>
+            </div>` : ''}
             ` : ''}
             <div class="form-group">
             <label>${t('device.form.tags_label')}</label>
@@ -3076,6 +3081,14 @@ function setupActions(device) {
             existingProfileObj = { ...device.screen_profile };
           }
         } catch (_) {}
+        if ((!existingProfileObj.width || !existingProfileObj.height) && device.screen_width && device.screen_height) {
+          const w = parseInt(device.screen_width);
+          const h = parseInt(device.screen_height);
+          if (w > 0 && h > 0) {
+            existingProfileObj.width = w;
+            existingProfileObj.height = h;
+          }
+        }
         const shouldWriteOrientation = orientationChanged || Boolean(existingProfileObj.orientation);
         // ⚠️ No colorDepth/refreshMode/dither defaults here: this runs for EVERY embedded screen
         // (anything with an orientation field), and a default would override the preset's own value

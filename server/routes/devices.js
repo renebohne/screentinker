@@ -901,6 +901,12 @@ router.put('/:id', (req, res) => {
 
     if (screen_profile === undefined && orientationActuallyChanged) {
       existingProfileObj.orientation = orientation;
+      const w = parseInt(device.screen_width);
+      const h = parseInt(device.screen_height);
+      if (existingProfileObj.preset && (!existingProfileObj.width || !existingProfileObj.height) && w > 0 && h > 0) {
+        existingProfileObj.width = w;
+        existingProfileObj.height = h;
+      }
       const { parseProfile } = require('../lib/embedded-profiles');
       if (parseProfile(existingProfileObj)) {
         updates.push('screen_profile = ?');
@@ -933,12 +939,19 @@ router.put('/:id', (req, res) => {
         profileObj.orientation = orientation;
       }
 
+      const w = parseInt(device.screen_width);
+      const h = parseInt(device.screen_height);
+      if (profileObj && profileObj.preset && (!profileObj.width || !profileObj.height) && w > 0 && h > 0) {
+        profileObj.width = w;
+        profileObj.height = h;
+      }
+
       const { parseProfile } = require('../lib/embedded-profiles');
       const parsed = parseProfile(profileObj || screen_profile);
       if (!parsed) {
         return res.status(400).json({ error: 'Invalid screen_profile' });
       }
-      profileVal = (profileObj && (profileObj.orientation || typeof screen_profile === 'object'))
+      profileVal = (profileObj && (profileObj.orientation || typeof screen_profile === 'object' || profileObj.width || profileObj.height))
         ? JSON.stringify(profileObj)
         : String(screen_profile);
     }

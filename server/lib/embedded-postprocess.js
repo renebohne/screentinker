@@ -464,6 +464,10 @@ async function postprocess(pngBuffer, profile) {
     if (outputFormat === 'raw') {
       return { buffer: toRGB888(rgba), contentType: 'application/octet-stream', width: w, height: h2 };
     }
+    if (outputFormat === 'jpeg' || outputFormat === 'jpg') {
+      const buf = await img.getBuffer('image/jpeg');
+      return { buffer: buf, contentType: 'image/jpeg', width: w, height: h2 };
+    }
     const buf = await img.getBuffer('image/png');
     return { buffer: buf, contentType: 'image/png', width: w, height: h2 };
   }
@@ -584,4 +588,4 @@ async function encodeColour(pngBuffer, { width, height, format = 'jpeg', quality
   return { buffer: await img.getBuffer('image/jpeg', { quality: q }), contentType: 'image/jpeg' };
 }
 
-module.exports = { postprocess, encodeColour, UnpackableWidthError, packGray4 };
+module.exports = { postprocess, encodeColour, UnpackableWidthError, packGray4, toRGB888 };
